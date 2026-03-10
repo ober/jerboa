@@ -24,22 +24,22 @@ Gerbil has ~438 `:std/*` modules. Jerboa currently implements 51. This document 
 
 | Library | Wraps | Jerboa Modules |
 |---------|-------|---------------|
-| chez-ssl | OpenSSL TLS/TCP | `(std net ssl)` |
-| chez-https | HTTP client+server | `(std net request)`, `(std net httpd)` |
-| chez-zlib | zlib compression | `(std compress zlib)` |
-| chez-pcre2 | PCRE2 regex | `(std pcre2)` |
-| chez-yaml | YAML parser | `(std text yaml)` |
-| chez-leveldb | LevelDB | `(std db leveldb)` |
+| [chez-ssl](https://github.com/ober/chez-ssl) | OpenSSL TLS/TCP | `(std net ssl)` |
+| [chez-https](https://github.com/ober/chez-https) | HTTP client+server | `(std net request)`, `(std net httpd)` |
+| [chez-zlib](https://github.com/ober/chez-zlib) | zlib compression | `(std compress zlib)` |
+| [chez-pcre2](https://github.com/ober/chez-pcre2) | PCRE2 regex | `(std pcre2)` |
+| [chez-yaml](https://github.com/ober/chez-yaml) | YAML parser | `(std text yaml)` |
+| [chez-leveldb](https://github.com/ober/chez-leveldb) | LevelDB | `(std db leveldb)` |
 
 ### Completed (New)
 
 | Library | Wraps | Jerboa Modules | Status |
 |---------|-------|---------------|--------|
-| chez-epoll | Linux epoll | `(std os epoll)` | Done |
-| chez-inotify | Linux inotify | `(std os inotify)` | Done |
-| chez-crypto | OpenSSL EVP | `(std crypto cipher)`, `(std crypto hmac)`, `(std crypto pkey)`, `(std crypto kdf)`, `(std crypto etc)` | Done |
-| chez-sqlite | SQLite3 | `(std db sqlite)` | Done |
-| chez-postgresql | libpq | `(std db postgresql)` | Done |
+| [chez-epoll](https://github.com/ober/chez-epoll) | Linux epoll | `(std os epoll)` | Done |
+| [chez-inotify](https://github.com/ober/chez-inotify) | Linux inotify | `(std os inotify)` | Done |
+| [chez-crypto](https://github.com/ober/chez-crypto) | OpenSSL EVP | `(std crypto cipher)`, `(std crypto hmac)`, `(std crypto pkey)`, `(std crypto kdf)`, `(std crypto etc)` | Done |
+| [chez-sqlite](https://github.com/ober/chez-sqlite) | SQLite3 | `(std db sqlite)` | Done |
+| [chez-postgresql](https://github.com/ober/chez-postgresql) | libpq | `(std db postgresql)` | Done |
 
 ## Pure Scheme Modules (No External Deps)
 

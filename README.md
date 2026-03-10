@@ -111,13 +111,18 @@ scheme --libdirs lib --script your-file.ss
 ### External Library Wrappers (require [chez-*](https://github.com/ober) libraries)
 | Module | Wraps | Provides |
 |--------|-------|----------|
-| `(std net request)` | chez-https | `http-get`, `http-post`, `http-put`, `http-delete`, `url-encode` |
-| `(std net httpd)` | chez-httpd | `httpd-start`, `httpd-route`, `http-respond-json`, etc. |
-| `(std net ssl)` | chez-ssl | `ssl-connect`, `tcp-connect`, `tcp-listen`, TLS/TCP networking |
-| `(std compress zlib)` | chez-zlib | `gzip-bytevector`, `gunzip-bytevector`, `deflate-bytevector` |
-| `(std text yaml)` | chez-yaml | `yaml-load`, `yaml-dump`, `yaml-load-string`, `yaml-dump-string` |
-| `(std db leveldb)` | chez-leveldb | `leveldb-open`, `leveldb-put`, `leveldb-get`, iterators, batches |
-| `(std pcre2)` | chez-pcre2 | `pcre2-compile`, `pcre2-search`, `pcre2-replace`, JIT regex |
+| `(std net request)` | [chez-https](https://github.com/ober/chez-https) | `http-get`, `http-post`, `http-put`, `http-delete`, `url-encode` |
+| `(std net httpd)` | [chez-https](https://github.com/ober/chez-https) | `httpd-start`, `httpd-route`, `http-respond-json`, etc. |
+| `(std net ssl)` | [chez-ssl](https://github.com/ober/chez-ssl) | `ssl-connect`, `tcp-connect`, `tcp-listen`, TLS/TCP networking |
+| `(std compress zlib)` | [chez-zlib](https://github.com/ober/chez-zlib) | `gzip-bytevector`, `gunzip-bytevector`, `deflate-bytevector` |
+| `(std text yaml)` | [chez-yaml](https://github.com/ober/chez-yaml) | `yaml-load`, `yaml-dump`, `yaml-load-string`, `yaml-dump-string` |
+| `(std db leveldb)` | [chez-leveldb](https://github.com/ober/chez-leveldb) | `leveldb-open`, `leveldb-put`, `leveldb-get`, iterators, batches |
+| `(std db sqlite)` | [chez-sqlite](https://github.com/ober/chez-sqlite) | `sqlite-open`, `sqlite-query`, `sqlite-eval`, prepared statements |
+| `(std db postgresql)` | [chez-postgresql](https://github.com/ober/chez-postgresql) | `pg-connect`, `pg-query`, `pg-eval`, parameterized queries |
+| `(std pcre2)` | [chez-pcre2](https://github.com/ober/chez-pcre2) | `pcre2-compile`, `pcre2-search`, `pcre2-replace`, JIT regex |
+| `(std os epoll)` | [chez-epoll](https://github.com/ober/chez-epoll) | `epoll-create`, `epoll-add!`, `epoll-wait`, edge-triggered I/O |
+| `(std os inotify)` | [chez-inotify](https://github.com/ober/chez-inotify) | `inotify-init`, `inotify-add-watch!`, `inotify-read-events` |
+| `(std crypto *)` | [chez-crypto](https://github.com/ober/chez-crypto) | `sha256`, `hmac-sha256`, `aes-encrypt`, `rsa-sign`, key derivation |
 
 ### FFI (`(jerboa ffi)`)
 - `c-lambda` → `foreign-procedure` with automatic type translation
@@ -151,7 +156,7 @@ Runs 289 tests across reader, core macros, runtime, standard library, FFI, modul
 ## Requirements
 
 - [Chez Scheme](https://cisco.github.io/ChezScheme/) 10.x (stock, unmodified)
-- Optional: [chez-*](https://github.com/ober) libraries for networking, compression, PCRE2, YAML, LevelDB
+- Optional: [chez-*](https://github.com/ober) libraries for networking, compression, PCRE2, YAML, LevelDB, SQLite, PostgreSQL, epoll, inotify, crypto
 
 ## Project Structure
 
@@ -197,16 +202,26 @@ lib/
       temporaries.sls  # :std/os/temporaries
       signal.sls       # :std/os/signal
       fdio.sls         # :std/os/fdio
+      epoll.sls        # :std/os/epoll (wraps chez-epoll)
+      inotify.sls      # :std/os/inotify (wraps chez-inotify)
     net/
       request.sls      # :std/net/request (wraps chez-https)
-      httpd.sls        # :std/net/httpd (wraps chez-httpd)
+      httpd.sls        # :std/net/httpd (wraps chez-https)
       ssl.sls          # :std/net/ssl (wraps chez-ssl)
     compress/
       zlib.sls         # :std/compress/zlib (wraps chez-zlib)
     db/
       leveldb.sls      # :std/db/leveldb (wraps chez-leveldb)
+      sqlite.sls       # :std/db/sqlite (wraps chez-sqlite)
+      postgresql.sls   # :std/db/postgresql (wraps chez-postgresql)
     crypto/
       digest.sls       # :std/crypto/digest
+      cipher.sls       # :std/crypto/cipher (wraps chez-crypto)
+      hmac.sls         # :std/crypto/hmac (wraps chez-crypto)
+      pkey.sls         # :std/crypto/pkey (wraps chez-crypto)
+      kdf.sls          # :std/crypto/kdf (wraps chez-crypto)
+      etc.sls          # :std/crypto/etc (wraps chez-crypto)
+    foreign.sls        # :std/foreign — FFI DSL
     cli/
       getopt.sls       # :std/cli/getopt
     srfi/

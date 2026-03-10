@@ -8,13 +8,13 @@ Scheme project and compiling it to run on Chez Scheme via Jerboa.
 1. **Chez Scheme 10.x** with threads (`./configure --threads && make && make install`)
 2. **Jerboa** built and ready:
    ```bash
-   git clone https://github.com/ober/jerboa ~/mine/jerboa
-   cd ~/mine/jerboa && make
+   git clone https://github.com/ober/jerboa ~/src/jerboa
+   cd ~/src/jerboa && make
    ```
 3. **Gerbil source tree** (for the modules your project imports):
    ```bash
    # Only needed if your project imports :std/* modules
-   git clone https://github.com/mighty-gerbils/gerbil ~/mine/gerbil
+   git clone https://github.com/mighty-gerbils/gerbil ~/src/gerbil
    ```
 
 ## Project Layout
@@ -44,7 +44,7 @@ my-jerboa-project/
 
 ```makefile
 SCHEME = scheme
-JERBOA = $(or $(JERBOA_DIR),$(HOME)/mine/jerboa/src)
+JERBOA = $(or $(JERBOA_DIR),$(HOME)/src/jerboa/src)
 LIBDIRS = src:$(JERBOA)
 COMPILE = $(SCHEME) -q --libdirs $(LIBDIRS) --compile-imported-libraries
 

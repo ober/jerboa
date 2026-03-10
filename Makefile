@@ -1,9 +1,11 @@
 SCHEME = scheme
 LIBDIRS = lib
+# Base directory for chez-* repos (clone from github.com/ober/chez-*)
+CHEZ_EXT_DIR ?= $(HOME)/src
 # External chez-* library paths for wrapper modules
-CHEZ_EXT_LIBDIRS = $(HOME)/mine/chez-https/src:$(HOME)/mine/chez-ssl/src:$(HOME)/mine/chez-zlib/src:$(HOME)/mine/chez-pcre2:$(HOME)/mine/chez-yaml:$(HOME)/mine/chez-leveldb:$(HOME)/mine/chez-epoll/src:$(HOME)/mine/chez-inotify/src:$(HOME)/mine/chez-crypto/src:$(HOME)/mine/chez-sqlite/src:$(HOME)/mine/chez-postgresql/src
+CHEZ_EXT_LIBDIRS = $(CHEZ_EXT_DIR)/chez-https/src:$(CHEZ_EXT_DIR)/chez-ssl/src:$(CHEZ_EXT_DIR)/chez-zlib/src:$(CHEZ_EXT_DIR)/chez-pcre2:$(CHEZ_EXT_DIR)/chez-yaml:$(CHEZ_EXT_DIR)/chez-leveldb:$(CHEZ_EXT_DIR)/chez-epoll/src:$(CHEZ_EXT_DIR)/chez-inotify/src:$(CHEZ_EXT_DIR)/chez-crypto/src:$(CHEZ_EXT_DIR)/chez-sqlite/src:$(CHEZ_EXT_DIR)/chez-postgresql/src
 # Shared object paths for FFI-based chez-* libraries
-CHEZ_EXT_LDPATH = $(HOME)/mine/chez-ssl:$(HOME)/mine/chez-zlib:$(HOME)/mine/chez-pcre2:$(HOME)/mine/chez-leveldb:$(HOME)/mine/chez-epoll:$(HOME)/mine/chez-inotify:$(HOME)/mine/chez-crypto:$(HOME)/mine/chez-sqlite:$(HOME)/mine/chez-postgresql
+CHEZ_EXT_LDPATH = $(CHEZ_EXT_DIR)/chez-ssl:$(CHEZ_EXT_DIR)/chez-zlib:$(CHEZ_EXT_DIR)/chez-pcre2:$(CHEZ_EXT_DIR)/chez-leveldb:$(CHEZ_EXT_DIR)/chez-epoll:$(CHEZ_EXT_DIR)/chez-inotify:$(CHEZ_EXT_DIR)/chez-crypto:$(CHEZ_EXT_DIR)/chez-sqlite:$(CHEZ_EXT_DIR)/chez-postgresql
 
 .PHONY: test test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded test-wrappers clean
 
@@ -48,13 +50,13 @@ test-wrappers:
 	@LD_LIBRARY_PATH="$(CHEZ_EXT_LDPATH):$$LD_LIBRARY_PATH" \
 		$(SCHEME) --libdirs "$(LIBDIRS):$(CHEZ_EXT_LIBDIRS)" --script tests/test-wrapper-zlib.ss 2>/dev/null \
 		|| echo "  zlib: SKIP (requires chez_zlib_shim.so)"
-	@ln -sf $(HOME)/mine/chez-ssl/chez_ssl_shim.so ./chez_ssl_shim.so 2>/dev/null; \
+	@ln -sf $(CHEZ_EXT_DIR)/chez-ssl/chez_ssl_shim.so ./chez_ssl_shim.so 2>/dev/null; \
 		LD_LIBRARY_PATH="$(CHEZ_EXT_LDPATH):$$LD_LIBRARY_PATH" \
 		$(SCHEME) --libdirs "$(LIBDIRS):$(CHEZ_EXT_LIBDIRS)" --script tests/test-wrapper-ssl.ss 2>/dev/null \
 		&& $(SCHEME) --libdirs "$(LIBDIRS):$(CHEZ_EXT_LIBDIRS)" --script tests/test-wrapper-request.ss 2>/dev/null; \
 		rm -f ./chez_ssl_shim.so \
 		|| echo "  ssl/request: SKIP (requires chez_ssl_shim.so)"
-	@LD_LIBRARY_PATH="$(CHEZ_EXT_LDPATH):$$LD_LIBRARY_PATH" CHEZ_PCRE2_LIB="$(HOME)/mine/chez-pcre2" \
+	@LD_LIBRARY_PATH="$(CHEZ_EXT_LDPATH):$$LD_LIBRARY_PATH" CHEZ_PCRE2_LIB="$(CHEZ_EXT_DIR)/chez-pcre2" \
 		$(SCHEME) --libdirs "$(LIBDIRS):$(CHEZ_EXT_LIBDIRS)" --script tests/test-wrapper-pcre2.ss 2>/dev/null \
 		|| echo "  pcre2: SKIP (requires pcre2_shim.so)"
 	@LD_LIBRARY_PATH="$(CHEZ_EXT_LDPATH):$$LD_LIBRARY_PATH" \
