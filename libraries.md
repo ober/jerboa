@@ -1,18 +1,18 @@
 # Jerboa Library Gap Analysis
 
-Gerbil has ~438 `:std/*` modules. Jerboa currently implements 41. This document tracks coverage and what's needed to close the gap.
+Gerbil has ~438 `:std/*` modules. Jerboa currently implements 51. This document tracks coverage and what's needed to close the gap.
 
-## Current Coverage (41 modules)
+## Current Coverage (51 modules)
 
 | Category | Jerboa | Gerbil | Coverage |
 |----------|--------|--------|----------|
 | Core (sort, format, error, sugar, pregexp, logger, test) | 7 | ~15 | 47% |
 | text/* (json, csv, hex, base64, utf8, xml, yaml) | 7 | ~15 | 47% |
 | misc/* (string, list, alist, ports, channel, thread, process, queue, bytes, uuid, repr, completion) | 12 | ~38 | 32% |
-| os/* (path, env, signal, temporaries, fdio) | 5 | ~16 | 31% |
-| crypto/* (digest) | 1 | ~9 | 11% |
+| os/* (path, env, signal, temporaries, fdio, epoll, inotify) | 7 | ~16 | 44% |
+| crypto/* (digest, cipher, hmac, pkey, kdf, etc) | 6 | ~9 | 67% |
 | net/* (request, httpd, ssl) | 3 | ~40+ | 8% |
-| db/* (leveldb) | 1 | ~4 | 25% |
+| db/* (leveldb, sqlite, postgresql) | 3 | ~4 | 75% |
 | cli/* (getopt) | 1 | ~4 | 25% |
 | srfi/* (13, 19) | 2 | ~60+ | 3% |
 | compress/* (zlib) | 1 | 0 | N/A |
@@ -31,20 +31,15 @@ Gerbil has ~438 `:std/*` modules. Jerboa currently implements 41. This document 
 | chez-yaml | YAML parser | `(std text yaml)` |
 | chez-leveldb | LevelDB | `(std db leveldb)` |
 
-### Needed
+### Completed (New)
 
-| Library | Would Fill | System Dep |
-|---------|-----------|------------|
-| **chez-crypto** | `(std crypto cipher)`, `(std crypto hmac)`, `(std crypto pkey)`, `(std crypto bn)`, `(std crypto dh)`, `(std crypto kdf)`, `(std crypto etc)` | libcrypto (OpenSSL) |
-| **chez-sqlite** | `(std db sqlite)` | libsqlite3 |
-| **chez-postgresql** | `(std db postgresql)` | libpq |
-
-### Maybe (OS-level)
-
-| Library | Would Fill | System Dep |
-|---------|-----------|------------|
-| **chez-epoll** | `(std os epoll)` | Linux kernel (epoll_create, epoll_ctl, epoll_wait) |
-| **chez-inotify** | `(std os inotify)` | Linux kernel (inotify) |
+| Library | Wraps | Jerboa Modules | Status |
+|---------|-------|---------------|--------|
+| chez-epoll | Linux epoll | `(std os epoll)` | Done |
+| chez-inotify | Linux inotify | `(std os inotify)` | Done |
+| chez-crypto | OpenSSL EVP | `(std crypto cipher)`, `(std crypto hmac)`, `(std crypto pkey)`, `(std crypto kdf)`, `(std crypto etc)` | Done |
+| chez-sqlite | SQLite3 | `(std db sqlite)` | Done |
+| chez-postgresql | libpq | `(std db postgresql)` | Done |
 
 ## Pure Scheme Modules (No External Deps)
 
@@ -123,8 +118,8 @@ Gerbil has ~438 `:std/*` modules. Jerboa currently implements 41. This document 
 | `(std os error)` | OS error codes | TODO |
 | `(std os fd)` | File descriptor utilities | TODO |
 | `(std os socket)` | Raw socket operations | TODO |
-| `(std os epoll)` | Linux epoll | Needs chez-epoll |
-| `(std os inotify)` | Linux inotify | Needs chez-inotify |
+| `(std os epoll)` | Linux epoll | Done |
+| `(std os inotify)` | Linux inotify | Done |
 | `(std os kqueue)` | BSD kqueue | N/A (Linux only) |
 | `(std os signalfd)` | Linux signalfd | TODO |
 

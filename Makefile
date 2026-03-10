@@ -1,9 +1,9 @@
 SCHEME = scheme
 LIBDIRS = lib
 # External chez-* library paths for wrapper modules
-CHEZ_EXT_LIBDIRS = $(HOME)/mine/chez-https/src:$(HOME)/mine/chez-ssl/src:$(HOME)/mine/chez-zlib/src:$(HOME)/mine/chez-pcre2:$(HOME)/mine/chez-yaml:$(HOME)/mine/chez-leveldb:$(HOME)/mine/chez-epoll/src:$(HOME)/mine/chez-inotify/src:$(HOME)/mine/chez-crypto/src:$(HOME)/mine/chez-sqlite/src
+CHEZ_EXT_LIBDIRS = $(HOME)/mine/chez-https/src:$(HOME)/mine/chez-ssl/src:$(HOME)/mine/chez-zlib/src:$(HOME)/mine/chez-pcre2:$(HOME)/mine/chez-yaml:$(HOME)/mine/chez-leveldb:$(HOME)/mine/chez-epoll/src:$(HOME)/mine/chez-inotify/src:$(HOME)/mine/chez-crypto/src:$(HOME)/mine/chez-sqlite/src:$(HOME)/mine/chez-postgresql/src
 # Shared object paths for FFI-based chez-* libraries
-CHEZ_EXT_LDPATH = $(HOME)/mine/chez-ssl:$(HOME)/mine/chez-zlib:$(HOME)/mine/chez-pcre2:$(HOME)/mine/chez-leveldb:$(HOME)/mine/chez-epoll:$(HOME)/mine/chez-inotify:$(HOME)/mine/chez-crypto:$(HOME)/mine/chez-sqlite
+CHEZ_EXT_LDPATH = $(HOME)/mine/chez-ssl:$(HOME)/mine/chez-zlib:$(HOME)/mine/chez-pcre2:$(HOME)/mine/chez-leveldb:$(HOME)/mine/chez-epoll:$(HOME)/mine/chez-inotify:$(HOME)/mine/chez-crypto:$(HOME)/mine/chez-sqlite:$(HOME)/mine/chez-postgresql
 
 .PHONY: test test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded test-wrappers clean
 
@@ -69,6 +69,9 @@ test-wrappers:
 	@LD_LIBRARY_PATH="$(CHEZ_EXT_LDPATH):$$LD_LIBRARY_PATH" \
 		$(SCHEME) --libdirs "$(LIBDIRS):$(CHEZ_EXT_LIBDIRS)" --script tests/test-wrapper-sqlite.ss 2>/dev/null \
 		|| echo "  sqlite: SKIP (requires chez_sqlite_shim.so)"
+	@LD_LIBRARY_PATH="$(CHEZ_EXT_LDPATH):$$LD_LIBRARY_PATH" \
+		$(SCHEME) --libdirs "$(LIBDIRS):$(CHEZ_EXT_LIBDIRS)" --script tests/test-wrapper-postgresql.ss 2>/dev/null \
+		|| echo "  postgresql: SKIP (requires chez_pg_shim.so)"
 
 test-all: test test-wrappers
 
