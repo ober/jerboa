@@ -3343,33 +3343,37 @@ Implementation checklist:
 - [x] Test: `reply` in non-ask context raises error
 - [x] Test: multiple concurrent asks to same actor
 
-### Step 4: Supervision Trees
+### Step 4: Supervision Trees ✓ COMPLETE
 
 **File**: `lib/std/actor/supervisor.sls`
 **Test**: `tests/test-actor-supervisor.ss`
-**Dependencies**: `core.sls`, `protocol.sls`, `(jerboa core)` (for `match`)
+**Dependencies**: `core.sls`, `protocol.sls`, `(only (jerboa core) match)`
 
 Implementation checklist:
-- [ ] `make-child-spec` with all fields (id, start-thunk, restart, shutdown, type)
-- [ ] `start-supervisor` starts children in order, monitors each
-- [ ] one-for-one: only restart the dead child
-- [ ] one-for-all: stop all in reverse, restart all in forward
-- [ ] rest-for-one: stop failed + later siblings in reverse, restart in forward
-- [ ] permanent: always restart
-- [ ] transient: restart only on abnormal exit (not 'normal, not 'killed)
-- [ ] temporary: never restart
-- [ ] Restart intensity tracking via timestamp log
-- [ ] Supervisor crashes (raises error) when intensity exceeded
-- [ ] Graceful shutdown: send '(shutdown), wait up to timeout, then kill
-- [ ] `supervisor-which-children` returns child status list
-- [ ] `supervisor-start-child!` adds child dynamically
-- [ ] `supervisor-delete-child!` removes child
-- [ ] `current-seconds` helper avoids SRFI-19 dependency
-- [ ] Test: worker crashes, one-for-one restarts only it
-- [ ] Test: worker crashes, one-for-all restarts all
-- [ ] Test: permanent vs transient vs temporary
-- [ ] Test: intensity exceeded causes supervisor crash
-- [ ] Test: nested supervisors (tree structure)
+- [x] `make-child-spec` with all fields (id, start-thunk, restart, shutdown, type)
+- [x] `start-supervisor` starts children in order, monitors each
+- [x] one-for-one: only restart the dead child
+- [x] one-for-all: stop all in reverse (brutal-kill), restart all in forward
+- [x] rest-for-one: stop failed + later siblings in reverse, restart in forward
+- [x] permanent: always restart
+- [x] transient: restart only on abnormal exit (not 'normal, not 'killed)
+- [x] temporary: never restart
+- [x] Restart intensity tracking via timestamp log
+- [x] Supervisor crashes (raises error) when intensity exceeded
+- [x] Graceful shutdown: send '(shutdown), wait up to timeout, then kill
+- [x] Monitor removed before forced stop to prevent spurious restart
+- [x] `supervisor-which-children` returns child status list
+- [x] `supervisor-start-child!` adds child dynamically
+- [x] `supervisor-delete-child!` removes child
+- [x] `current-seconds` helper avoids SRFI-19 dependency
+- [x] Test: worker crashes, one-for-one restarts only it
+- [x] Test: worker crashes, one-for-all restarts all
+- [x] Test: permanent vs transient vs temporary
+- [x] Test: intensity exceeded causes supervisor crash
+- [x] Test: dynamic start/terminate/delete
+
+**Note**: Use `(only (jerboa core) match)` not bare `(jerboa core)` to avoid
+identifier conflicts with `(chezscheme)` (`1+`, `iota`, `make-hash-table`).
 
 ### Step 5: Registry
 
