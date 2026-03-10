@@ -45,36 +45,97 @@ order — do not skip ahead.
 
 ---
 
+## Quick Start (TL;DR)
+
+To get a working actor system in 5 steps:
+
+```scheme
+(import (chezscheme) (jerboa core)
+        (std actor core)
+        (std actor protocol)
+        (std actor supervisor)
+        (std actor registry)
+        (std actor scheduler))
+
+;; 1. Start the thread pool
+(define sched (scheduler-start! (make-scheduler (cpu-count))))
+(set-actor-scheduler! (lambda (thunk) (scheduler-submit! sched thunk)))
+
+;; 2. Start the name registry
+(start-registry!)
+
+;; 3. Define a protocol
+(defprotocol counter
+  (increment n)
+  (get-value -> value)
+  (reset))
+
+;; 4. Implement the actor
+(define (make-counter initial)
+  (let ([n initial])
+    (spawn-actor
+      (lambda (msg)
+        (with-ask-context msg
+          (lambda (actual)
+            (cond
+              [(counter:increment? actual)
+               (set! n (+ n (counter:increment-n actual)))]
+              [(counter:get-value? actual)
+               (reply n)]
+              [(counter:reset? actual)
+               (set! n initial)])))))))
+
+;; 5. Supervise it
+(define app
+  (start-supervisor 'one-for-one
+    (list (make-child-spec 'counter
+                           (lambda () (make-counter 0))
+                           'permanent 5.0 'worker))
+    10 5))
+
+;; Use it
+(let ([ref (caddr (car (supervisor-which-children app)))])
+  (register! 'counter ref))
+
+(counter:increment! (whereis 'counter) 42)
+(display (counter:get-value?! (whereis 'counter)))  ;; => 42
+
+;; Shutdown
+(scheduler-stop! sched)
+```
+
+---
+
 ## Chez Scheme Primitives Reference
 
 Every primitive used in this guide. Know these before implementing.
 
 ### Threading (Chez 10, threaded build)
-| Primitive | Description |
-|-----------|-------------|
-| `(fork-thread thunk)` | Starts a new OS thread immediately, returns thread-id |
-| `(get-thread-id)` | Returns current thread's integer id |
-| `(make-mutex)` | Creates a new mutex |
-| `(mutex-acquire mutex)` | Blocks until mutex acquired |
-| `(mutex-release mutex)` | Releases a mutex |
-| `(with-mutex mutex body ...)` | Acquires, evaluates body, releases (even on exception) |
-| `(make-condition)` | Creates a condition variable |
-| `(condition-wait cond mutex)` | Atomically releases mutex and blocks on condition; re-acquires mutex on wake |
-| `(condition-wait cond mutex time)` | Same but with timeout; returns `#f` on timeout, `#t` if signaled |
-| `(condition-signal cond)` | Wakes one waiting thread |
-| `(condition-broadcast cond)` | Wakes all waiting threads |
-| `(make-thread-parameter default)` | Creates a thread-local parameter (SMP-safe, no global lock) |
+| Primitive                          | Description                                                                  |
+|------------------------------------|------------------------------------------------------------------------------|
+| `(fork-thread thunk)`              | Starts a new OS thread immediately, returns thread-id                        |
+| `(get-thread-id)`                  | Returns current thread's integer id                                          |
+| `(make-mutex)`                     | Creates a new mutex                                                          |
+| `(mutex-acquire mutex)`            | Blocks until mutex acquired                                                  |
+| `(mutex-release mutex)`            | Releases a mutex                                                             |
+| `(with-mutex mutex body ...)`      | Acquires, evaluates body, releases (even on exception)                       |
+| `(make-condition)`                 | Creates a condition variable                                                 |
+| `(condition-wait cond mutex)`      | Atomically releases mutex and blocks on condition; re-acquires mutex on wake |
+| `(condition-wait cond mutex time)` | Same but with timeout; returns `#f` on timeout, `#t` if signaled             |
+| `(condition-signal cond)`          | Wakes one waiting thread                                                     |
+| `(condition-broadcast cond)`       | Wakes all waiting threads                                                    |
+| `(make-thread-parameter default)`  | Creates a thread-local parameter (SMP-safe, no global lock)                  |
 
 ### Data Structures
-| Primitive | Description |
-|-----------|-------------|
-| `(make-vector n init)` | Creates a vector of size n |
-| `(make-eq-hashtable)` | Creates a hashtable with `eq?` comparison |
-| `(make-hashtable hash equiv)` | Creates a hashtable with custom hash/equiv |
-| `(hashtable-set! ht key val)` | Insert/update |
-| `(hashtable-ref ht key default)` | Lookup with default |
-| `(hashtable-delete! ht key)` | Remove |
-| `(hashtable-keys ht)` | Returns vector of keys |
+| Primitive                        | Description                                |
+|----------------------------------|--------------------------------------------|
+| `(make-vector n init)`           | Creates a vector of size n                 |
+| `(make-eq-hashtable)`            | Creates a hashtable with `eq?` comparison  |
+| `(make-hashtable hash equiv)`    | Creates a hashtable with custom hash/equiv |
+| `(hashtable-set! ht key val)`    | Insert/update                              |
+| `(hashtable-ref ht key default)` | Lookup with default                        |
+| `(hashtable-delete! ht key)`     | Remove                                     |
+| `(hashtable-keys ht)`            | Returns vector of keys                     |
 
 ### Serialization
 | Primitive | Description |
@@ -1043,6 +1104,84 @@ It must not block indefinitely — use `ask` (Layer 4) for request-reply pattern
 
 ---
 
+## Required: `(std task)` Futures Interface
+
+Layer 4 (protocol) depends on `(std task)` for one-shot futures (reply channels).
+The required interface is:
+
+```scheme
+;; make-future: creates a new, uncompleted future
+(make-future)              ;; → future
+
+;; future-complete!: set the value; unblocks any waiting future-get
+(future-complete! f value) ;; → unspecified; error if already completed
+
+;; future-get: block until the future is completed, return its value
+(future-get f)             ;; → value (blocks)
+
+;; future-done?: non-blocking check
+(future-done? f)           ;; → bool
+```
+
+If `(std task)` does not export these, implement a minimal version:
+
+```scheme
+;; Minimal future implementation (can live in protocol.sls directly)
+(define-record-type future
+  (fields
+    (immutable mutex)
+    (immutable cond)
+    (mutable value)
+    (mutable done?))
+  (protocol
+    (lambda (new)
+      (lambda ()
+        (new (make-mutex) (make-condition) #f #f))))
+  (sealed #t))
+
+(define (make-future) (make-future))  ;; uses the record constructor
+
+(define (future-complete! f val)
+  (with-mutex (future-mutex f)
+    (when (future-done? f)
+      (error 'future-complete! "future already completed"))
+    (future-value-set! f val)
+    (future-done?-set! f #t)
+    (condition-broadcast (future-cond f))))
+
+(define (future-get f)
+  (mutex-acquire (future-mutex f))
+  (let loop ()
+    (if (future-done? f)
+      (let ([v (future-value f)])
+        (mutex-release (future-mutex f))
+        v)
+      (begin
+        (condition-wait (future-cond f) (future-mutex f))
+        (loop)))))
+
+(define (future-done? f)
+  (future-done?-field f))  ;; use the generated accessor
+```
+
+**Note**: Name collision — `future-done?` is both the record accessor name (generated
+by `(mutable done?)`) and the public API. Rename the field to `completed?` to avoid
+the clash:
+
+```scheme
+(define-record-type future
+  (fields
+    (immutable mutex)
+    (immutable cond)
+    (mutable value)
+    (mutable completed?))   ;; field name avoids clash with public API
+  ...)
+
+(define (future-done? f) (future-completed? f))
+```
+
+---
+
 ## Layer 4: Protocol System (`lib/std/actor/protocol.sls`)
 
 ### Purpose
@@ -1336,6 +1475,18 @@ restart loops.
 
 ### Child Specification
 
+The `child-spec` record type has no explicit `(protocol ...)` clause, so the
+constructor takes fields in the order they are declared. Use `make-child-spec`:
+
+```scheme
+(make-child-spec id start-thunk restart shutdown type)
+;; id:          symbol — unique name within this supervisor
+;; start-thunk: (lambda () ...) → actor-ref
+;; restart:     'permanent | 'transient | 'temporary
+;; shutdown:    'brutal-kill | number (timeout in seconds)
+;; type:        'worker | 'supervisor
+```
+
 ```scheme
 ;; A child-spec describes how to start and restart a child
 (define-record-type child-spec
@@ -1517,6 +1668,11 @@ restart loops.
         (error 'supervisor "restart intensity exceeded — too many restarts"
                (supervisor-state-max-restarts state)
                (supervisor-state-period-secs state)))))
+
+  ;; NOTE: restart-one!, restart-all!, restart-rest! are called only from
+  ;; handle-child-exit!, which is called from supervisor-behavior.
+  ;; supervisor-behavior runs inside the supervisor actor's task, so
+  ;; (self) correctly returns the supervisor's actor-ref.
 
   (define (restart-one! state entry)
     (stop-child-entry! entry)
@@ -1898,8 +2054,8 @@ This is cleaner than byte-at-a-time `get-u8` loops.
 ### 7C: Connection Pool
 
 ```scheme
-;; Connection pool: node-id → (input-port . output-port . mutex)
-;; The mutex protects concurrent writes to the same connection.
+;; Connection pool: node-id → (values in-port out-port write-mutex)
+;; The write-mutex protects concurrent writes to the same connection.
 (define *connections* (make-hashtable string-hash string=?))
 (define *conn-mutex* (make-mutex))
 
@@ -1910,44 +2066,340 @@ This is cleaner than byte-at-a-time `get-u8` loops.
           (hashtable-set! *connections* node-id conn)
           conn))))
 
+(define (drop-connection! node-id)
+  (with-mutex *conn-mutex*
+    (hashtable-delete! *connections* node-id)))
+
+;; Returns a vector: #(in-port out-port write-mutex)
 (define (open-connection! node-id)
   (let-values ([(host port) (node-id->host+port node-id)])
-    ;; Use (std net ssl) tcp-connect
-    (let ([conn (tcp-connect host port)])
-      ;; Cookie-based handshake
-      (let ([hello-frame (message->bytes
-                           (list 'hello (current-node-id)
-                                 (cookie-hash (current-node-cookie) node-id)))])
-        (tcp-write conn hello-frame)
-        ;; Read acknowledgement
-        ;; ... (read from connection, verify 'ok response)
-        conn))))
+    ;; Open a raw TCP connection using Chez's built-in TCP support
+    (let-values ([(in-port out-port)
+                  (open-tcp-connection host port)])
+      (let ([write-mutex (make-mutex)])
+        ;; Cookie-based handshake: send hello, expect ok
+        (let ([hello (list 'hello (current-node-id)
+                           (cookie-hash (current-node-cookie) node-id))])
+          (with-mutex write-mutex
+            (write-framed-message out-port hello))
+          ;; Read acknowledgement
+          (let ([resp (read-framed-message in-port)])
+            (unless (and (pair? resp) (eq? (car resp) 'ok))
+              (close-port in-port)
+              (close-port out-port)
+              (error 'open-connection! "handshake rejected" node-id resp))))
+        (vector in-port out-port write-mutex)))))
 
-;; Simple hash-based cookie authentication
-;; In production, replace with HMAC-SHA256 via (std crypto hmac)
+;; Simple FNV-1a-style hash for cookie authentication.
+;; In production, replace with HMAC-SHA256 via (std crypto hmac).
 (define (cookie-hash cookie peer-id)
   (let ([s (string-append cookie ":" peer-id)])
-    (let loop ([h 0] [i 0])
-      (if (fx= i (string-length s)) h
-          (loop (fxlogand (fx+ (fx* h 31) (char->integer (string-ref s i)))
-                          #xFFFFFFFF)
-                (fx+ i 1))))))
+    (let loop ([h #x811c9dc5] [i 0])
+      (if (fx= i (string-length s))
+        (fxlogand h #xFFFFFFFF)
+        (loop (fxlogand
+                (fxxor (fx* h 16777619)
+                       (char->integer (string-ref s i)))
+                #xFFFFFFFF)
+              (fx+ i 1))))))
+
+;; Open TCP connection.  On Chez, tcp-connect is not built-in.
+;; Use (open-socket ...) or the chez-socket library.
+;; This shim uses the simplest available approach: open-tcp-connection
+;; which is provided by (std net tcp) or a thin FFI shim.
+;;
+;; If unavailable, fall back to:
+;;   (define open-tcp-connection
+;;     (foreign-procedure "jerboa_tcp_connect"
+;;       (string integer) (values input-port output-port)))
+(define (open-tcp-connection host port)
+  ;; Implementation depends on your TCP library.
+  ;; With chez-socket:
+  ;;   (let ([s (make-client-socket host (number->string port))])
+  ;;     (values (socket-input-port s) (socket-output-port s)))
+  ;; Placeholder — replace with actual TCP library call:
+  (error 'open-tcp-connection "TCP library not yet wired in"))
 ```
 
-### 7D: Integration — Remote Send
+### 7D: Node Server (Accepting Connections)
 
-Modify `send` in `core.sls` to handle remote actor-refs:
+The server accepts incoming connections, verifies the cookie handshake, and
+dispatches messages to local actors. Each accepted connection gets its own
+reader thread.
 
 ```scheme
-;; In core.sls, the remote branch of send becomes:
-[(actor-ref-node actor)
- (let ([node-id (actor-ref-node actor)]
-       [actor-id (actor-ref-id actor)])
-   (let ([conn (get-connection! node-id)])
-     (write-framed-message conn (list 'send actor-id msg))))]
+;; Start the server: accept connections on the given port.
+;; Runs in a background thread — returns immediately.
+(define (start-node-server! port)
+  (fork-thread
+    (lambda ()
+      (let ([server-socket (make-server-socket port)])
+        (let loop ()
+          (let ([client (accept-socket server-socket)])
+            (fork-thread
+              (lambda () (handle-client! client)))
+            (loop)))))))
+
+;; Handle one client connection: authenticate, then read messages.
+(define (handle-client! client-socket)
+  (let ([in-port  (socket-input-port  client-socket)]
+        [out-port (socket-output-port client-socket)])
+    ;; Read hello
+    (guard (exn [#t (close-port in-port) (close-port out-port)])
+      (let ([hello (read-framed-message in-port)])
+        (if (not (and (pair? hello)
+                      (eq? (car hello) 'hello)
+                      (>= (length hello) 3)))
+          (begin
+            (write-framed-message out-port '(error "bad hello"))
+            (close-port in-port)
+            (close-port out-port))
+          (let* ([peer-node-id (cadr  hello)]
+                 [their-hash   (caddr hello)]
+                 [our-expected (cookie-hash (current-node-cookie) peer-node-id)])
+            (if (not (fx= their-hash our-expected))
+              (begin
+                (write-framed-message out-port '(error "bad cookie"))
+                (close-port in-port)
+                (close-port out-port))
+              (begin
+                (write-framed-message out-port (list 'ok (current-node-id)))
+                ;; Message dispatch loop
+                (let loop ()
+                  (let ([msg (guard (exn [#t 'eof])
+                               (read-framed-message in-port))])
+                    (unless (eq? msg 'eof)
+                      (dispatch-remote-message! msg)
+                      (loop))))
+                (close-port in-port)
+                (close-port out-port)))))))))
+
+;; Dispatch a message received from a remote node.
+;; Expected format: ('send local-actor-id payload)
+(define (dispatch-remote-message! msg)
+  (when (and (pair? msg)
+             (eq? (car msg) 'send)
+             (pair? (cdr msg)))
+    (let ([actor-id (cadr  msg)]
+          [payload  (caddr msg)])
+      (let ([actor (lookup-local-actor actor-id)])
+        (if actor
+          (send actor payload)
+          ;; Actor not found — log as dead letter
+          ((*dead-letter-handler*) payload
+            (make-actor-ref actor-id "unknown-remote")))))))
 ```
 
-### 7E: Remote Actor Refs
+**Note**: `make-server-socket`, `accept-socket`, `socket-input-port`,
+`socket-output-port` depend on your TCP library (`chez-socket` or equivalent).
+Replace with the actual API from your networking layer.
+
+### 7E: Complete `transport.sls` Library
+
+```scheme
+#!chezscheme
+(library (std actor transport)
+  (export
+    ;; Node identity
+    start-node!
+    current-node-id
+
+    ;; Server
+    start-node-server!
+
+    ;; Remote refs
+    make-remote-actor-ref
+
+    ;; Connection management (exposed for testing)
+    drop-connection!
+  )
+  (import (chezscheme)
+          (std actor core))
+
+  ;; All the definitions from sections 7A–7D above go here.
+  ;; They are collected inside this single library form.
+
+  ;; 7A: Serialization
+  (define (message->bytes msg)
+    (let-values ([(port get-bytes) (open-bytevector-output-port)])
+      (fasl-write msg port)
+      (let* ([body (get-bytes)]
+             [n (bytevector-length body)]
+             [frame (make-bytevector (fx+ 4 n))])
+        (bytevector-u8-set! frame 0 (fxlogand (fxsra n 24) #xFF))
+        (bytevector-u8-set! frame 1 (fxlogand (fxsra n 16) #xFF))
+        (bytevector-u8-set! frame 2 (fxlogand (fxsra n 8) #xFF))
+        (bytevector-u8-set! frame 3 (fxlogand n #xFF))
+        (bytevector-copy! body 0 frame 4 n)
+        frame)))
+
+  (define (read-framed-message port)
+    (let ([header (get-bytevector-n port 4)])
+      (when (or (eof-object? header) (< (bytevector-length header) 4))
+        (error 'read-framed-message "connection closed"))
+      (let ([n (fx+ (fx+ (fx+ (fxsll (bytevector-u8-ref header 0) 24)
+                               (fxsll (bytevector-u8-ref header 1) 16))
+                          (fxsll (bytevector-u8-ref header 2) 8))
+                    (bytevector-u8-ref header 3))])
+        (let ([body (get-bytevector-n port n)])
+          (when (or (eof-object? body) (< (bytevector-length body) n))
+            (error 'read-framed-message "truncated message"))
+          (fasl-read (open-bytevector-input-port body))))))
+
+  (define (write-framed-message port msg)
+    (let ([frame (message->bytes msg)])
+      (put-bytevector port frame)
+      (flush-output-port port)))
+
+  ;; 7B: Node identity
+  (define *node-id*     (make-parameter #f))
+  (define *node-cookie* (make-parameter #f))
+
+  (define (current-node-id) (*node-id*))
+
+  (define (start-node! host port cookie)
+    (let ([id (string-append host ":" (number->string port))])
+      (*node-id* id)
+      (*node-cookie* cookie)
+      id))
+
+  (define (node-id->host+port node-id)
+    (let loop ([i (fx- (string-length node-id) 1)])
+      (cond
+        [(fx< i 0) (error 'node-id->host+port "no colon in node-id" node-id)]
+        [(char=? (string-ref node-id i) #\:)
+         (values (substring node-id 0 i)
+                 (string->number (substring node-id (fx+ i 1)
+                                            (string-length node-id))))]
+        [else (loop (fx- i 1))])))
+
+  ;; 7C: Connection pool (see definitions above)
+  (define *connections* (make-hashtable string-hash string=?))
+  (define *conn-mutex* (make-mutex))
+
+  (define (cookie-hash cookie peer-id)
+    (let ([s (string-append cookie ":" peer-id)])
+      (let loop ([h #x811c9dc5] [i 0])
+        (if (fx= i (string-length s))
+          (fxlogand h #xFFFFFFFF)
+          (loop (fxlogand
+                  (fxxor (fx* h 16777619)
+                         (char->integer (string-ref s i)))
+                  #xFFFFFFFF)
+                (fx+ i 1))))))
+
+  (define (get-connection! node-id)
+    (with-mutex *conn-mutex*
+      (or (hashtable-ref *connections* node-id #f)
+          (let ([conn (open-connection! node-id)])
+            (hashtable-set! *connections* node-id conn)
+            conn))))
+
+  (define (drop-connection! node-id)
+    (with-mutex *conn-mutex*
+      (hashtable-delete! *connections* node-id)))
+
+  (define (open-connection! node-id)
+    (let-values ([(host port) (node-id->host+port node-id)])
+      (let-values ([(in-port out-port) (open-tcp-connection host port)])
+        (let ([write-mutex (make-mutex)])
+          (let ([hello (list 'hello (current-node-id)
+                             (cookie-hash (*node-cookie*) node-id))])
+            (with-mutex write-mutex
+              (write-framed-message out-port hello))
+            (let ([resp (read-framed-message in-port)])
+              (unless (and (pair? resp) (eq? (car resp) 'ok))
+                (close-port in-port)
+                (close-port out-port)
+                (error 'open-connection! "handshake rejected" node-id))))
+          (vector in-port out-port write-mutex)))))
+
+  ;; Stub — replace with real TCP library call
+  (define (open-tcp-connection host port)
+    (error 'open-tcp-connection "TCP library not wired in — see 7C notes"))
+
+  ;; 7D: Remote send (called from core.sls send procedure)
+  ;; Wire this into core.sls by setting the remote-send handler:
+  ;;   (set-remote-send-handler!
+  ;;     (lambda (actor msg)
+  ;;       (remote-send! (actor-ref-node actor) (actor-ref-id actor) msg)))
+
+  (define (remote-send! node-id actor-id msg)
+    (guard (exn [#t
+                 ;; Drop connection on error so next attempt reconnects
+                 (drop-connection! node-id)
+                 (error 'remote-send! "send failed" node-id exn)])
+      (let ([conn (get-connection! node-id)])
+        (let ([out-port    (vector-ref conn 1)]
+              [write-mutex (vector-ref conn 2)])
+          (with-mutex write-mutex
+            (write-framed-message out-port (list 'send actor-id msg)))))))
+
+  ;; 7E: Remote actor refs
+  (define (make-remote-actor-ref node-id remote-actor-id)
+    (make-actor-ref remote-actor-id node-id))
+
+  ;; 7F: Server
+  (define (start-node-server! listen-port)
+    (fork-thread
+      (lambda ()
+        (let ([server (make-server-socket listen-port)])
+          (let loop ()
+            (let ([client (accept-socket server)])
+              (fork-thread (lambda () (handle-client! client)))
+              (loop)))))))
+
+  ;; Stubs for socket operations — replace with real TCP library
+  (define (make-server-socket port)
+    (error 'make-server-socket "TCP library not wired in"))
+  (define (accept-socket srv)
+    (error 'accept-socket "TCP library not wired in"))
+  (define (socket-input-port s) (error 'socket-input-port "not wired in"))
+  (define (socket-output-port s) (error 'socket-output-port "not wired in"))
+
+  (define (handle-client! client-socket)
+    (let ([in-port  (socket-input-port  client-socket)]
+          [out-port (socket-output-port client-socket)])
+      (guard (exn [#t (close-port in-port) (close-port out-port)])
+        (let ([hello (read-framed-message in-port)])
+          (if (not (and (pair? hello)
+                        (eq? (car hello) 'hello)
+                        (>= (length hello) 3)))
+            (begin
+              (write-framed-message out-port '(error "bad hello"))
+              (close-port in-port)
+              (close-port out-port))
+            (let* ([peer-id      (cadr  hello)]
+                   [their-hash   (caddr hello)]
+                   [our-expected (cookie-hash (*node-cookie*) peer-id)])
+              (if (not (fx= their-hash our-expected))
+                (begin
+                  (write-framed-message out-port '(error "bad cookie"))
+                  (close-port in-port)
+                  (close-port out-port))
+                (begin
+                  (write-framed-message out-port (list 'ok (current-node-id)))
+                  (let loop ()
+                    (let ([msg (guard (exn [#t 'eof])
+                                 (read-framed-message in-port))])
+                      (unless (eq? msg 'eof)
+                        (dispatch-remote-message! msg)
+                        (loop))))
+                  (close-port in-port)
+                  (close-port out-port))))))))
+
+  (define (dispatch-remote-message! msg)
+    (when (and (pair? msg) (eq? (car msg) 'send) (pair? (cdr msg)))
+      (let ([actor-id (cadr  msg)]
+            [payload  (caddr msg)])
+        (let ([actor (lookup-local-actor actor-id)])
+          (when actor
+            (send actor payload))))))
+
+  ) ;; end library
+```
+
+### 7F: Remote Actor Refs
 
 ```scheme
 ;; Create a reference to an actor on a remote node
@@ -1958,6 +2410,32 @@ Modify `send` in `core.sls` to handle remote actor-refs:
 The `actor-ref` record in `core.sls` already has a `case-lambda` protocol with a
 2-argument constructor `(id node)` for remote refs. Remote refs have no local mailbox
 (`#f`), no behavior, and their `node` field is set to the remote node-id string.
+
+### 7G: Wiring Remote Send into core.sls
+
+Add a remote-send parameter to `core.sls` and update `send`:
+
+```scheme
+;; In core.sls — add this parameter:
+(define *remote-send-handler* (make-parameter #f))
+
+(define (set-remote-send-handler! proc)
+  (*remote-send-handler* proc))
+
+;; Update the remote branch of send:
+[(actor-ref-node actor)
+ (let ([handler (*remote-send-handler*)])
+   (if handler
+     (handler actor msg)
+     (error 'send "remote send not configured; call set-remote-send-handler!" actor)))]
+
+;; In application startup, after loading transport.sls:
+(set-remote-send-handler!
+  (lambda (actor msg)
+    (remote-send! (actor-ref-node actor) (actor-ref-id actor) msg)))
+```
+
+This avoids a circular import between `core.sls` and `transport.sls`.
 
 ### Testing Distributed
 
@@ -1997,6 +2475,642 @@ tests/
   test-actor-supervisor.ss Tests for supervision strategies
   test-actor-registry.ss   Tests for name registration
   test-actor-distributed.ss Tests for cross-node messaging
+```
+
+---
+
+## Test File Implementations
+
+Each test file uses Chez's built-in `check`-style assertions via `guard` and
+`assert`. For a richer test framework use `(std test)` if available, or
+write a minimal harness:
+
+```scheme
+;; Minimal test harness (paste into each test file)
+(define *tests-run* 0)
+(define *tests-failed* 0)
+
+(define-syntax test
+  (syntax-rules ()
+    [(_ name expr expected)
+     (begin
+       (set! *tests-run* (fx+ *tests-run* 1))
+       (let ([got expr])
+         (unless (equal? got expected)
+           (set! *tests-failed* (fx+ *tests-failed* 1))
+           (display "FAIL: ") (display name) (newline)
+           (display "  expected: ") (write expected) (newline)
+           (display "  got:      ") (write got) (newline))))]))
+
+(define (test-summary)
+  (display *tests-run*) (display " tests, ")
+  (display *tests-failed*) (display " failed")
+  (newline)
+  (when (fx> *tests-failed* 0) (error 'test-summary "tests failed")))
+```
+
+### `tests/test-actor-mpsc.ss`
+
+```scheme
+#!chezscheme
+(import (chezscheme) (std actor mpsc))
+
+;; --- Minimal test harness ---
+(define *tests-run* 0)
+(define *tests-failed* 0)
+(define-syntax test
+  (syntax-rules ()
+    [(_ name expr expected)
+     (begin
+       (set! *tests-run* (fx+ *tests-run* 1))
+       (let ([got expr])
+         (unless (equal? got expected)
+           (set! *tests-failed* (fx+ *tests-failed* 1))
+           (display "FAIL: ") (display name) (newline)
+           (display "  expected: ") (write expected) (newline)
+           (display "  got:      ") (write got) (newline))))]))
+
+;; Test 1: basic enqueue/dequeue
+(let ([q (make-mpsc-queue)])
+  (mpsc-enqueue! q 'hello)
+  (mpsc-enqueue! q 'world)
+  (test "dequeue-1" (mpsc-dequeue! q) 'hello)
+  (test "dequeue-2" (mpsc-dequeue! q) 'world))
+
+;; Test 2: try-dequeue on empty returns (values #f #f)
+(let ([q (make-mpsc-queue)])
+  (let-values ([(v ok) (mpsc-try-dequeue! q)])
+    (test "try-empty-val" v #f)
+    (test "try-empty-ok"  ok #f)))
+
+;; Test 3: 10 concurrent producers, 1 consumer
+(let ([q (make-mpsc-queue)]
+      [received (make-eq-hashtable)]
+      [done-mutex (make-mutex)]
+      [done-cond  (make-condition)]
+      [producers-done 0])
+  (define total 1000)  ;; 10 threads × 100 msgs
+  ;; Start 10 producers
+  (do ([t 0 (fx+ t 1)]) ((fx= t 10))
+    (let ([thread-id t])
+      (fork-thread
+        (lambda ()
+          (do ([i 0 (fx+ i 1)]) ((fx= i 100))
+            (mpsc-enqueue! q (cons thread-id i)))
+          (with-mutex done-mutex
+            (set! producers-done (fx+ producers-done 1))
+            (when (fx= producers-done 10)
+              (condition-signal done-cond)))))))
+  ;; Wait for all producers to finish (then close)
+  (with-mutex done-mutex
+    (let loop ()
+      (unless (fx= producers-done 10)
+        (condition-wait done-cond done-mutex)
+        (loop))))
+  (mpsc-close! q)
+  ;; Consume all messages
+  (let loop ([count 0])
+    (let-values ([(msg ok) (mpsc-try-dequeue! q)])
+      (if ok
+        (begin
+          (hashtable-set! received msg #t)
+          (loop (fx+ count 1)))
+        (test "all-received" count total)))))
+
+;; Test 4: single-producer FIFO ordering
+(let ([q (make-mpsc-queue)])
+  (do ([i 0 (fx+ i 1)]) ((fx= i 100))
+    (mpsc-enqueue! q i))
+  (let loop ([i 0])
+    (when (fx< i 100)
+      (let-values ([(v ok) (mpsc-try-dequeue! q)])
+        (when ok
+          (test (string-append "fifo-" (number->string i)) v i)
+          (loop (fx+ i 1)))))))
+
+;; Test 5: close wakes blocked consumer
+(let ([q (make-mpsc-queue)]
+      [error-caught #f])
+  (let ([t (fork-thread
+              (lambda ()
+                (guard (exn [#t (set! error-caught #t)])
+                  (mpsc-dequeue! q))))])
+    (sleep (make-time 'time-duration 50000000 0))  ;; 50ms
+    (mpsc-close! q)
+    (sleep (make-time 'time-duration 50000000 0))
+    (test "close-wakes-consumer" error-caught #t)))
+
+(display *tests-run*) (display " tests, ")
+(display *tests-failed*) (display " failed") (newline)
+(when (fx> *tests-failed* 0) (exit 1))
+```
+
+### `tests/test-actor-core.ss`
+
+```scheme
+#!chezscheme
+(import (chezscheme) (jerboa core) (std actor core))
+
+;; --- Minimal harness (same as above) ---
+(define *tests-run* 0)
+(define *tests-failed* 0)
+(define-syntax test
+  (syntax-rules ()
+    [(_ name expr expected)
+     (begin (set! *tests-run* (fx+ *tests-run* 1))
+            (let ([got expr])
+              (unless (equal? got expected)
+                (set! *tests-failed* (fx+ *tests-failed* 1))
+                (display "FAIL: ") (display name) (newline)
+                (display "  expected: ") (write expected) (newline)
+                (display "  got:      ") (write got) (newline))))]))
+
+;; Test 1: spawn, send, actor processes one message
+(let ([got #f]
+      [done-mutex (make-mutex)]
+      [done-cond  (make-condition)])
+  (let ([a (spawn-actor
+              (lambda (msg)
+                (with-mutex done-mutex
+                  (set! got msg)
+                  (condition-signal done-cond))))])
+    (send a 'ping)
+    (with-mutex done-mutex
+      (let loop ()
+        (unless got
+          (condition-wait done-cond done-mutex)
+          (loop))))
+    (test "spawn-send" got 'ping)))
+
+;; Test 2: actor-alive? and actor-kill!
+(let ([a (spawn-actor (lambda (msg) (void)))])
+  (test "alive-before-kill" (actor-alive? a) #t)
+  (actor-kill! a)
+  (sleep (make-time 'time-duration 10000000 0)) ;; 10ms
+  (test "dead-after-kill" (actor-alive? a) #f))
+
+;; Test 3: two actors ping-pong
+(let ([count 0]
+      [done-mutex (make-mutex)]
+      [done-cond  (make-condition)])
+  (define pong #f)
+  (define ping
+    (spawn-actor
+      (lambda (msg)
+        (match msg
+          ['pong
+           (set! count (fx+ count 1))
+           (if (fx< count 100)
+             (send pong 'ping)
+             (with-mutex done-mutex
+               (condition-signal done-cond)))]))))
+  (set! pong
+    (spawn-actor
+      (lambda (msg)
+        (match msg
+          ['ping (send ping 'pong)]))))
+  (send pong 'ping)
+  (with-mutex done-mutex
+    (let loop ()
+      (unless (fx= count 100)
+        (condition-wait done-cond done-mutex)
+        (loop))))
+  (test "ping-pong-100" count 100))
+
+;; Test 4: linked actor receives EXIT on death
+(let ([exit-received #f]
+      [done-mutex (make-mutex)]
+      [done-cond  (make-condition)])
+  (define parent
+    (spawn-actor
+      (lambda (msg)
+        (match msg
+          [('EXIT _ _)
+           (with-mutex done-mutex
+             (set! exit-received #t)
+             (condition-signal done-cond))]
+          [_ (void)]))))
+  (define child
+    (spawn-actor/linked
+      (lambda (msg) (error 'test "intentional crash"))))
+  (send child 'go)
+  (with-mutex done-mutex
+    (let loop ()
+      (unless exit-received
+        (condition-wait done-cond done-mutex)
+        (loop))))
+  (test "linked-exit" exit-received #t))
+
+;; Test 5: dead letter handler called for dead actor
+(let ([dead-letter-got #f])
+  (set-dead-letter-handler! (lambda (msg dest) (set! dead-letter-got msg)))
+  (let ([a (spawn-actor (lambda (msg) (void)))])
+    (actor-kill! a)
+    (sleep (make-time 'time-duration 10000000 0))
+    (send a 'orphan)
+    (sleep (make-time 'time-duration 10000000 0))
+    (test "dead-letter" dead-letter-got 'orphan))
+  ;; Restore default handler
+  (set-dead-letter-handler!
+    (lambda (msg dest)
+      (display "DEAD LETTER: ") (write msg) (newline))))
+
+;; Test 6: actor-wait! returns after actor killed
+(let ([a (spawn-actor (lambda (msg) (void)))]
+      [wait-returned #f])
+  (fork-thread
+    (lambda ()
+      (actor-wait! a)
+      (set! wait-returned #t)))
+  (sleep (make-time 'time-duration 20000000 0))
+  (actor-kill! a)
+  (sleep (make-time 'time-duration 20000000 0))
+  (test "actor-wait" wait-returned #t))
+
+;; Test 7: 1000 actors each receive one message
+(let ([counter 0]
+      [counter-mutex (make-mutex)]
+      [done-cond  (make-condition)])
+  (do ([i 0 (fx+ i 1)]) ((fx= i 1000))
+    (let ([a (spawn-actor
+                (lambda (msg)
+                  (with-mutex counter-mutex
+                    (set! counter (fx+ counter 1))
+                    (when (fx= counter 1000)
+                      (condition-signal done-cond)))))])
+      (send a 'go)))
+  (with-mutex counter-mutex
+    (let loop ()
+      (unless (fx= counter 1000)
+        (condition-wait done-cond counter-mutex)
+        (loop))))
+  (test "1000-actors" counter 1000))
+
+(display *tests-run*) (display " tests, ")
+(display *tests-failed*) (display " failed") (newline)
+(when (fx> *tests-failed* 0) (exit 1))
+```
+
+### `tests/test-actor-protocol.ss`
+
+```scheme
+#!chezscheme
+(import (chezscheme) (jerboa core)
+        (std actor core) (std actor protocol))
+
+(define *tests-run* 0)
+(define *tests-failed* 0)
+(define-syntax test
+  (syntax-rules ()
+    [(_ name expr expected)
+     (begin (set! *tests-run* (fx+ *tests-run* 1))
+            (let ([got expr])
+              (unless (equal? got expected)
+                (set! *tests-failed* (fx+ *tests-failed* 1))
+                (display "FAIL: ") (display name) (newline)
+                (display "  expected: ") (write expected) (newline)
+                (display "  got:      ") (write got) (newline))))]))
+
+;; Test 1: ask/reply round-trip
+(let ([a (spawn-actor
+            (lambda (msg)
+              (with-ask-context msg
+                (lambda (actual)
+                  (match actual
+                    [('add x y) (reply (+ x y))]
+                    [_ (void)])))))])
+  (test "ask-reply" (ask-sync a '(add 3 4)) 7))
+
+;; Test 2: reply in non-ask context raises error
+(let ([error-raised #f])
+  (let ([a (spawn-actor
+              (lambda (msg)
+                (guard (exn [#t (set! error-raised #t)])
+                  (reply 42))))])
+    (send a 'trigger)
+    (sleep (make-time 'time-duration 50000000 0))
+    (test "reply-no-context" error-raised #t)))
+
+;; Test 3: tell is fire-and-forget
+(let ([got #f]
+      [done-mutex (make-mutex)]
+      [done-cond  (make-condition)])
+  (let ([a (spawn-actor
+              (lambda (msg)
+                (with-mutex done-mutex
+                  (set! got msg)
+                  (condition-signal done-cond))))])
+    (tell a 'notif)
+    (with-mutex done-mutex
+      (let loop ()
+        (unless got
+          (condition-wait done-cond done-mutex)
+          (loop))))
+    (test "tell" got 'notif)))
+
+;; Test 4: defprotocol generates correct helpers
+(defprotocol math-svc
+  (square x -> result)
+  (log-value v))
+
+(let ([a (spawn-actor
+            (lambda (msg)
+              (with-ask-context msg
+                (lambda (actual)
+                  (cond
+                    [(math-svc:square? actual)
+                     (reply (* (math-svc:square-x actual)
+                               (math-svc:square-x actual)))]
+                    [(math-svc:log-value? actual)
+                     (display "logged: ")
+                     (display (math-svc:log-value-v actual))
+                     (newline)]
+                    [else (void)])))))])
+  (test "defprotocol-ask"  (math-svc:square?! a 7) 49)
+  (math-svc:log-value! a 42))
+
+;; Test 5: multiple concurrent asks
+(let ([a (spawn-actor
+            (lambda (msg)
+              (with-ask-context msg
+                (lambda (actual)
+                  (match actual
+                    [('echo v) (reply v)]
+                    [_ (void)])))))]
+      [results '()]
+      [results-mutex (make-mutex)]
+      [done-cond     (make-condition)])
+  (do ([i 0 (fx+ i 1)]) ((fx= i 10))
+    (let ([n i])
+      (fork-thread
+        (lambda ()
+          (let ([v (ask-sync a (list 'echo n))])
+            (with-mutex results-mutex
+              (set! results (cons v results))
+              (when (fx= (length results) 10)
+                (condition-signal done-cond))))))))
+  (with-mutex results-mutex
+    (let loop ()
+      (unless (fx= (length results) 10)
+        (condition-wait done-cond results-mutex)
+        (loop))))
+  (test "concurrent-asks" (length results) 10))
+
+(display *tests-run*) (display " tests, ")
+(display *tests-failed*) (display " failed") (newline)
+(when (fx> *tests-failed* 0) (exit 1))
+```
+
+### `tests/test-actor-supervisor.ss`
+
+```scheme
+#!chezscheme
+(import (chezscheme) (jerboa core)
+        (std actor core) (std actor protocol) (std actor supervisor))
+
+(define *tests-run* 0)
+(define *tests-failed* 0)
+(define-syntax test
+  (syntax-rules ()
+    [(_ name expr expected)
+     (begin (set! *tests-run* (fx+ *tests-run* 1))
+            (let ([got expr])
+              (unless (equal? got expected)
+                (set! *tests-failed* (fx+ *tests-failed* 1))
+                (display "FAIL: ") (display name) (newline)
+                (display "  expected: ") (write expected) (newline)
+                (display "  got:      ") (write got) (newline))))]))
+
+;; Test 1: one-for-one restart
+(let ([started 0]
+      [start-mutex (make-mutex)])
+  (define (make-crashable-worker)
+    (with-mutex start-mutex
+      (set! started (fx+ started 1)))
+    (spawn-actor
+      (lambda (msg)
+        (match msg
+          ['crash (error 'worker "intentional")]
+          [_      (void)]))))
+
+  (let ([sup (start-supervisor
+               'one-for-one
+               (list (make-child-spec 'w make-crashable-worker 'permanent 1.0 'worker))
+               10 5)])
+    (sleep (make-time 'time-duration 50000000 0))
+    (test "one-for-one-started" started 1)
+    ;; Crash the worker
+    (let ([children (supervisor-which-children sup)])
+      (let ([w (caddr (car children))])
+        (send w 'crash)))
+    (sleep (make-time 'time-duration 100000000 0)) ;; 100ms for restart
+    (test "one-for-one-restarted" started 2)))
+
+;; Test 2: transient worker — no restart on normal exit
+(let ([started 0])
+  (define (make-transient)
+    (set! started (fx+ started 1))
+    (spawn-actor
+      (lambda (msg)
+        (match msg
+          ['stop (actor-kill! (self))]
+          [_ (void)]))))
+
+  (let ([sup (start-supervisor
+               'one-for-one
+               (list (make-child-spec 'w make-transient 'transient 1.0 'worker))
+               10 5)])
+    (sleep (make-time 'time-duration 50000000 0))
+    (let ([children (supervisor-which-children sup)])
+      (let ([w (caddr (car children))])
+        (actor-kill! w)))   ;; killed = not 'normal, so transient SHOULD restart
+    (sleep (make-time 'time-duration 100000000 0))
+    (test "transient-restart-on-kill" started 2)))
+
+;; Test 3: temporary worker — never restarted
+(let ([started 0])
+  (define (make-temp)
+    (set! started (fx+ started 1))
+    (spawn-actor
+      (lambda (msg)
+        (match msg
+          ['crash (error 'temp "die")]
+          [_ (void)]))))
+
+  (let ([sup (start-supervisor
+               'one-for-one
+               (list (make-child-spec 'w make-temp 'temporary 1.0 'worker))
+               10 5)])
+    (sleep (make-time 'time-duration 50000000 0))
+    (let ([children (supervisor-which-children sup)])
+      (let ([w (caddr (car children))])
+        (send w 'crash)))
+    (sleep (make-time 'time-duration 100000000 0))
+    (test "temporary-no-restart" started 1)))
+
+;; Test 4: dynamic child management
+(let ([sup (start-supervisor 'one-for-one '() 10 5)])
+  (let ([new-ref
+         (supervisor-start-child! sup
+           (make-child-spec 'dynamic
+                            (lambda () (spawn-actor (lambda (msg) (void))))
+                            'permanent 1.0 'worker))])
+    (test "dynamic-start" (actor-ref? new-ref) #t)
+    (supervisor-terminate-child! sup 'dynamic)
+    (let ([children (supervisor-which-children sup)])
+      (test "dynamic-terminate" (cadr (car children)) 'stopped))))
+
+(display *tests-run*) (display " tests, ")
+(display *tests-failed*) (display " failed") (newline)
+(when (fx> *tests-failed* 0) (exit 1))
+```
+
+### `tests/test-actor-registry.ss`
+
+```scheme
+#!chezscheme
+(import (chezscheme) (jerboa core)
+        (std actor core) (std actor protocol) (std actor registry))
+
+(define *tests-run* 0)
+(define *tests-failed* 0)
+(define-syntax test
+  (syntax-rules ()
+    [(_ name expr expected)
+     (begin (set! *tests-run* (fx+ *tests-run* 1))
+            (let ([got expr])
+              (unless (equal? got expected)
+                (set! *tests-failed* (fx+ *tests-failed* 1))
+                (display "FAIL: ") (display name) (newline)
+                (display "  expected: ") (write expected) (newline)
+                (display "  got:      ") (write got) (newline))))]))
+
+(start-registry!)
+
+;; Test 1: register and whereis
+(let ([a (spawn-actor (lambda (msg) (void)))])
+  (test "register-ok"  (register! 'my-actor a) 'ok)
+  (test "whereis-found" (whereis 'my-actor) a)
+  (unregister! 'my-actor))
+
+;; Test 2: duplicate registration
+(let ([a (spawn-actor (lambda (msg) (void)))])
+  (register! 'dup a)
+  (test "register-dup" (register! 'dup a) 'already-registered)
+  (unregister! 'dup))
+
+;; Test 3: unregister then whereis returns #f
+(let ([a (spawn-actor (lambda (msg) (void)))])
+  (register! 'gone a)
+  (unregister! 'gone)
+  (test "whereis-gone" (whereis 'gone) #f))
+
+;; Test 4: actor dies, auto-unregistered
+(let ([a (spawn-actor (lambda (msg) (void)))])
+  (register! 'dying a)
+  (actor-kill! a)
+  (sleep (make-time 'time-duration 100000000 0)) ;; 100ms for DOWN to propagate
+  (test "auto-unregister" (whereis 'dying) #f))
+
+;; Test 5: registered-names
+(let ([a (spawn-actor (lambda (msg) (void)))]
+      [b (spawn-actor (lambda (msg) (void)))])
+  (register! 'aa a)
+  (register! 'bb b)
+  (let ([names (registered-names)])
+    (test "names-contains-aa" (memq 'aa names) (memq 'aa names))
+    (test "names-contains-bb" (memq 'bb names) (memq 'bb names)))
+  (unregister! 'aa)
+  (unregister! 'bb))
+
+(display *tests-run*) (display " tests, ")
+(display *tests-failed*) (display " failed") (newline)
+(when (fx> *tests-failed* 0) (exit 1))
+```
+
+### `tests/test-actor-deque.ss`
+
+```scheme
+#!chezscheme
+(import (chezscheme) (std actor deque))
+
+(define *tests-run* 0)
+(define *tests-failed* 0)
+(define-syntax test
+  (syntax-rules ()
+    [(_ name expr expected)
+     (begin (set! *tests-run* (fx+ *tests-run* 1))
+            (let ([got expr])
+              (unless (equal? got expected)
+                (set! *tests-failed* (fx+ *tests-failed* 1))
+                (display "FAIL: ") (display name) (newline)
+                (display "  expected: ") (write expected) (newline)
+                (display "  got:      ") (write got) (newline))))]))
+
+;; Test 1: push and pop LIFO
+(let ([d (make-work-deque)])
+  (deque-push-bottom! d 'a)
+  (deque-push-bottom! d 'b)
+  (deque-push-bottom! d 'c)
+  (test "pop-lifo-1" (deque-pop-bottom! d) 'c)
+  (test "pop-lifo-2" (deque-pop-bottom! d) 'b)
+  (test "pop-lifo-3" (deque-pop-bottom! d) 'a)
+  (test "pop-empty"  (deque-pop-bottom! d) #f))
+
+;; Test 2: steal FIFO
+(let ([d (make-work-deque)])
+  (deque-push-bottom! d 'x)
+  (deque-push-bottom! d 'y)
+  (deque-push-bottom! d 'z)
+  (let-values ([(t1 ok1) (deque-steal-top! d)])
+    (let-values ([(t2 ok2) (deque-steal-top! d)])
+      (let-values ([(t3 ok3) (deque-steal-top! d)])
+        (let-values ([(t4 ok4) (deque-steal-top! d)])
+          (test "steal-fifo-1" t1 'x)
+          (test "steal-fifo-2" t2 'y)
+          (test "steal-fifo-3" t3 'z)
+          (test "steal-empty-ok" ok4 #f))))))
+
+;; Test 3: grow beyond initial capacity (64)
+(let ([d (make-work-deque)])
+  (do ([i 0 (fx+ i 1)]) ((fx= i 200))
+    (deque-push-bottom! d i))
+  (let loop ([i 199] [ok #t])
+    (if (or (not ok) (fx< i 0))
+      (test "grow-lifo" i -1)
+      (let ([v (deque-pop-bottom! d)])
+        (loop (fx- i 1) (fx= v i))))))
+
+;; Test 4: concurrent push + steal
+(let ([d (make-work-deque)]
+      [stolen (make-vector 100 #f)]
+      [steal-count 0]
+      [steal-mutex (make-mutex)]
+      [done-cond (make-condition)])
+  (do ([i 0 (fx+ i 1)]) ((fx= i 100))
+    (deque-push-bottom! d i))
+  (do ([t 0 (fx+ t 1)]) ((fx= t 5))
+    (fork-thread
+      (lambda ()
+        (let loop ()
+          (let-values ([(task ok) (deque-steal-top! d)])
+            (when ok
+              (with-mutex steal-mutex
+                (vector-set! stolen task #t)
+                (set! steal-count (fx+ steal-count 1))
+                (when (fx= steal-count 100)
+                  (condition-signal done-cond)))
+              (loop)))))))
+  (with-mutex steal-mutex
+    (let loop ()
+      (unless (fx= steal-count 100)
+        (condition-wait done-cond steal-mutex)
+        (loop))))
+  (test "concurrent-steal" steal-count 100))
+
+(display *tests-run*) (display " tests, ")
+(display *tests-failed*) (display " failed") (newline)
+(when (fx> *tests-failed* 0) (exit 1))
 ```
 
 ---
@@ -2468,3 +3582,75 @@ This guide was validated against Chez Scheme 10.4.0 (`ta6le`, threaded build):
 - **`string-index`**: NOT available — must implement manually
 - **`get-bytevector-n`**: Available — efficient bulk reads from ports
 - **CAS (`compare-and-swap`)**: NOT available — use mutex-based deque initially
+- **`fxxor`**: Available in Chez 10 — use for FNV cookie hash
+- **`future-done?`**: NOT in `define-record-type` namespace; name the field `completed?` to avoid clash
+
+---
+
+## Integration Checklist
+
+Use this checklist when wiring all layers together for the first time.
+
+### Startup sequence
+
+```scheme
+;; 1. Build order: mpsc → deque → core → protocol → supervisor → registry → scheduler
+;; 2. After loading all .sls files, initialize in this order:
+
+;; a. Start the scheduler (optional — skip for 1:1 OS thread mode)
+(define sched (scheduler-start! (make-scheduler (cpu-count))))
+(set-actor-scheduler! (lambda (thunk) (scheduler-submit! sched thunk)))
+
+;; b. Start the registry
+(start-registry!)
+
+;; c. Wire in transport (optional — only for distributed)
+;; (import (std actor transport))
+;; (start-node! "localhost" 9000 "my-secret-cookie")
+;; (start-node-server! 9000)
+;; (set-remote-send-handler!
+;;   (lambda (actor msg)
+;;     (remote-send! (actor-ref-node actor) (actor-ref-id actor) msg)))
+```
+
+### Shutdown sequence
+
+```scheme
+;; 1. Stop supervisor trees (propagates graceful shutdown to children)
+(actor-kill! app-supervisor)
+
+;; 2. Stop the scheduler (drains remaining tasks, exits worker threads)
+(scheduler-stop! sched)
+
+;; 3. Close TCP connections (if distributed)
+;; (transport-shutdown!)   ;; not yet implemented — close all *connections* entries
+```
+
+### Dependency graph
+
+```
+mpsc.sls
+  ↑
+core.sls ────────────────────> scheduler.sls
+  ↑                                 ↑
+protocol.sls                     deque.sls
+  ↑
+supervisor.sls
+  ↑
+registry.sls
+
+transport.sls ──> core.sls (via set-remote-send-handler!)
+```
+
+No circular imports. Each layer imports only what is below it.
+
+### Common wiring mistakes
+
+| Mistake | Symptom | Fix |
+|---------|---------|-----|
+| `set-actor-scheduler!` never called | Each actor uses a new OS thread; crashes above ~1000 actors | Call after `scheduler-start!` |
+| `start-registry!` never called | `register!`/`whereis` crash with `#f` dereference | Call before any `register!` |
+| `(std task)` futures not available | `make-future` unbound in protocol.sls | Add inline future implementation from the section above |
+| `with-ask-context` not used in behavior | `reply` raises "not in ask context" | Wrap behavior body in `with-ask-context` |
+| Links used instead of monitors in supervisor | Supervisor dies when child dies | Use `actor-ref-monitors-set!` not links |
+| `restart-one!` called outside supervisor behavior | `(self)` returns `#f` | Only call restart helpers from within the supervisor actor's message loop |
