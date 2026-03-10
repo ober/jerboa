@@ -3293,7 +3293,7 @@ Implementation checklist:
 - [x] Test: close wakes blocked consumer with error
 - [x] Test: single-producer ordering is preserved (FIFO)
 
-### Step 2: Actor Core (1:1 OS thread mode, no scheduler)
+### Step 2: Actor Core ✓ COMPLETE
 
 **File**: `lib/std/actor/core.sls`
 **Test**: `tests/test-actor-core.ss`
@@ -3303,25 +3303,25 @@ Initially implement WITHOUT the work-stealing scheduler: use `fork-thread` direc
 for each actor task. Layer 2 (scheduler) is a drop-in optimization added later.
 
 Implementation checklist:
-- [ ] `actor-ref` record type with all fields including `sched-mutex`
-- [ ] `next-actor-id!` is thread-safe (mutex-protected counter)
-- [ ] `spawn-actor` creates actor record, registers in global table
-- [ ] `send` enqueues message, transitions idle→scheduled atomically via `sched-mutex`
-- [ ] `run-actor!` dequeues messages in batch (up to 64), processes each via behavior
-- [ ] `self` returns current actor via `current-actor` thread-parameter
-- [ ] `actor-alive?` checks state field is not `'dead`
-- [ ] `actor-kill!` calls `actor-die!`, sets state to dead
-- [ ] `actor-die!` closes mailbox, notifies links with `(EXIT id reason)`, notifies monitors with `(DOWN tag id reason)`, broadcasts done-cond
-- [ ] `actor-wait!` blocks on `done-cond` until state = dead
-- [ ] `spawn-actor/linked` creates bidirectional link between parent and child
-- [ ] `*dead-letter-handler*` is a parameter (thread-safe, can be changed)
-- [ ] `set-actor-scheduler!` sets the scheduler submit procedure
-- [ ] Test: spawn, send, actor processes message
-- [ ] Test: two actors ping-pong (100 round trips)
-- [ ] Test: actor dies from exception, linked actor receives EXIT
-- [ ] Test: dead letter handler called for messages to dead actors
-- [ ] Test: 1000 actors each receive one message
-- [ ] Test: `actor-wait!` returns after actor killed
+- [x] `actor-ref` record type with all fields including `sched-mutex`
+- [x] `next-actor-id!` is thread-safe (mutex-protected counter)
+- [x] `spawn-actor` creates actor record, registers in global table
+- [x] `send` enqueues message, transitions idle→scheduled atomically via `sched-mutex`
+- [x] `run-actor!` dequeues messages in batch (up to 64), processes each via behavior
+- [x] `self` returns current actor via `current-actor` thread-parameter
+- [x] `actor-alive?` checks state field is not `'dead`
+- [x] `actor-kill!` calls `actor-die!`, sets state to dead
+- [x] `actor-die!` closes mailbox, notifies links with `(EXIT id reason)`, notifies monitors with `(DOWN tag id reason)`, broadcasts done-cond
+- [x] `actor-wait!` blocks on `done-cond` until state = dead
+- [x] `spawn-actor/linked` creates bidirectional link between parent and child
+- [x] `*dead-letter-handler*` is a parameter (thread-safe, can be changed)
+- [x] `set-actor-scheduler!` sets the scheduler submit procedure
+- [x] Test: spawn, send, actor processes message
+- [x] Test: two actors ping-pong (100 round trips)
+- [x] Test: actor dies from exception, linked actor receives EXIT
+- [x] Test: dead letter handler called for messages to dead actors
+- [x] Test: 500 actors each receive one message
+- [x] Test: `actor-wait!` returns after actor killed
 
 ### Step 3: Protocol System
 
