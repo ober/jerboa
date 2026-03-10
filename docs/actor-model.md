@@ -3375,23 +3375,25 @@ Implementation checklist:
 **Note**: Use `(only (jerboa core) match)` not bare `(jerboa core)` to avoid
 identifier conflicts with `(chezscheme)` (`1+`, `iota`, `make-hash-table`).
 
-### Step 5: Registry
+### Step 5: Registry ✓ COMPLETE
 
 **File**: `lib/std/actor/registry.sls`
 **Test**: `tests/test-actor-registry.ss`
-**Dependencies**: `core.sls`, `protocol.sls`, `(jerboa core)` (for `match`)
+**Dependencies**: `core.sls`, `protocol.sls`, `(only (jerboa core) match)`
 
 Implementation checklist:
-- [ ] `start-registry!` spawns the registry actor
-- [ ] `register!` registers name, returns `'already-registered` if duplicate
-- [ ] `whereis` returns actor-ref or `#f`
-- [ ] `unregister!` removes name
-- [ ] Auto-unregister when actor dies (via monitor + DOWN message)
-- [ ] `registered-names` returns list of all names
-- [ ] Test: register, whereis returns same ref
-- [ ] Test: register duplicate returns 'already-registered
-- [ ] Test: actor dies, whereis returns #f
-- [ ] Test: unregister manually, whereis returns #f
+- [x] `start-registry!` spawns the registry actor
+- [x] `register!` registers name, returns `'already-registered` if duplicate
+- [x] `whereis` returns actor-ref or `#f`
+- [x] `unregister!` removes name
+- [x] Auto-unregister when actor dies (via monitor + DOWN message)
+- [x] `registered-names` returns list of all names
+- [x] Test: register, whereis returns same ref
+- [x] Test: register duplicate returns 'already-registered
+- [x] Test: actor dies, whereis returns #f
+- [x] Test: unregister manually, whereis returns #f
+- [x] Test: two names for the same actor both resolve
+- [x] Test: 10 register/unregister cycles leaves clean state (12/12 passed)
 
 ### Step 6: Work-Stealing Scheduler
 
