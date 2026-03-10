@@ -1,6 +1,6 @@
 # Building a Self-Contained Chez Scheme Binary: Tricks and Techniques
 
-This document captures every trick used to build jerboa-shell's `jsh` — a single ELF binary that embeds Chez Scheme's runtime, boot files, 30+ Gerbil-to-Chez compiled modules, a Gerbil reader/compiler, and POSIX FFI bindings. The binary works from any directory with zero external dependencies (beyond libc and system libraries).
+This document captures the techniques for building a single ELF binary that embeds Chez Scheme's runtime, boot files, compiled modules, and FFI bindings. The binary works from any directory with zero external dependencies (beyond libc and system libraries).
 
 ---
 
@@ -416,7 +416,7 @@ The binary size penalty is minimal (~10%) and avoids subtle runtime crashes.
 
 ## 14. Boot File Dependency Ordering
 
-The `make-boot-file` call must list `.so` files in strict dependency order. A module can only reference definitions from modules listed before it. The order for jerboa-shell:
+The `make-boot-file` call must list `.so` files in strict dependency order. A module can only reference definitions from modules listed before it. Example order:
 
 ```
 1. Jerboa runtime (9 modules):

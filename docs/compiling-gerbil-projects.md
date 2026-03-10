@@ -266,8 +266,7 @@ Your project likely imports Gerbil standard library modules (`:std/sugar`,
 | `:std/os/signal` | `(compat signal)` | Signal handling |
 | `:std/os/fdio` | `(compat fdio)` | File descriptor I/O |
 
-You don't always need to write these from scratch. Check if jerboa-shell's
-`src/compat/` already has what you need — many shims are reusable.
+You don't always need to write these from scratch — many shims follow a common pattern and can be adapted.
 
 ## Step 7: Build and Test
 
@@ -393,6 +392,5 @@ Study these for real-world patterns:
 
 | Project | Modules | Key Patterns |
 |---------|---------|--------------|
-| [jerboa-shell](https://github.com/ober/jerboa-shell) | 30+ | FFI shim, binary building, post-build patches |
 | jerboa-kunabi | 10+ | Cross-project deps (jerboa-aws), sed-based patches |
 | jerboa-lsp | 53 | Large module count, JSON/HTTP compat |

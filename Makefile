@@ -7,7 +7,7 @@ CHEZ_EXT_LIBDIRS = $(CHEZ_EXT_DIR)/chez-https/src:$(CHEZ_EXT_DIR)/chez-ssl/src:$
 # Shared object paths for FFI-based chez-* libraries
 CHEZ_EXT_LDPATH = $(CHEZ_EXT_DIR)/chez-ssl:$(CHEZ_EXT_DIR)/chez-zlib:$(CHEZ_EXT_DIR)/chez-pcre2:$(CHEZ_EXT_DIR)/chez-leveldb:$(CHEZ_EXT_DIR)/chez-epoll:$(CHEZ_EXT_DIR)/chez-inotify:$(CHEZ_EXT_DIR)/chez-crypto:$(CHEZ_EXT_DIR)/chez-sqlite:$(CHEZ_EXT_DIR)/chez-postgresql
 
-.PHONY: test test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded test-wrappers clean
+.PHONY: test test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded test-features test-wrappers clean
 
 test: test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded
 
@@ -75,7 +75,15 @@ test-wrappers:
 		$(SCHEME) --libdirs "$(LIBDIRS):$(CHEZ_EXT_LIBDIRS)" --script tests/test-wrapper-postgresql.ss 2>/dev/null \
 		|| echo "  postgresql: SKIP (requires chez_pg_shim.so)"
 
-test-all: test test-wrappers
+test-features:
+	@echo "--- Feature tests ---"
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-foreign.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-channel2.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-task.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-typed.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-cache.ss
+
+test-all: test test-features test-wrappers
 
 clean:
 	find lib -name "*.so" -delete 2>/dev/null || true

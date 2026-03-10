@@ -164,7 +164,7 @@
 
 ## Feature 3: Static Native Binaries with Tree Shaking
 
-**Status**: Proven in jerboa-shell (6.5 MB ELF, see `docs/single-binary.md`). The technique works: boot file embedding + memfd program loading + custom C main.
+**Status**: Technique designed (see `docs/single-binary.md`). The approach uses boot file embedding + memfd program loading + custom C main. Build scaffold in `(jerboa build)`.
 
 **Gap**: No automated tooling. Building a binary requires manually writing `build-binary.ss`, knowing boot file dependency order, and hand-crafting C main files.
 
@@ -543,5 +543,5 @@ Feature 2 (FFI DSL) is the critical path. It reduces the boilerplate in all 11 c
 - **51 stdlib modules** -- crypto, db, networking, OS, text processing
 - **11 chez-* FFI libraries** -- ssl, https, zlib, pcre2, yaml, leveldb, epoll, inotify, crypto, sqlite, postgresql
 - **Real OS threads** with Gambit-compatible API + channels
-- **Proven single-binary technique** -- 6.5 MB ELF with embedded boot files (jerboa-shell)
+- **Single-binary technique** -- boot file embedding + memfd, build scaffold in `(jerboa build)`
 - **338 tests** -- 289 core + 49 wrapper

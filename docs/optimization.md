@@ -209,25 +209,15 @@ This only affects compilation (via `compile-file`), not source loading.
 
 6. **`debug-level 0`** — For release builds, allows maximum continuation optimization.
 
-## 17. Empirical Results (jerboa-shell benchmarks)
+## 17. Expected Optimization Impact
 
-Tested on jerboa-shell using shellbench. All numbers are executions/second (higher = better).
+Based on Chez Scheme's optimizer characteristics, these techniques should yield the most benefit:
 
-| Optimization | Avg Improvement | Best Test | Binary Size |
-|-------------|----------------|-----------|-------------|
-| Baseline (default) | — | — | 6,543 KB |
-| optimize-level 3 (shell only) | +3.2% | +6.3% | 6,499 KB |
-| opt3 (runtime + shell) | +5.2% | +6.4% | 6,475 KB |
-| opt3 + tuned cp0 + no inspector | +5.0% | +6.3% | 6,003 KB (-8.3%) |
-| opt3 + tuned cp0 + partial WPO | +8.7% | +16.3% | 7,075 KB |
-| **opt3 + tuned cp0 + full WPO** | **+9.6%** | **+20.3%** | 6,891 KB (+5.3%) |
-
-Key findings:
-- **WPO works** despite `identifier-syntax` mutable exports (they survived WPO in this project)
-- **Full WPO requires `.wpo` files** from both jerboa runtime and jerboa-shell compat layers
+- **WPO** works despite `identifier-syntax` mutable exports
+- **Full WPO requires `.wpo` files** from both jerboa runtime and application compat layers
 - **cp0 tuning** (effort 500, score 50) adds ~1-2% on top of opt3 alone
-- **`generate-inspector-information #f`** reduces binary size significantly (-8.3%) with negligible performance impact
-- **Biggest wins** on comparison operations (`cmp: [ ]` +20.3%) and arithmetic (`count: typeset -i` +17.9%)
+- **`generate-inspector-information #f`** reduces binary size significantly with negligible performance impact
+- **Biggest wins** expected on comparison operations and arithmetic
 
 ## Summary
 

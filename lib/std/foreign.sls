@@ -17,8 +17,10 @@
     define-foreign/check
     define-const
     define-foreign-type
+    define-foreign-struct
     with-foreign-resource
     define-callback
+    -> ;; auxiliary keyword for define-foreign syntax
     ;; Re-export essentials from Chez for convenience
     foreign-alloc foreign-free foreign-ref foreign-set!
     foreign-sizeof
@@ -26,6 +28,9 @@
     ;; Guardian-based cleanup
     start-guardian-thread! stop-guardian-thread!)
   (import (chezscheme))
+
+  ;; Auxiliary keyword for arrow syntax in define-foreign
+  (define-syntax -> (lambda (x) (syntax-violation '-> "misplaced auxiliary keyword" x)))
 
   ;; ========== Type Mapping ==========
 
@@ -103,12 +108,17 @@
 
   (define-syntax define-foreign/check
     (lambda (stx)
-      (syntax-case stx (-> check: error:)
+      (define (kw? stx sym)
+        (and (identifier? stx)
+             (eq? (syntax->datum stx) sym)))
+      (syntax-case stx (->)
         ;; With both check and error
         [(k name c-name (arg-type ...) -> ret-type
-            (check: check-pred)
-            (error: error-handler))
-         (string? (syntax->datum #'c-name))
+            (check-kw check-pred)
+            (error-kw error-handler))
+         (and (string? (syntax->datum #'c-name))
+              (kw? #'check-kw 'check:)
+              (kw? #'error-kw 'error:))
          (let ([chez-args (map (lambda (t) (translate-type (syntax->datum t)))
                                (syntax->list #'(arg-type ...)))]
                [chez-ret (translate-type (syntax->datum #'ret-type))])
@@ -122,13 +132,24 @@
                      (error-handler rc))))))]
         ;; Check only, generic error
         [(k name c-name (arg-type ...) -> ret-type
-            (check: check-pred))
-         #'(define-foreign/check name c-name (arg-type ...) -> ret-type
-             (check: check-pred)
-             (error: (lambda (rc)
-                       (error 'name
-                              (format "FFI call ~a failed" c-name)
-                              rc))))])))
+            (check-kw check-pred))
+         (and (string? (syntax->datum #'c-name))
+              (kw? #'check-kw 'check:))
+         (let ([chez-args (map (lambda (t) (translate-type (syntax->datum t)))
+                               (syntax->list #'(arg-type ...)))]
+               [chez-ret (translate-type (syntax->datum #'ret-type))]
+               [who (syntax->datum #'name)]
+               [cn (syntax->datum #'c-name)])
+           (with-syntax ([(ct ...) (datum->syntax #'k chez-args)]
+                         [rt (datum->syntax #'k chez-ret)]
+                         [(param ...) (generate-temporaries #'(arg-type ...))]
+                         [who-sym (datum->syntax #'k who)]
+                         [msg (datum->syntax #'k (format "FFI call ~a failed" cn))])
+             #'(define (name param ...)
+                 (let ([rc ((foreign-procedure c-name (ct ...) rt) param ...)])
+                   (if (check-pred rc)
+                     rc
+                     (error 'who-sym msg rc))))))])))
 
   ;; ========== define-const ==========
   ;;
@@ -164,18 +185,6 @@
   ;; Wraps shared-object loading around a body of FFI definitions.
   ;; Accepts one or more shared object paths.
 
-  (define-syntax define-ffi-library
-    (syntax-rules ()
-      ;; Single shared object
-      [(_ lib-name shared-obj body ...)
-       (string? 'unused) ;; just for documentation
-       (begin
-         (define lib-name (load-shared-object shared-obj))
-         body ...)]
-      ;; Multiple shared objects (variadic — pass as list)
-      ))
-
-  ;; Overload: support list of shared objects
   (define-syntax define-ffi-library
     (lambda (stx)
       (syntax-case stx ()
@@ -252,16 +261,16 @@
   ;; Returns the raw pointer for FFI compatibility.
 
   (define-syntax define-foreign-type
-    (syntax-rules (destructor:)
-      [(_ type-name base-type (destructor: dtor))
-       (begin
-         ;; Constructor: wrap and register
-         (define (type-name ptr)
-           (register-destructor! ptr dtor)
-           ptr))]
-      ;; No destructor — just a type alias
-      [(_ type-name base-type)
-       (define (type-name ptr) ptr)]))
+    (lambda (stx)
+      (syntax-case stx ()
+        [(_ type-name base-type (dtor-kw dtor))
+         (eq? (syntax->datum #'dtor-kw) 'destructor:)
+         #'(begin
+             (define (type-name ptr)
+               (register-destructor! ptr dtor)
+               ptr))]
+        [(_ type-name base-type)
+         #'(define (type-name ptr) ptr)])))
 
   ;; ========== with-foreign-resource ==========
   ;;
@@ -299,5 +308,44 @@
                    (let ([cb (foreign-callable proc (ct ...) rt)])
                      (lock-object cb)
                      (foreign-callable-entry-point cb))))))])))
+
+  ;; ========== define-foreign-struct ==========
+  ;;
+  ;; (define-foreign-struct name
+  ;;   (field-name type offset: N) ...)
+  ;;
+  ;; Generates accessor and mutator procedures for C struct fields
+  ;; at known byte offsets. Operates on raw void* pointers.
+
+  (define-syntax define-foreign-struct
+    (lambda (stx)
+      (define (parse-field f)
+        (syntax-case f ()
+          [(name type offset-kw off)
+           (eq? (syntax->datum #'offset-kw) 'offset:)
+           (list #'name (translate-type (syntax->datum #'type)) #'off)]))
+      (define (field-names f)
+        (syntax-case f ()
+          [(name type offset-kw off)
+           (syntax->datum #'name)]))
+      (syntax-case stx ()
+        [(k struct-name field ...)
+         (let ([parsed (map parse-field (syntax->list #'(field ...)))])
+           (with-syntax ([((getter setter ftype-sym foffset) ...)
+                          (map (lambda (f)
+                                 (let ([sname (syntax->datum #'struct-name)]
+                                       [fn (syntax->datum (car f))]
+                                       [ft (cadr f)]
+                                       [fo (caddr f)])
+                                   (list (datum->syntax #'k
+                                           (string->symbol (format "~a-~a" sname fn)))
+                                         (datum->syntax #'k
+                                           (string->symbol (format "~a-~a-set!" sname fn)))
+                                         (datum->syntax #'k ft)
+                                         fo)))
+                               parsed)])
+             #'(begin
+                 (define (getter ptr) (foreign-ref 'ftype-sym ptr foffset)) ...
+                 (define (setter ptr val) (foreign-set! 'ftype-sym ptr foffset val)) ...)))])))
 
   ) ;; end library

@@ -209,9 +209,9 @@ These Gambit-specific functions had no Chez equivalent and needed stubs:
 
 ### FFI Stubs in `gambit.sls`
 
-The gambit.sls from jerboa-shell had `foreign-procedure` calls for process and
+The original gambit.sls had `foreign-procedure` calls for process and
 terminal management (`ffi_do_waitpid`, `ffi_set_raw_mode`, etc.). These required
-jerboa-shell's C shared library. Replaced with no-op stubs since the LSP server
+a C shared library. Replaced with no-op stubs since the LSP server
 doesn't need them.
 
 ## Build Infrastructure Decisions
