@@ -84,6 +84,29 @@ scheme --libdirs lib --script your-file.ss
 | `(std misc alist)` | `agetq`, `pgetq`, `alist->hash-table` |
 | `(std misc ports)` | `read-file-string`, `with-output-to-string`, etc. |
 | `(std misc channel)` | Thread-safe channels (Chez mutex/condvar) |
+| `(std misc thread)` | Gambit-compatible thread API on Chez threads |
+| `(std misc process)` | `run-process`, `run-process/batch` |
+| `(std misc queue)` | Mutable FIFO queue |
+| `(std misc bytes)` | Bytevector bitwise operations |
+| `(std misc uuid)` | UUID v4 generation |
+| `(std misc repr)` | `repr`, `prn` object printing |
+| `(std misc completion)` | Async completion tokens |
+| `(std pregexp)` | Portable regex (pregexp) |
+| `(std test)` | Test framework (`test-suite`, `test-case`, `check`) |
+| `(std logger)` | Logging with levels (error/warn/info/debug) |
+| `(std cli getopt)` | CLI argument parsing (options, flags, commands) |
+| `(std text base64)` | Base64 encode/decode |
+| `(std text hex)` | Hex encode/decode |
+| `(std text utf8)` | UTF-8 utilities |
+| `(std text csv)` | CSV read/write |
+| `(std text xml)` | SXML → XML serialization |
+| `(std os env)` | `getenv`, `setenv`, `unsetenv` |
+| `(std os temporaries)` | Temporary file creation |
+| `(std os signal)` | POSIX signal constants + handlers |
+| `(std os fdio)` | File descriptor I/O |
+| `(std crypto digest)` | MD5/SHA hashing via openssl |
+| `(std srfi srfi-13)` | SRFI-13 string operations |
+| `(std srfi srfi-19)` | Date/time handling |
 
 ### FFI (`(jerboa ffi)`)
 - `c-lambda` → `foreign-procedure` with automatic type translation
