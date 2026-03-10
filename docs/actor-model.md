@@ -3323,25 +3323,25 @@ Implementation checklist:
 - [x] Test: 500 actors each receive one message
 - [x] Test: `actor-wait!` returns after actor killed
 
-### Step 3: Protocol System
+### Step 3: Protocol System ✓ COMPLETE
 
 **File**: `lib/std/actor/protocol.sls`
 **Test**: `tests/test-actor-protocol.ss`
 **Dependencies**: `core.sls`, `(std task)` (for futures)
 
 Implementation checklist:
-- [ ] `reply-channel` wraps a future from `(std task)`
-- [ ] `ask` wraps message in `('$ask rc sender msg)` envelope, returns future
-- [ ] `ask-sync` calls `ask` then `future-get`
-- [ ] `with-ask-context` macro detects `$ask` envelope, binds reply channel
-- [ ] `reply` completes the current reply channel (error if not in ask context)
-- [ ] `defprotocol` generates: record types, tell helpers (`!` suffix), ask helpers (`?!` suffix)
-- [ ] `tell` is alias for `send`
-- [ ] Test: ask/reply round-trip returns correct value
-- [ ] Test: defprotocol generates correct struct predicates
-- [ ] Test: typed ask helper `?!` blocks and returns value
-- [ ] Test: `reply` in non-ask context raises error
-- [ ] Test: multiple concurrent asks to same actor
+- [x] `reply-channel` wraps a future from `(std task)`
+- [x] `ask` wraps message in `('$ask rc sender msg)` envelope, returns future
+- [x] `ask-sync` calls `ask` then `future-get`
+- [x] `with-ask-context` macro detects `$ask` envelope, binds reply channel
+- [x] `reply` completes the current reply channel (error if not in ask context)
+- [x] `defprotocol` generates: record types, tell helpers (`!` suffix), ask helpers (`?!` suffix)
+- [x] `tell` is alias for `send`
+- [x] Test: ask/reply round-trip returns correct value
+- [x] Test: defprotocol generates correct struct predicates
+- [x] Test: typed ask helper `?!` blocks and returns value
+- [x] Test: `reply` in non-ask context raises error
+- [x] Test: multiple concurrent asks to same actor
 
 ### Step 4: Supervision Trees
 
