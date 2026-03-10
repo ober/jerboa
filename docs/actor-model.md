@@ -3275,23 +3275,23 @@ node-id parsing, cookie hash). Cross-process tests are described as manual steps
 
 Implement and test each step before moving to the next.
 
-### Step 1: MPSC Queue
+### Step 1: MPSC Queue ✓ COMPLETE
 
 **File**: `lib/std/actor/mpsc.sls`
 **Test**: `tests/test-actor-mpsc.ss`
 **Dependencies**: `(chezscheme)` only
 
 Implementation checklist:
-- [ ] `make-mpsc-queue` creates two-lock linked list with dummy head
-- [ ] `mpsc-enqueue!` acquires tail-lock, signals after releasing tail-lock
-- [ ] `mpsc-dequeue!` acquires head-lock, blocks via `condition-wait` if empty
-- [ ] `mpsc-try-dequeue!` returns `(values #f #f)` immediately if empty
-- [ ] `mpsc-close!` sets closed flag, broadcasts to wake blocked consumers
-- [ ] All locking uses `with-mutex` for exception safety
-- [ ] Test: 10 concurrent producers, 1 consumer, verify all messages received
-- [ ] Test: `try-dequeue` on empty returns `(values #f #f)`
-- [ ] Test: close wakes blocked consumer with error
-- [ ] Test: single-producer ordering is preserved (FIFO)
+- [x] `make-mpsc-queue` creates two-lock linked list with dummy head
+- [x] `mpsc-enqueue!` acquires tail-lock, signals after releasing tail-lock
+- [x] `mpsc-dequeue!` acquires head-lock, blocks via `condition-wait` if empty
+- [x] `mpsc-try-dequeue!` returns `(values #f #f)` immediately if empty
+- [x] `mpsc-close!` sets closed flag, broadcasts to wake blocked consumers
+- [x] All locking uses `with-mutex` for exception safety
+- [x] Test: 10 concurrent producers, 1 consumer, verify all messages received
+- [x] Test: `try-dequeue` on empty returns `(values #f #f)`
+- [x] Test: close wakes blocked consumer with error
+- [x] Test: single-producer ordering is preserved (FIFO)
 
 ### Step 2: Actor Core (1:1 OS thread mode, no scheduler)
 
