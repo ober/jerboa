@@ -646,8 +646,30 @@
                      (char=? (string-ref s (fx- (string-length s) 1)) #\:))
                 (let ((kw-name (substring s 0 (fx- (string-length s) 1))))
                   (annotate rs (string->keyword kw-name) loc)))
+               ;; :package/module/... → (package module ...)
+               ;; Gerbil module path syntax
+               ((and (fx> (string-length s) 1)
+                     (char=? (string-ref s 0) #\:))
+                (let ((path (substring s 1 (string-length s))))
+                  (annotate rs (module-path->list path) loc)))
                (else
                 (annotate rs sym loc)))))))))
+
+  ;; Convert "std/sort" → (std sort), "std/text/json" → (std text json)
+  (define (module-path->list path)
+    (let ((parts (string-split-simple path #\/)))
+      (map string->symbol parts)))
+
+  (define (string-split-simple str ch)
+    (let ((len (string-length str)))
+      (let loop ((i 0) (start 0) (acc '()))
+        (cond
+          ((fx= i len)
+           (reverse (cons (substring str start len) acc)))
+          ((char=? (string-ref str i) ch)
+           (loop (fx+ i 1) (fx+ i 1) (cons (substring str start i) acc)))
+          (else
+           (loop (fx+ i 1) start acc))))))
 
   (define (read-symbol-chars rs prefix-char)
     (let loop ((chars (if prefix-char (list prefix-char) '())))
