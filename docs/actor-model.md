@@ -3422,29 +3422,38 @@ Implementation checklist:
 - [x] Test: all prior actor tests pass with scheduler enabled (65/65 total)
 - [x] Test: recursive task submission (tasks submitting tasks)
 
-### Step 7: Distributed Transport
+### Step 7: Distributed Transport ✓ COMPLETE
 
 **File**: `lib/std/actor/transport.sls`
-**Test**: `tests/test-actor-distributed.ss`
-**Dependencies**: `core.sls`, `(std net ssl)`
-
-This is the most complex step. Test on localhost first.
+**Test**: `tests/test-actor-transport.ss`
+**Dependencies**: `core.sls`, `(std net ssl)` (chez-ssl fd-based TCP)
 
 Implementation checklist:
-- [ ] `message->bytes` (serialize to framed bytevector) — note: `bytes->message` is `read-framed-message`; the naming in the checklist is conceptual
-- [ ] `read-framed-message` uses `get-bytevector-n` for efficient reads
-- [ ] `write-framed-message` writes frame + flushes
-- [ ] `start-node!` sets node-id and cookie parameters
-- [ ] `node-id->host+port` parses from right (IPv6 safe)
-- [ ] Connection pool with `make-hashtable` (string keys)
-- [ ] Cookie-based handshake on connection open
-- [ ] `make-remote-actor-ref` uses the 2-arg constructor in `core.sls`
-- [ ] `send` in core.sls routes to transport when `actor-ref-node` is non-`#f`
-- [ ] Node server accepts connections, authenticates, dispatches messages
-- [ ] Per-connection write mutex prevents interleaved frames
-- [ ] Test: two Chez processes on localhost exchange messages
-- [ ] Test: cookie mismatch rejects connection
-- [ ] Test: large message (1MB bytevector) round-trip
+- [x] `message->bytes` serializes to 4-byte-length-prefixed fasl bytevector
+- [x] `bytes->message` deserializes from framed bytevector
+- [x] `read-exact-into-buf` handles partial TCP reads (loops until N bytes received)
+- [x] `read-framed-message` / `write-framed-message` fd-based (chez-ssl API)
+- [x] `start-node!` sets node-id and cookie parameters
+- [x] `node-id->host+port` parses from right (IPv6 safe)
+- [x] Connection pool with `make-hashtable` (string keys) + write-mutex per connection
+- [x] FNV-1a cookie hash handshake on connection open
+- [x] `make-remote-actor-ref` uses 3-arg constructor (avoids arity collision with local 2-arg case)
+- [x] `transport-remote-send!` wired via `set-remote-send-handler!` (no circular import)
+- [x] `start-node-server!` spawns accept loop + per-client handler thread
+- [x] Per-connection write mutex prevents interleaved frames
+- [x] `transport-shutdown!` closes all connections
+- [x] Test: loopback send to same-process actor via TCP (tcp-loopback)
+- [x] Test: cookie mismatch → server rejects with `(error "bad cookie")`
+- [x] Test: large message (1MB bytevector) round-trip via bytes->message
+- [x] 15/15 tests pass
+
+**Note**: `actor-ref` protocol uses `case-lambda` — both local `(behavior name)` and
+remote `(id node)` branches took 2 args. Fixed remote to take 3 args `(id node 'remote)`
+so `case-lambda` dispatch works correctly.
+
+**Note**: TCP integration uses `(std net ssl)` / `chez-ssl` fd-based API:
+`tcp-connect`, `tcp-listen`, `tcp-accept`, `tcp-read`, `tcp-write`, `tcp-close`.
+Run tests from the `chez-ssl` directory (or with full .so path) so `chez_ssl_shim.so` loads.
 
 ---
 

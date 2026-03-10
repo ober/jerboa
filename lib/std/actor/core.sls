@@ -43,6 +43,9 @@
 
     ;; Internal: lookup for distributed layer
     lookup-local-actor
+
+    ;; Create a remote actor reference (for transport layer)
+    make-remote-actor-ref
   )
   (import (chezscheme) (std actor mpsc))
 
@@ -90,8 +93,10 @@
                 (make-mutex)
                 (make-condition)
                 #f)]
-          ;; Remote actor ref (no mailbox, no behavior)
-          [(id node)
+          ;; Remote actor ref (no mailbox, no behavior).
+          ;; Use 3 args to avoid arity collision with the local 2-arg branch.
+          ;; Call as (make-actor-ref id node-id 'remote).
+          [(id node _sentinel)
            (new id
                 node
                 #f
@@ -121,6 +126,11 @@
   (define (lookup-local-actor id)
     (with-mutex *actor-table-mutex*
       (hashtable-ref *actor-table* id #f)))
+
+  ;; Create a reference to an actor on a remote node.
+  ;; The ref has no local mailbox; send routes through the remote-send handler.
+  (define (make-remote-actor-ref id node-id)
+    (make-actor-ref id node-id 'remote))
 
   ;; -------- Thread-local actor context --------
 
