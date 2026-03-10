@@ -1,9 +1,9 @@
 SCHEME = scheme
 LIBDIRS = lib
 # External chez-* library paths for wrapper modules
-CHEZ_EXT_LIBDIRS = $(HOME)/mine/chez-https/src:$(HOME)/mine/chez-ssl/src:$(HOME)/mine/chez-zlib/src:$(HOME)/mine/chez-pcre2:$(HOME)/mine/chez-yaml:$(HOME)/mine/chez-leveldb:$(HOME)/mine/chez-epoll/src
+CHEZ_EXT_LIBDIRS = $(HOME)/mine/chez-https/src:$(HOME)/mine/chez-ssl/src:$(HOME)/mine/chez-zlib/src:$(HOME)/mine/chez-pcre2:$(HOME)/mine/chez-yaml:$(HOME)/mine/chez-leveldb:$(HOME)/mine/chez-epoll/src:$(HOME)/mine/chez-inotify/src
 # Shared object paths for FFI-based chez-* libraries
-CHEZ_EXT_LDPATH = $(HOME)/mine/chez-ssl:$(HOME)/mine/chez-zlib:$(HOME)/mine/chez-pcre2:$(HOME)/mine/chez-leveldb:$(HOME)/mine/chez-epoll
+CHEZ_EXT_LDPATH = $(HOME)/mine/chez-ssl:$(HOME)/mine/chez-zlib:$(HOME)/mine/chez-pcre2:$(HOME)/mine/chez-leveldb:$(HOME)/mine/chez-epoll:$(HOME)/mine/chez-inotify
 
 .PHONY: test test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded test-wrappers clean
 
@@ -60,6 +60,9 @@ test-wrappers:
 	@LD_LIBRARY_PATH="$(CHEZ_EXT_LDPATH):$$LD_LIBRARY_PATH" \
 		$(SCHEME) --libdirs "$(LIBDIRS):$(CHEZ_EXT_LIBDIRS)" --script tests/test-wrapper-epoll.ss 2>/dev/null \
 		|| echo "  epoll: SKIP (requires chez_epoll_shim.so)"
+	@LD_LIBRARY_PATH="$(CHEZ_EXT_LDPATH):$$LD_LIBRARY_PATH" \
+		$(SCHEME) --libdirs "$(LIBDIRS):$(CHEZ_EXT_LIBDIRS)" --script tests/test-wrapper-inotify.ss 2>/dev/null \
+		|| echo "  inotify: SKIP (requires chez_inotify_shim.so)"
 
 test-all: test test-wrappers
 
