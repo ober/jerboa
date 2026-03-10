@@ -5,6 +5,7 @@
   (export
     try catch finally
     while until
+    unwind-protect
     hash-literal hash-eq-literal
     let-hash
     defrule defrules
@@ -85,5 +86,14 @@
       [(_ expr message)
        (unless expr
          (error 'assert! message 'expr))]))
+
+  ;; unwind-protect — like Java's try/finally, guarantee cleanup runs
+  (define-syntax unwind-protect
+    (syntax-rules ()
+      [(_ body cleanup ...)
+       (dynamic-wind
+         (lambda () (void))
+         (lambda () body)
+         (lambda () cleanup ...))]))
 
   ) ;; end library
