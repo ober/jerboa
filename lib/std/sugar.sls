@@ -28,17 +28,22 @@
 
   (define-syntax chain-apply
     (lambda (stx)
-      (syntax-case stx (_)
+      (syntax-case stx ()
         [(_ f val) #'(f val)]
-        [(_ f val _ arg ...) #'(f val arg ...)]
+        [(_ f val placeholder arg ...)
+         (and (identifier? #'placeholder) (eq? (syntax->datum #'placeholder) '_))
+         #'(f val arg ...)]
         [(_ f val arg1 rest ...)
          #'(chain-apply-tail f val (arg1) rest ...)])))
 
   (define-syntax chain-apply-tail
     (lambda (stx)
-      (syntax-case stx (_)
-        [(_ f val (args ...) _) #'(f args ... val)]
-        [(_ f val (args ...) _ rest ...)
+      (syntax-case stx ()
+        [(_ f val (args ...) placeholder)
+         (and (identifier? #'placeholder) (eq? (syntax->datum #'placeholder) '_))
+         #'(f args ... val)]
+        [(_ f val (args ...) placeholder rest ...)
+         (and (identifier? #'placeholder) (eq? (syntax->datum #'placeholder) '_))
          #'(chain-apply-tail f val (args ... val) rest ...)]
         [(_ f val (args ...) arg rest ...)
          #'(chain-apply-tail f val (args ... arg) rest ...)]
