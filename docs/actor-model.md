@@ -1287,9 +1287,9 @@ The `$ask` envelope is an internal detail. User code sees only `(ask actor msg)`
       [(actor-ref msg)
        (future-get (ask actor-ref msg))]
       [(actor-ref msg timeout-secs)
-       ;; Timeout: race the future against a timer
-       ;; Simple implementation: poll with sleep
-       ;; TODO: integrate with scheduler for efficient timeout
+       ;; Timeout: race the future against a timer.
+       ;; Uses 10ms polling — good enough for most use cases.
+       ;; For finer granularity, submit a delayed cancellation task to the scheduler.
        (let ([fut (ask actor-ref msg)])
          (let loop ([remaining timeout-secs])
            (if (future-done? fut)
