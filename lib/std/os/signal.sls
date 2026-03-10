@@ -65,11 +65,13 @@
   (define (add-signal-handler! signum handler)
     ;; Register a signal handler. On Chez, we use register-signal-handler
     ;; if available, otherwise this is a best-effort stub.
+    ;; Chez's register-signal-handler calls (handler signum), but Gerbil's
+    ;; add-signal-handler! expects 0-argument handlers. Wrap to adapt.
     (set! *signal-handlers*
       (cons (cons signum handler) *signal-handlers*))
-    ;; Try to use Chez's signal handler if available
     (when (top-level-bound? 'register-signal-handler)
-      ((top-level-value 'register-signal-handler) signum handler)))
+      ((top-level-value 'register-signal-handler) signum
+        (lambda (sig) (handler)))))
 
   (define (remove-signal-handler! signum)
     (set! *signal-handlers*
