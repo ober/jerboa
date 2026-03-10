@@ -1,9 +1,9 @@
 SCHEME = scheme
 LIBDIRS = lib
 
-.PHONY: test test-reader test-core test-runtime test-stdlib test-ffi test-modules clean
+.PHONY: test test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded clean
 
-test: test-reader test-core test-runtime test-stdlib test-ffi test-modules
+test: test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded
 
 test-reader:
 	$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-reader.ss
@@ -31,6 +31,11 @@ test-ffi:
 test-modules:
 	@if [ -f tests/test-modules.ss ]; then \
 		$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-modules.ss; \
+	fi
+
+test-expanded:
+	@if [ -f tests/test-expanded-stdlib.ss ]; then \
+		$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-expanded-stdlib.ss; \
 	fi
 
 clean:
