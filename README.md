@@ -108,6 +108,17 @@ scheme --libdirs lib --script your-file.ss
 | `(std srfi srfi-13)` | SRFI-13 string operations |
 | `(std srfi srfi-19)` | Date/time handling |
 
+### External Library Wrappers (require [chez-*](https://github.com/ober) libraries)
+| Module | Wraps | Provides |
+|--------|-------|----------|
+| `(std net request)` | chez-https | `http-get`, `http-post`, `http-put`, `http-delete`, `url-encode` |
+| `(std net httpd)` | chez-httpd | `httpd-start`, `httpd-route`, `http-respond-json`, etc. |
+| `(std net ssl)` | chez-ssl | `ssl-connect`, `tcp-connect`, `tcp-listen`, TLS/TCP networking |
+| `(std compress zlib)` | chez-zlib | `gzip-bytevector`, `gunzip-bytevector`, `deflate-bytevector` |
+| `(std text yaml)` | chez-yaml | `yaml-load`, `yaml-dump`, `yaml-load-string`, `yaml-dump-string` |
+| `(std db leveldb)` | chez-leveldb | `leveldb-open`, `leveldb-put`, `leveldb-get`, iterators, batches |
+| `(std pcre2)` | chez-pcre2 | `pcre2-compile`, `pcre2-search`, `pcre2-replace`, JIT regex |
+
 ### FFI (`(jerboa ffi)`)
 - `c-lambda` → `foreign-procedure` with automatic type translation
 - `define-c-lambda` — named FFI bindings
@@ -130,14 +141,17 @@ One import for everything:
 ## Testing
 
 ```bash
-make test
+make test          # Core tests (289 tests)
+make test-wrappers # External library wrapper tests (27 tests)
+make test-all      # Both
 ```
 
-Runs 213 tests across reader, core macros, runtime, standard library, FFI, and module path mapping.
+Runs 289 tests across reader, core macros, runtime, standard library, FFI, module paths, and expanded stdlib. Wrapper tests add 27 more for chez-* library integrations.
 
 ## Requirements
 
 - [Chez Scheme](https://cisco.github.io/ChezScheme/) 10.x (stock, unmodified)
+- Optional: [chez-*](https://github.com/ober) libraries for networking, compression, PCRE2, YAML, LevelDB
 
 ## Project Structure
 
@@ -162,12 +176,54 @@ lib/
       alist.sls       # :std/misc/alist
       ports.sls        # :std/misc/ports
       channel.sls      # :std/misc/channel
+      thread.sls       # :std/misc/thread
+      process.sls      # :std/misc/process
+      queue.sls        # :std/misc/queue
+      bytes.sls        # :std/misc/bytes
+      uuid.sls         # :std/misc/uuid
+      repr.sls         # :std/misc/repr
+      completion.sls   # :std/misc/completion
+    text/
+      json.sls         # :std/text/json
+      base64.sls       # :std/text/base64
+      hex.sls          # :std/text/hex
+      utf8.sls         # :std/text/utf8
+      csv.sls          # :std/text/csv
+      xml.sls          # :std/text/xml
+      yaml.sls         # :std/text/yaml (wraps chez-yaml)
+    os/
+      path.sls         # :std/os/path
+      env.sls          # :std/os/env
+      temporaries.sls  # :std/os/temporaries
+      signal.sls       # :std/os/signal
+      fdio.sls         # :std/os/fdio
+    net/
+      request.sls      # :std/net/request (wraps chez-https)
+      httpd.sls        # :std/net/httpd (wraps chez-httpd)
+      ssl.sls          # :std/net/ssl (wraps chez-ssl)
+    compress/
+      zlib.sls         # :std/compress/zlib (wraps chez-zlib)
+    db/
+      leveldb.sls      # :std/db/leveldb (wraps chez-leveldb)
+    crypto/
+      digest.sls       # :std/crypto/digest
+    cli/
+      getopt.sls       # :std/cli/getopt
+    srfi/
+      srfi-13.sls      # :std/srfi/13
+      srfi-19.sls      # :std/srfi/19
+    pregexp.sls        # :std/pregexp
+    pcre2.sls          # :std/pcre2 (wraps chez-pcre2)
+    test.sls           # :std/test
+    logger.sls         # :std/logger
 tests/
-  test-reader.ss     # 65 reader tests
-  test-core.ss       # 68 core macro tests
-  test-stdlib.ss     # 65 stdlib tests
-  test-ffi.ss        # 7 FFI tests
-  test-modules.ss    # 8 module path tests
+  test-reader.ss       # 65 reader tests
+  test-core.ss         # 68 core macro tests
+  test-stdlib.ss       # 65 stdlib tests
+  test-ffi.ss          # 7 FFI tests
+  test-modules.ss      # 8 module path tests
+  test-expanded-stdlib.ss  # 76 expanded stdlib tests
+  test-wrappers.ss     # 27 wrapper module tests
 ```
 
 ## What Gerbil Code Works
