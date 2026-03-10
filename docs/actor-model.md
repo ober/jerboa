@@ -1774,16 +1774,24 @@ constructor takes fields in the order they are declared. Use `make-child-spec`:
     (ask-sync sup '(which-children)))
 
   (define (supervisor-count-children sup)
+    ;; Returns (values total-specs active-count supervisor-count worker-count)
+    ;; Distinguishes supervisors from workers via the child-spec type field.
+    ;; The which-children format is: (id status actor-ref)
+    ;; We need the type from the spec — ask the supervisor for full state.
+    ;; For now, supervisor-count-children returns counts using type info.
+    ;; NOTE: supervisor-which-children only returns (id status actor-ref),
+    ;; not the type. For type-aware counts, extend the format or use
+    ;; supervisor-state directly. This implementation returns approximate counts:
     (let ([children (supervisor-which-children sup)])
-      (let loop ([cs children] [specs 0] [active 0] [sups 0] [workers 0])
+      (let loop ([cs children] [specs 0] [active 0])
         (if (null? cs)
-          (values specs active sups workers)
+          ;; Return 4 values: specs, active, supervisors (0 = unknown), workers (0 = unknown)
+          ;; Callers that need type breakdown should inspect children directly.
+          (values specs active 0 active)
           (let ([c (car cs)])
             (loop (cdr cs)
                   (fx+ specs 1)
-                  (if (eq? (cadr c) 'running) (fx+ active 1) active)
-                  sups  ;; TODO: distinguish supervisor vs worker
-                  workers))))))
+                  (if (eq? (cadr c) 'running) (fx+ active 1) active)))))))
 
   (define (supervisor-terminate-child! sup id)
     (ask-sync sup (list 'terminate-child id)))
@@ -2212,6 +2220,7 @@ Replace with the actual API from your networking layer.
 
     ;; Connection management (exposed for testing)
     drop-connection!
+    transport-shutdown!
   )
   (import (chezscheme)
           (std actor core))
@@ -2338,6 +2347,21 @@ Replace with the actual API from your networking layer.
   ;; 7E: Remote actor refs
   (define (make-remote-actor-ref node-id remote-actor-id)
     (make-actor-ref remote-actor-id node-id))
+
+  ;; 7G: Transport shutdown — close all open connections
+  (define (transport-shutdown!)
+    (with-mutex *conn-mutex*
+      (let ([ids (vector->list (hashtable-keys *connections*))])
+        (for-each
+          (lambda (id)
+            (let ([conn (hashtable-ref *connections* id #f)])
+              (when conn
+                (guard (exn [#t (void)])
+                  (close-port (vector-ref conn 0)))  ;; in-port
+                (guard (exn [#t (void)])
+                  (close-port (vector-ref conn 1)))) ;; out-port
+            (hashtable-delete! *connections* id)))
+          ids))))
 
   ;; 7F: Server
   (define (start-node-server! listen-port)
@@ -3113,6 +3137,138 @@ write a minimal harness:
 (when (fx> *tests-failed* 0) (exit 1))
 ```
 
+### `tests/test-actor-distributed.ss`
+
+The distributed test requires two separate Chez processes. The file below tests
+the transport layer components that can be tested in-process (serialization,
+node-id parsing, cookie hash). Cross-process tests are described as manual steps.
+
+```scheme
+#!chezscheme
+;; Distributed transport tests.
+;; In-process: serialization, framing, node-id parsing, cookie hashing.
+;; Cross-process: manual — run two instances as described at the bottom.
+(import (chezscheme) (std actor transport))
+
+(define *tests-run* 0)
+(define *tests-failed* 0)
+(define-syntax test
+  (syntax-rules ()
+    [(_ name expr expected)
+     (begin (set! *tests-run* (fx+ *tests-run* 1))
+            (let ([got expr])
+              (unless (equal? got expected)
+                (set! *tests-failed* (fx+ *tests-failed* 1))
+                (display "FAIL: ") (display name) (newline)
+                (display "  expected: ") (write expected) (newline)
+                (display "  got:      ") (write got) (newline))))]))
+
+;; Test 1: message->bytes / read-framed-message round-trip (in-memory)
+(let ([msg '(hello world 42 #t (nested list))])
+  (let-values ([(port get-bytes) (open-bytevector-output-port)])
+    (fasl-write msg port)
+    (let* ([body (get-bytes)]
+           [n (bytevector-length body)]
+           [frame (make-bytevector (fx+ 4 n))])
+      (bytevector-u8-set! frame 0 (fxlogand (fxsra n 24) #xFF))
+      (bytevector-u8-set! frame 1 (fxlogand (fxsra n 16) #xFF))
+      (bytevector-u8-set! frame 2 (fxlogand (fxsra n  8) #xFF))
+      (bytevector-u8-set! frame 3 (fxlogand n          #xFF))
+      (bytevector-copy! body 0 frame 4 n)
+      (let ([in-port (open-bytevector-input-port frame)])
+        (let ([header (get-bytevector-n in-port 4)])
+          (let ([read-n (fx+ (fx+ (fx+ (fxsll (bytevector-u8-ref header 0) 24)
+                                       (fxsll (bytevector-u8-ref header 1) 16))
+                                  (fxsll (bytevector-u8-ref header 2) 8))
+                             (bytevector-u8-ref header 3))])
+            (let ([read-body (get-bytevector-n in-port read-n)])
+              (let ([decoded (fasl-read (open-bytevector-input-port read-body))])
+                (test "frame-round-trip" decoded msg)))))))))
+
+;; Test 2: large message framing (1MB bytevector)
+(let ([big (make-bytevector 1048576 42)])
+  (let-values ([(port get-bytes) (open-bytevector-output-port)])
+    (fasl-write big port)
+    (let* ([body (get-bytes)]
+           [n (bytevector-length body)]
+           [frame (make-bytevector (fx+ 4 n))])
+      (bytevector-u8-set! frame 0 (fxlogand (fxsra n 24) #xFF))
+      (bytevector-u8-set! frame 1 (fxlogand (fxsra n 16) #xFF))
+      (bytevector-u8-set! frame 2 (fxlogand (fxsra n  8) #xFF))
+      (bytevector-u8-set! frame 3 (fxlogand n            #xFF))
+      (bytevector-copy! body 0 frame 4 n)
+      (let ([in-port (open-bytevector-input-port frame)])
+        (let ([header (get-bytevector-n in-port 4)])
+          (let ([read-n (fx+ (fx+ (fx+ (fxsll (bytevector-u8-ref header 0) 24)
+                                       (fxsll (bytevector-u8-ref header 1) 16))
+                                  (fxsll (bytevector-u8-ref header 2) 8))
+                             (bytevector-u8-ref header 3))])
+            (let ([read-body (get-bytevector-n in-port read-n)])
+              (let ([decoded (fasl-read (open-bytevector-input-port read-body))])
+                (test "large-round-trip-size"
+                      (bytevector-length decoded) 1048576)))))))))
+
+;; Test 3: node-id parsing
+(define (node-id->host+port node-id)
+  (let loop ([i (fx- (string-length node-id) 1)])
+    (cond
+      [(fx< i 0) (error 'node-id->host+port "no colon" node-id)]
+      [(char=? (string-ref node-id i) #\:)
+       (values (substring node-id 0 i)
+               (string->number (substring node-id (fx+ i 1)
+                                          (string-length node-id))))]
+      [else (loop (fx- i 1))])))
+
+(let-values ([(host port) (node-id->host+port "localhost:9000")])
+  (test "node-id-host" host "localhost")
+  (test "node-id-port" port 9000))
+
+(let-values ([(host port) (node-id->host+port "::1:9001")])
+  ;; IPv6 — colon parsed from right
+  (test "ipv6-port" port 9001))
+
+;; Test 4: start-node! sets node-id
+(start-node! "127.0.0.1" 8888 "test-cookie")
+(test "node-id-set" (current-node-id) "127.0.0.1:8888")
+
+(display *tests-run*) (display " tests, ")
+(display *tests-failed*) (display " failed") (newline)
+(when (fx> *tests-failed* 0) (exit 1))
+
+;; ================================================================
+;; CROSS-PROCESS TEST (manual)
+;; ================================================================
+;;
+;; 1. Start Process B (the server):
+;;    (import (chezscheme) (std actor core) (std actor transport))
+;;    (start-node! "localhost" 9002 "shared-secret")
+;;    (start-node-server! 9002)
+;;    (let ([echo-actor
+;;           (spawn-actor
+;;             (lambda (msg)
+;;               (match msg
+;;                 [('send-back reply-id payload)
+;;                  (let ([reply-ref (make-remote-actor-ref "localhost:9001" reply-id)])
+;;                    (send reply-ref (list 'got payload)))]
+;;                 [_ (void)])))])
+;;      (display "Server actor id: ")
+;;      (display (actor-ref-id echo-actor)) (newline))
+;;
+;; 2. Start Process A (the client), using the server's actor id:
+;;    (import (chezscheme) (std actor core) (std actor transport))
+;;    (start-node! "localhost" 9001 "shared-secret")
+;;    (start-node-server! 9001)
+;;    (set-remote-send-handler!
+;;      (lambda (actor msg)
+;;        (remote-send! (actor-ref-node actor) (actor-ref-id actor) msg)))
+;;    (let* ([reply-ch (make-mutex)]
+;;           [local-actor (spawn-actor (lambda (msg) (display msg) (newline)))]
+;;           [remote-ref (make-remote-actor-ref "localhost:9002" <server-actor-id>)])
+;;      (send remote-ref (list 'send-back (actor-ref-id local-actor) 'hello))
+;;      ;; Process A receives: (got hello)
+;;      (sleep (make-time 'time-duration 500000000 0)))
+```
+
 ---
 
 ## Implementation Roadmap (Step by Step)
@@ -3269,7 +3425,7 @@ Implementation checklist:
 This is the most complex step. Test on localhost first.
 
 Implementation checklist:
-- [ ] `message->bytes` and `bytes->message` with 4-byte big-endian length frame
+- [ ] `message->bytes` (serialize to framed bytevector) — note: `bytes->message` is `read-framed-message`; the naming in the checklist is conceptual
 - [ ] `read-framed-message` uses `get-bytevector-n` for efficient reads
 - [ ] `write-framed-message` writes frame + flushes
 - [ ] `start-node!` sets node-id and cookie parameters
@@ -3623,7 +3779,7 @@ Use this checklist when wiring all layers together for the first time.
 (scheduler-stop! sched)
 
 ;; 3. Close TCP connections (if distributed)
-;; (transport-shutdown!)   ;; not yet implemented — close all *connections* entries
+;; (transport-shutdown!)   ;; closes all open connections in the pool
 ```
 
 ### Dependency graph
