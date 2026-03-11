@@ -90,6 +90,7 @@ test-features:
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-ffi-bind.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-match2.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-staging.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-cluster.ss
 
 test-all: test test-features test-wrappers
 
