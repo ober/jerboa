@@ -7,7 +7,7 @@ CHEZ_EXT_LIBDIRS = $(CHEZ_EXT_DIR)/chez-https/src:$(CHEZ_EXT_DIR)/chez-ssl/src:$
 # Shared object paths for FFI-based chez-* libraries
 CHEZ_EXT_LDPATH = $(CHEZ_EXT_DIR)/chez-ssl:$(CHEZ_EXT_DIR)/chez-zlib:$(CHEZ_EXT_DIR)/chez-pcre2:$(CHEZ_EXT_DIR)/chez-leveldb:$(CHEZ_EXT_DIR)/chez-epoll:$(CHEZ_EXT_DIR)/chez-inotify:$(CHEZ_EXT_DIR)/chez-crypto:$(CHEZ_EXT_DIR)/chez-sqlite:$(CHEZ_EXT_DIR)/chez-postgresql
 
-.PHONY: test test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded test-features test-wrappers clean
+.PHONY: test test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded test-features test-wrappers test-phase4a clean
 
 test: test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded
 
@@ -130,6 +130,15 @@ test-phase3:
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-wasm-format.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-wasm-codegen.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-wasm-runtime.ss
+
+test-phase4a:
+	@echo "--- Phase 4a: Core Runtime tests ---"
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-effect-deep.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-engine-pool.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-transducer.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-type-env.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-type-infer.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-error-advice.ss
 
 test-all: test test-features test-wrappers
 
