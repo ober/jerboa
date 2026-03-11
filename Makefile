@@ -87,6 +87,7 @@ test-features:
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-async.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-iouring.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-stm.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-ffi-bind.ss
 
 test-all: test test-features test-wrappers
 
