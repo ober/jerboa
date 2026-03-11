@@ -1,14 +1,13 @@
 # Jerboa: Making Gerbil-on-Chez Superior to Other Schemes/Lisps
 
-## Current State
+## Current State (as of Phase 3 completion, 2026-03-11)
 
-- 51 stdlib modules across crypto, db, networking, OS, text processing
-- 11 chez-* FFI libraries (ssl, https, zlib, pcre2, yaml, leveldb, epoll, inotify, crypto, sqlite, postgresql)
-- Gerbil reader, compiler, MOP, and runtime on stock Chez Scheme
-- Full Gambit thread API shim (`lib/std/misc/thread.sls`) with SMP-safe thread-locals
-- Channel-based concurrency (`lib/std/misc/channel.sls`)
-- FFI translation macros (`lib/jerboa/ffi.sls`) mapping Gambit types to Chez types
-- 338 tests passing (289 core + 49 wrapper)
+- **138 stdlib + toolchain modules** across observability, networking, build tooling, language extensions, and WASM
+- Phases 1–13 + Phase 2 (28 libraries) + Phase 3 (23 libraries) all complete
+- 1,524+ tests passing
+- Full feature set: algebraic effects, GADTs, type classes, linear types, STM, persistent data structures, actors, Raft consensus, M:N scheduler, async streams, WASM compilation pipeline, structured logging, Prometheus metrics, distributed tracing, WebSocket, HTTP/2, rate limiting, package manager, hot reload, query DSL, schema validation, term rewriting, source linting
+
+All 8 features from the original goals doc below are implemented. See `docs/index.md` for the complete library catalog.
 
 ---
 

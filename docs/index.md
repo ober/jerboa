@@ -4,7 +4,7 @@ Jerboa is a systems programming language built on Chez Scheme, providing Gerbil 
 compatibility with additional features: algebraic effects, gradual typing, native binary
 compilation, and a full actor/distributed system.
 
-**Current state**: 115 modules, ~17,000 lines, 887+ tests (Phases 1–13 + Phase 2 complete).
+**Current state**: 138 modules, ~25,000 lines, 1,524+ tests (Phases 1–13 + Phase 2 + Phase 3 complete).
 
 ## New Feature Documentation (Phases 1–13)
 
@@ -64,6 +64,41 @@ compilation, and a full actor/distributed system.
 - `(std config)` — S-expression config with schema validation and env variable overrides
 - `(std ds sorted-map)` — persistent sorted map (Okasaki red-black tree), O(log n)
 - `(std net grpc)` — gRPC-style RPC over TCP with S-expression framing
+
+## Phase 3 Libraries (2026-03-11)
+
+### Phase 3a: Observability
+- `(std log)` — structured logging with levels (debug/info/warn/error/fatal), pluggable sinks (console, file, JSON), dynamic `current-logger`, and key/value fields
+- `(std metrics)` — Prometheus-compatible metrics: counters, gauges, histograms with configurable buckets, registry, text exposition format
+- `(std span)` — distributed tracing with random 64-bit trace/span IDs, parent/child spans, tag/log attachment, `with-span`, HTTP header context propagation
+- `(std health)` — health check framework: named checks returning ok/degraded/failing, duration tracking, `run-checks`, `health-status` aggregation, timeout wrapping
+- `(std circuit)` — circuit breaker: closed/open/half-open state machine, configurable failure/success thresholds and reset timeout, call stats
+
+### Phase 3b: Advanced Networking
+- `(std net websocket)` — RFC 6455 WebSocket: frame encode/decode, FIN/opcodes, 7/16/64-bit payload lengths, XOR masking, handshake accept key
+- `(std net http2)` — HTTP/2 framing: 9-byte frame header, all standard frame types, HPACK static table (61 entries), literal header encoding, dynamic context
+- `(std net dns)` — DNS wire format (RFC 1035): query encoding, response decoding, label encode/decode, compression pointers, A/AAAA/CNAME/TXT records
+- `(std net rate)` — rate limiting: token bucket (refills at rate/sec), sliding window (prunes old timestamps), fixed window (epoch-aligned), thread-safe rate limiter
+- `(std net router)` — HTTP request routing: `:param` captures, `*` wildcard, static/parameterized/wildcard priority, method matching, per-route and global middleware
+
+### Phase 3c: Build & Package Tooling
+- `(jerboa pkg)` — semantic versioning (`major.minor.patch`), constraint checking (`>=`, `^`, `~`, `=`, `*`), dependency resolution with cycle detection, package manifests
+- `(jerboa lock)` — lockfile management: S-expression format, lock entries with content hash, read/write, merge (right-wins), diff (added/removed/changed)
+- `(jerboa hot)` — hot code reload: mtime-based file watching, `reloader-check!`, `reloader-reload!`, on-reload/on-error callbacks, `with-reloader` macro
+- `(jerboa embed)` — sandboxed evaluation environment: `sandbox-eval`, `sandbox-define!`, `sandbox-ref`, `sandbox-call`, safe exception wrapping, `with-sandbox`
+- `(jerboa cross)` — cross-compilation config: OS/arch detection from `(machine-type)`, CC flags (`--target=`, `--sysroot=`), ABI naming, endianness/pointer-size lookup
+
+### Phase 3d: Language Extensions
+- `(std query)` — SQL-like query DSL over in-memory collections: `from`, `where`, `select`, `order-by`, `group-by`, `limit`, `offset`, `join`, predicate constructors (`q:=`, `q:like`, `q:between`, etc.)
+- `(std schema)` — data schema validation: type validators, combinators (`s:list`, `s:hash`, `s:optional`, `s:enum`, `s:union`, `s:pattern`, `s:min`/`s:max`), path-annotated errors
+- `(std pipeline)` — data pipeline DSL: `make-pipeline`, `make-stage`, `pipeline-run`, `pipeline-run-parallel`, `pipe` composition, tap/catch/filter/reduce/timeout stages, per-stage stats
+- `(std rewrite)` — term rewriting: pattern variables (`?x`), `pattern-match`, `substitute`, `rewrite-once`, `rewrite` (innermost-first), `rewrite-fixed-point`, `normalize`
+- `(std lint)` — source code linting: 9 built-in rules (empty-begin, missing-else, deep-nesting, redefine-builtin, magic-number, etc.), `lint-string`/`lint-form`/`lint-file`, severity levels
+
+### Phase 3e: WASM Target
+- `(jerboa wasm format)` — WebAssembly binary format: LEB128 (unsigned/signed), IEEE 754 (f32/f64), string encoding, section/opcode constants, bytevector builder
+- `(jerboa wasm codegen)` — Scheme→WASM compiler: compiles pure i32 Scheme subset (define, lambda, let, if, begin, arithmetic, comparisons) to valid WASM binary
+- `(jerboa wasm runtime)` — stack-based WASM interpreter: executes i32 arithmetic, comparisons, local.get/set/tee, if/else, function calls, memory, globals, traps
 
 ## Existing Documentation
 
@@ -166,6 +201,11 @@ make test-all       # everything
 - `(std net zero-copy)` — buffer pool with slice views, zero-copy I/O *(Phase 2d)*
 - `(std net pool)` — generic connection pool with health checking *(Phase 2d)*
 - `(std net grpc)` — gRPC-style RPC over TCP *(Phase 2e)*
+- `(std net websocket)` — RFC 6455 WebSocket framing and handshake *(Phase 3b)*
+- `(std net http2)` — HTTP/2 framing + HPACK header compression *(Phase 3b)*
+- `(std net dns)` — DNS wire format, query/response encode/decode *(Phase 3b)*
+- `(std net rate)` — token bucket, sliding/fixed window rate limiters *(Phase 3b)*
+- `(std net router)` — HTTP request routing with parameter capture and middleware *(Phase 3b)*
 - `(std os fdio)` — file descriptor I/O (POSIX read/write)
 - `(std os path)` — path manipulation
 - `(std os signal)` — Unix signal handling
@@ -201,11 +241,23 @@ make test-all       # everything
 - `(std test framework)` — QuickCheck property testing and test suites *(Phase 2e)*
 - `(std doc generator)` — doc generator (markdown + HTML) *(Phase 2e)*
 - `(std logger)` — structured logging with level filtering
+- `(std log)` — structured logging with pluggable sinks and dynamic context *(Phase 3a)*
+- `(std metrics)` — Prometheus metrics: counters, gauges, histograms, registry *(Phase 3a)*
+- `(std span)` — distributed tracing spans with HTTP context propagation *(Phase 3a)*
+- `(std health)` — health check framework with status aggregation *(Phase 3a)*
+- `(std circuit)` — circuit breaker pattern (closed/open/half-open) *(Phase 3a)*
 
 ### Build & Package
 - `(jerboa build)` — native binary toolchain (incremental, parallel, cross-compile, static)
 - `(jerboa cache)` — content-addressed compilation cache
-- `(jerboa pkg)` — semver package manager
+- `(jerboa pkg)` — semver package manager with constraint solving and manifests *(Phase 3c)*
+- `(jerboa lock)` — lockfile management with S-expr format, merge, diff *(Phase 3c)*
+- `(jerboa hot)` — hot code reload via mtime polling and callbacks *(Phase 3c)*
+- `(jerboa embed)` — sandboxed evaluation environments *(Phase 3c)*
+- `(jerboa cross)` — cross-compilation config, ABI naming, CC flags *(Phase 3c)*
+- `(jerboa wasm format)` — WebAssembly binary format primitives *(Phase 3e)*
+- `(jerboa wasm codegen)` — Scheme→WASM compiler (pure i32 subset) *(Phase 3e)*
+- `(jerboa wasm runtime)` — stack-based WASM interpreter *(Phase 3e)*
 
 ### Utilities
 - `(std format)` — `format`, `printf`, `fprintf`
@@ -222,3 +274,8 @@ make test-all       # everything
 - `(std misc uuid)` — UUID v4 generation
 - `(std misc completion)` — async completion tokens
 - `(std compress zlib)` — gzip/deflate compression
+- `(std query)` — SQL-like query DSL over in-memory collections *(Phase 3d)*
+- `(std schema)` — data schema validation with type/combinator validators *(Phase 3d)*
+- `(std pipeline)` — data pipeline DSL with threading, parallel stages, tap/catch *(Phase 3d)*
+- `(std rewrite)` — term rewriting system with pattern variables and fixed-point *(Phase 3d)*
+- `(std lint)` — source code static analysis with 9 built-in rules *(Phase 3d)*

@@ -75,8 +75,10 @@ test-wrappers:
 		$(SCHEME) --libdirs "$(LIBDIRS):$(CHEZ_EXT_LIBDIRS)" --script tests/test-wrapper-postgresql.ss 2>/dev/null \
 		|| echo "  postgresql: SKIP (requires chez_pg_shim.so)"
 
-test-features:
-	@echo "--- Feature tests ---"
+test-features: test-phase2 test-phase3
+
+test-phase2:
+	@echo "--- Phase 2 feature tests ---"
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-foreign.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-channel2.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-task.ss
@@ -97,6 +99,37 @@ test-features:
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-table.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-concur.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-build.ss
+
+test-phase3:
+	@echo "--- Phase 3 feature tests ---"
+	@echo "-- Phase 3a: Observability --"
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-log.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-metrics.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-span.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-health.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-circuit.ss
+	@echo "-- Phase 3b: Advanced Networking --"
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-websocket.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-http2.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-dns.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-rate.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-router.ss
+	@echo "-- Phase 3c: Build & Package Tooling --"
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-pkg.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-lock.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-hot.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-embed.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-cross.ss
+	@echo "-- Phase 3d: Language Extensions --"
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-query.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-schema.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-pipeline.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-rewrite.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-lint.ss
+	@echo "-- Phase 3e: WASM Target --"
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-wasm-format.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-wasm-codegen.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-wasm-runtime.ss
 
 test-all: test test-features test-wrappers
 

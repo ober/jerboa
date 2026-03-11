@@ -108,6 +108,33 @@ scheme --libdirs lib --script your-file.ss
 | `(std srfi srfi-13)` | SRFI-13 string operations |
 | `(std srfi srfi-19)` | Date/time handling |
 
+### Phase 3 Libraries
+| Module | Provides |
+|--------|----------|
+| `(std log)` | Structured logging with levels, pluggable sinks, `current-logger` |
+| `(std metrics)` | Prometheus-compatible counters, gauges, histograms |
+| `(std span)` | Distributed tracing spans with HTTP context propagation |
+| `(std health)` | Health check framework with aggregated status |
+| `(std circuit)` | Circuit breaker (closed/open/half-open) |
+| `(std net websocket)` | RFC 6455 WebSocket frame encoding/decoding |
+| `(std net http2)` | HTTP/2 framing + HPACK header compression |
+| `(std net dns)` | DNS wire format (query/response encode/decode) |
+| `(std net rate)` | Token bucket, sliding/fixed window rate limiters |
+| `(std net router)` | HTTP routing with `:param` captures and middleware |
+| `(std query)` | SQL-like query DSL over in-memory collections |
+| `(std schema)` | Data schema validation with path-annotated errors |
+| `(std pipeline)` | Data pipeline DSL with tap, catch, parallel stages |
+| `(std rewrite)` | Term rewriting with pattern variables and fixed-point |
+| `(std lint)` | Source code static analysis (9 built-in rules) |
+| `(jerboa pkg)` | Semantic versioning, dep resolution, manifests |
+| `(jerboa lock)` | Lockfile management with merge and diff |
+| `(jerboa hot)` | Hot code reload via mtime polling |
+| `(jerboa embed)` | Sandboxed evaluation environments |
+| `(jerboa cross)` | Cross-compilation config and ABI naming |
+| `(jerboa wasm format)` | WebAssembly binary format primitives (LEB128, IEEE 754) |
+| `(jerboa wasm codegen)` | Scheme→WASM compiler (pure i32 subset) |
+| `(jerboa wasm runtime)` | Stack-based WASM interpreter |
+
 ### External Library Wrappers (require [chez-*](https://github.com/ober) libraries)
 | Module | Wraps | Provides |
 |--------|-------|----------|
@@ -147,11 +174,12 @@ One import for everything:
 
 ```bash
 make test          # Core tests (289 tests)
+make test-features # Phase 2+3 feature tests (637 tests)
 make test-wrappers # External library wrapper tests (27 tests)
-make test-all      # Both
+make test-all      # Everything (953+ tests)
 ```
 
-Runs 289 tests across reader, core macros, runtime, standard library, FFI, module paths, and expanded stdlib. Wrapper tests add 27 more for chez-* library integrations.
+Runs 289 core tests across reader, core macros, runtime, standard library, FFI, module paths, and expanded stdlib. Feature tests add 637 more for Phase 2 and Phase 3 libraries. Wrapper tests add 27 more for chez-* library integrations.
 
 ## Requirements
 
