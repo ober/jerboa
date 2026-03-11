@@ -103,5 +103,110 @@
       #f)
     #t))
 
+;;; Phase 2: Parametric Types
+
+;; Test 12: (listof fixnum)
+(parameterize ([*typed-mode* 'debug])
+  (define/t (sum-fixnums [lst : (listof fixnum)]) : fixnum
+    (apply + lst))
+  (test "listof fixnum pass" (sum-fixnums '(1 2 3)) 6)
+  (test "listof fixnum fail"
+    (guard (exn [#t #t])
+      (sum-fixnums '(1 "bad" 3))
+      #f)
+    #t))
+
+;; Test 13: (vectorof string)
+(parameterize ([*typed-mode* 'debug])
+  (define/t (first-str [v : (vectorof string)]) : string
+    (vector-ref v 0))
+  (test "vectorof string pass" (first-str (vector "a" "b")) "a")
+  (test "vectorof string fail"
+    (guard (exn [#t #t])
+      (first-str (vector 1 2))
+      #f)
+    #t))
+
+;; Test 14: (hashof string fixnum) — checks hashtable? only
+(parameterize ([*typed-mode* 'debug])
+  (define/t (get-count [ht : (hashof string fixnum)] [key : string]) : fixnum
+    (hashtable-ref ht key 0))
+  (let ([ht (make-hashtable string-hash string=?)])
+    (hashtable-set! ht "x" 42)
+    (test "hashof pass" (get-count ht "x") 42))
+  (test "hashof fail"
+    (guard (exn [#t #t])
+      (get-count "not-a-table" "x")
+      #f)
+    #t))
+
+;; Test 15: (-> fixnum fixnum) — checks procedure?
+(parameterize ([*typed-mode* 'debug])
+  (define/t (apply-fn [f : (-> fixnum fixnum)] [n : fixnum]) : fixnum
+    (f n))
+  (test "-> type pass" (apply-fn (lambda (x) (+ x 1)) 5) 6)
+  (test "-> type fail"
+    (guard (exn [#t #t])
+      (apply-fn 42 5)
+      #f)
+    #t))
+
+;;; Phase 3: Op Specialization
+
+;; Test 16: with-fixnum-ops replaces + → fx+
+(test "with-fixnum-ops addition"
+  (with-fixnum-ops (+ 3 4))
+  7)
+
+;; Test 17: with-fixnum-ops in a recursive function
+(define (fib-fx n)
+  (with-fixnum-ops
+    (if (< n 2)
+      n
+      (+ (fib-fx (- n 1)) (fib-fx (- n 2))))))
+(test "with-fixnum-ops fibonacci" (fib-fx 10) 55)
+
+;; Test 18: with-fixnum-ops nested let
+(test "with-fixnum-ops let"
+  (with-fixnum-ops
+    (let ([a 10] [b 3])
+      (- a b)))
+  7)
+
+;; Test 19: with-fixnum-ops comparison
+(test "with-fixnum-ops comparison"
+  (with-fixnum-ops
+    (and (< 1 2) (>= 5 5)))
+  #t)
+
+;; Test 20: with-flonum-ops replaces + → fl+
+(test "with-flonum-ops addition"
+  (with-flonum-ops (+ 1.5 2.5))
+  4.0)
+
+;; Test 21: with-flonum-ops in a computation
+(test "with-flonum-ops multiply"
+  (with-flonum-ops (* 2.0 3.14))
+  6.28)
+
+;; Test 22: with-flonum-ops preserves if/let structure
+(test "with-flonum-ops let"
+  (with-flonum-ops
+    (let ([x 2.0])
+      (if (> x 1.0)
+        (* x x)
+        x)))
+  4.0)
+
+;; Test 23: with-fixnum-ops + define/t integration
+(parameterize ([*typed-mode* 'release])
+  (define/t (dot-product [n : fixnum]) : fixnum
+    (with-fixnum-ops
+      (let loop ([i 0] [acc 0])
+        (if (= i n)
+          acc
+          (loop (+ i 1) (+ acc i))))))
+  (test "define/t with-fixnum-ops" (dot-product 5) 10))
+
 (printf "~%~a tests, ~a passed, ~a failed~%" (+ pass fail) pass fail)
 (when (> fail 0) (exit 1))

@@ -153,8 +153,8 @@
                  (loop)))]))))
 
   (define (thread-yield!)
-    ;; Chez doesn't have an explicit yield; sleep briefly
-    (sleep (make-time 'time-duration 0 0)))
+    ;; Chez uses preemptive POSIX threads — no cooperative yield needed
+    (void))
 
   (define (thread-sleep! seconds)
     (let* ([secs (exact (floor seconds))]

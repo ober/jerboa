@@ -108,8 +108,9 @@
            (if (procedure? default) (default) default)
            v)))))
 
-  (define (hash-get ht key)
-    (hashtable-ref ht key #f))
+  (define-syntax hash-get
+    (syntax-rules ()
+      ((_ ht key) (hashtable-ref ht key #f))))
 
   (define hash-put! hashtable-set!)
 
