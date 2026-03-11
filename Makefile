@@ -83,6 +83,8 @@ test-features:
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-typed.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-cache.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-effect.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-async.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-iouring.ss
 
 test-all: test test-features test-wrappers
 

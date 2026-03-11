@@ -17,7 +17,9 @@
     perform
     resume
     effect-not-handled?
-    effect-perform)
+    effect-perform
+    *effect-handlers*
+    run-with-handler)
 
   (import (chezscheme))
 
