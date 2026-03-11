@@ -1,357 +1,191 @@
 #!chezscheme
-;;; (jerboa pkg) — Package Manager (Step 34)
+;;; (jerboa pkg) — Package Manager
 ;;;
-;;; Content-addressed package store with lock files.
-;;; Supports source (git/local) and version-range dependencies.
+;;; Semantic versioning, dependency resolution, manifests.
 
 (library (jerboa pkg)
   (export
-    ;; Package manifest
-    make-package
-    package?
-    package-name
-    package-version
-    package-dependencies
-    package-description
+    ;; Package records
+    make-package package? package-name package-version package-deps
+    package-description package-author
 
-    ;; Version handling
-    make-version
-    version?
-    version-major
-    version-minor
-    version-patch
-    version->string
-    string->version
-    version<?
-    version=?
-    version-satisfies?
+    ;; Version operations
+    version->list version-compare version<? version=? version>=?
 
-    ;; Dependency spec
-    make-dep-spec
-    dep-spec?
-    dep-spec-name
-    dep-spec-constraint
-    dep-spec-source
+    ;; Dependency records
+    make-dep dep? dep-name dep-version-constraint
 
-    ;; Package registry
-    make-registry
-    registry?
-    registry-add!
-    registry-find
-    registry-list
+    ;; Constraint checking
+    constraint-satisfied?
 
     ;; Resolution
-    resolve-dependencies
-    dependency-graph
-    topological-sort
+    resolve-deps dependency-order
 
-    ;; Lock file
-    make-lock-file
-    lock-file?
-    lock-file-write
-    lock-file-read
-
-    ;; Package.sls reader
-    read-package-file
-    write-package-file)
+    ;; Manifest
+    make-manifest manifest? manifest-packages
+    manifest-add manifest-remove manifest-lookup)
 
   (import (chezscheme))
 
-  ;; ========== Version ==========
-
-  (define-record-type (version make-version version?)
-    (fields (immutable major version-major)
-            (immutable minor version-minor)
-            (immutable patch version-patch)))
-
-  (define (version->string v)
-    (format "~a.~a.~a"
-            (version-major v) (version-minor v) (version-patch v)))
-
-  (define (string->version s)
-    ;; Parse "major.minor.patch" — missing parts default to 0
-    (let ([parts (let loop ([s s] [acc '()])
-                   (let ([idx (let scan ([i 0])
-                                (cond [(= i (string-length s)) #f]
-                                      [(char=? (string-ref s i) #\.) i]
-                                      [else (scan (+ i 1))]))])
-                     (if idx
-                       (loop (substring s (+ idx 1) (string-length s))
-                             (cons (substring s 0 idx) acc))
-                       (reverse (cons s acc)))))])
-      (let ([nums (map (lambda (p)
-                         (guard (exn [#t 0]) (string->number p)))
-                       parts)])
-        (make-version
-          (if (>= (length nums) 1) (or (list-ref nums 0) 0) 0)
-          (if (>= (length nums) 2) (or (list-ref nums 1) 0) 0)
-          (if (>= (length nums) 3) (or (list-ref nums 2) 0) 0)))))
-
-  (define (version<? a b)
-    (or (< (version-major a) (version-major b))
-        (and (= (version-major a) (version-major b))
-             (or (< (version-minor a) (version-minor b))
-                 (and (= (version-minor a) (version-minor b))
-                      (< (version-patch a) (version-patch b)))))))
-
-  (define (version=? a b)
-    (and (= (version-major a) (version-major b))
-         (= (version-minor a) (version-minor b))
-         (= (version-patch a) (version-patch b))))
-
-  (define (version-satisfies? v constraint)
-    ;; constraint: string like "^1.2.0", "~1.2", ">=1.0.0", "1.2.3", "*"
-    (cond
-      [(equal? constraint "*") #t]
-      [(and (>= (string-length constraint) 1)
-            (char=? (string-ref constraint 0) #\^))
-       ;; Caret: compatible with, major must match
-       (let ([base (string->version (substring constraint 1 (string-length constraint)))])
-         (and (= (version-major v) (version-major base))
-              (or (> (version-minor v) (version-minor base))
-                  (and (= (version-minor v) (version-minor base))
-                       (>= (version-patch v) (version-patch base))))))]
-      [(and (>= (string-length constraint) 1)
-            (char=? (string-ref constraint 0) #\~))
-       ;; Tilde: compatible minor, patch can vary
-       (let ([base (string->version (substring constraint 1 (string-length constraint)))])
-         (and (= (version-major v) (version-major base))
-              (= (version-minor v) (version-minor base))
-              (>= (version-patch v) (version-patch base))))]
-      [(and (>= (string-length constraint) 2)
-            (string=? (substring constraint 0 2) ">="))
-       (let ([base (string->version (substring constraint 2 (string-length constraint)))])
-         (or (version=? v base) (version<? base v)))]
-      [(and (>= (string-length constraint) 1)
-            (char=? (string-ref constraint 0) #\>))
-       (let ([base (string->version (substring constraint 1 (string-length constraint)))])
-         (version<? base v))]
-      [else
-       ;; Exact version match
-       (version=? v (string->version constraint))]))
-
-  ;; ========== Dependency Spec ==========
-
-  (define-record-type (dep-spec make-dep-spec dep-spec?)
-    (fields (immutable name       dep-spec-name)
-            (immutable constraint dep-spec-constraint)  ;; version constraint string
-            (immutable source     dep-spec-source)))    ;; #f | '(git url tag) | '(local path)
-
   ;; ========== Package ==========
 
-  (define-record-type (package make-package package?)
-    (fields (immutable name         package-name)
-            (immutable version      package-version)      ;; version record
-            (immutable dependencies package-dependencies) ;; list of dep-spec
-            (immutable description  package-description)
-            (immutable authors      package-authors)
-            (immutable license      package-license)))
+  (define-record-type (%package make-package package?)
+    (fields (immutable name        package-name)
+            (immutable version     package-version)     ;; string "1.2.3"
+            (immutable deps        package-deps)        ;; list of dep
+            (immutable description package-description)
+            (immutable author      package-author)))
 
-  ;; ========== Registry ==========
+  ;; ========== Version ==========
 
-  ;; registry: hashtable mapping name → list of (version . package)
-  (define-record-type (registry make-registry-raw registry?)
-    (fields (immutable packages registry-packages)  ;; hashtable: name → alist (ver . pkg)
-            (immutable mutex    registry-mutex)))
+  (define (version->list ver-str)
+    ;; "1.2.3" -> (1 2 3)
+    (let loop ([s ver-str] [acc '()])
+      (let ([idx (let scan ([i 0])
+                   (cond [(= i (string-length s)) #f]
+                         [(char=? (string-ref s i) #\.) i]
+                         [else (scan (+ i 1))]))])
+        (if idx
+          (loop (substring s (+ idx 1) (string-length s))
+                (cons (string->number (substring s 0 idx)) acc))
+          (reverse (cons (or (string->number s) 0) acc))))))
 
-  (define (make-registry)
-    (make-registry-raw (make-hashtable equal-hash equal?) (make-mutex)))
+  (define (version-compare a b)
+    ;; Compare version strings a and b.
+    ;; Returns -1, 0, or 1.
+    (let ([la (version->list a)]
+          [lb (version->list b)])
+      (let loop ([la la] [lb lb])
+        (cond
+          [(and (null? la) (null? lb)) 0]
+          [(null? la) -1]
+          [(null? lb)  1]
+          [(< (car la) (car lb)) -1]
+          [(> (car la) (car lb))  1]
+          [else (loop (cdr la) (cdr lb))]))))
 
-  (define (registry-add! reg pkg)
-    (with-mutex (registry-mutex reg)
-      (let* ([name (package-name pkg)]
-             [ver  (package-version pkg)]
-             [existing (hashtable-ref (registry-packages reg) name '())])
-        (hashtable-set! (registry-packages reg) name
-          (cons (cons ver pkg)
-                (filter (lambda (e) (not (version=? (car e) ver))) existing))))))
+  (define (version<? a b)  (= (version-compare a b) -1))
+  (define (version=? a b)  (= (version-compare a b)  0))
+  (define (version>=? a b) (>= (version-compare a b) 0))
 
-  (define (registry-find reg name constraint)
-    ;; Find best (highest) version satisfying constraint.
-    ;; Returns package or #f.
-    (with-mutex (registry-mutex reg)
-      (let ([entries (hashtable-ref (registry-packages reg) name '())])
-        (let ([satisfying
-               (filter (lambda (e) (version-satisfies? (car e) constraint))
-                       entries)])
-          (if (null? satisfying)
-            #f
-            (let ([sorted (list-sort (lambda (a b) (version<? (car b) (car a)))
-                                     satisfying)])
-              (cdar sorted)))))))
+  ;; ========== Dependency ==========
 
-  (define (registry-list reg)
-    (with-mutex (registry-mutex reg)
-      (let-values ([(names _) (hashtable-entries (registry-packages reg))])
-        (vector->list names))))
+  (define-record-type (%dep make-dep dep?)
+    (fields (immutable name               dep-name)
+            (immutable version-constraint dep-version-constraint)))
+
+  ;; ========== Constraint Checking ==========
+
+  (define (constraint-satisfied? ver-str constraint)
+    ;; constraint: "*", ">=1.0.0", "^1.0.0", "~1.2.0", "=1.0.0", "1.0.0"
+    (cond
+      [(equal? constraint "*") #t]
+      [(and (>= (string-length constraint) 2)
+            (string=? (substring constraint 0 2) ">="))
+       (version>=? ver-str (substring constraint 2 (string-length constraint)))]
+      [(and (>= (string-length constraint) 1)
+            (char=? (string-ref constraint 0) #\^))
+       ;; Caret: same major, >= base minor.patch
+       (let* ([base (substring constraint 1 (string-length constraint))]
+              [blist (version->list base)]
+              [vlist (version->list ver-str)])
+         (and (= (car vlist) (car blist))
+              (or (> (cadr vlist) (cadr blist))
+                  (and (= (cadr vlist) (cadr blist))
+                       (>= (caddr vlist) (caddr blist))))))]
+      [(and (>= (string-length constraint) 1)
+            (char=? (string-ref constraint 0) #\~))
+       ;; Tilde: same major.minor, >= base patch
+       (let* ([base (substring constraint 1 (string-length constraint))]
+              [blist (version->list base)]
+              [vlist (version->list ver-str)])
+         (and (= (car vlist) (car blist))
+              (= (cadr vlist) (cadr blist))
+              (>= (caddr vlist) (caddr blist))))]
+      [(and (>= (string-length constraint) 1)
+            (char=? (string-ref constraint 0) #\=))
+       (version=? ver-str (substring constraint 1 (string-length constraint)))]
+      [else
+       ;; Exact match
+       (version=? ver-str constraint)]))
 
   ;; ========== Dependency Resolution ==========
 
-  (define (resolve-dependencies registry pkg visited)
-    ;; Resolve all transitive dependencies of pkg.
-    ;; Returns alist of (name . resolved-package) or raises error.
-    (let loop ([deps (package-dependencies pkg)]
-               [resolved '()]
-               [seen visited])
-      (if (null? deps)
-        resolved
-        (let* ([dep   (car deps)]
-               [name  (dep-spec-name dep)]
-               [cstr  (dep-spec-constraint dep)])
-          (if (assoc name resolved)
-            ;; Already resolved
-            (loop (cdr deps) resolved seen)
-            (let ([pkg2 (registry-find registry name cstr)])
-              (if (not pkg2)
-                (error 'resolve-dependencies
-                       "package not found in registry"
-                       name cstr)
-                ;; Recursively resolve pkg2's deps (avoid cycles via seen)
-                (if (member name seen)
-                  (loop (cdr deps) resolved seen)  ;; circular dep — skip
-                  (let ([sub-resolved
-                         (resolve-dependencies registry pkg2 (cons name seen))])
-                    (loop (cdr deps)
-                          (cons (cons name pkg2)
-                                (append sub-resolved resolved))
-                          (cons name seen)))))))))))
-
-  (define (dependency-graph pkg registry)
-    ;; Returns alist: name → list of dependency names
-    (let ([resolved (resolve-dependencies registry pkg '())])
-      (map (lambda (entry)
-             (cons (car entry)
-                   (map dep-spec-name
-                        (package-dependencies (cdr entry)))))
-           resolved)))
-
-  (define (topological-sort graph)
-    ;; Kahn's algorithm for topological sort.
-    ;; graph: alist (node . list-of-deps)
-    ;; deps = what this node needs (prerequisites)
-    ;; Returns list of nodes in dependency order (deps first).
-    (let* ([nodes (map car graph)]
-           ;; in-degree = number of prerequisites each node has
-           [in-degree
-            (let ([ht (make-hashtable equal-hash equal?)])
-              (for-each (lambda (n)
-                          (hashtable-set! ht n
-                            (length (filter (lambda (d) (member d nodes))
-                                           (let ([e (assoc n graph)])
-                                             (if e (cdr e) '()))))))
-                        nodes)
-              ht)]
-           ;; reverse-graph: node -> list of nodes that depend on it
-           [rev
-            (let ([ht (make-hashtable equal-hash equal?)])
-              (for-each (lambda (n) (hashtable-set! ht n '())) nodes)
+  (define (resolve-deps packages root-pkg)
+    ;; Given a list of packages and a root package, return packages
+    ;; in dependency order (topological sort, deps first).
+    ;; Raises error on circular deps or unsatisfied deps.
+    (let ([pkg-map (let ([ht (make-hashtable equal-hash equal?)])
+                     (for-each (lambda (p)
+                                 (hashtable-set! ht (package-name p) p))
+                               packages)
+                     ht)])
+      ;; Topological sort with cycle detection
+      (let ([visited  (make-hashtable equal-hash equal?)]
+            [in-stack (make-hashtable equal-hash equal?)]
+            [result   '()])
+        (define (visit pkg)
+          (let ([name (package-name pkg)])
+            (when (hashtable-ref in-stack name #f)
+              (error 'resolve-deps "circular dependency detected" name))
+            (unless (hashtable-ref visited name #f)
+              (hashtable-set! in-stack name #t)
               (for-each
-                (lambda (entry)
-                  (for-each
-                    (lambda (dep)
-                      (when (member dep nodes)
-                        (hashtable-set! ht dep
-                          (cons (car entry) (hashtable-ref ht dep '())))))
-                    (cdr entry)))
-                graph)
-              ht)]
-           [queue (filter (lambda (n) (= 0 (hashtable-ref in-degree n 0))) nodes)])
-      (let loop ([q queue] [result '()])
-        (if (null? q)
-          (if (= (length result) (length nodes))
-            (reverse result)
-            (error 'topological-sort "cycle detected in dependencies"))
-          (let* ([n (car q)]
-                 ;; nodes that depend on n (n is a prereq for them)
-                 [dependents (hashtable-ref rev n '())]
-                 [new-q
-                  (let inner ([ds dependents] [q (cdr q)])
-                    (if (null? ds) q
-                      (let* ([m    (car ds)]
-                             [deg  (- (hashtable-ref in-degree m 1) 1)])
-                        (hashtable-set! in-degree m deg)
-                        (inner (cdr ds)
-                               (if (= deg 0) (cons m q) q)))))])
-            (loop new-q (cons n result)))))))
+                (lambda (dep)
+                  (let ([dep-pkg (hashtable-ref pkg-map (dep-name dep) #f)])
+                    (unless dep-pkg
+                      (error 'resolve-deps "unsatisfied dependency"
+                             (dep-name dep) (dep-version-constraint dep)))
+                    (unless (constraint-satisfied?
+                               (package-version dep-pkg)
+                               (dep-version-constraint dep))
+                      (error 'resolve-deps "version constraint not satisfied"
+                             (dep-name dep) (dep-version-constraint dep)
+                             (package-version dep-pkg)))
+                    (visit dep-pkg)))
+                (package-deps pkg))
+              (hashtable-set! in-stack name #f)
+              (hashtable-set! visited name #t)
+              (set! result (cons pkg result)))))
+        ;; Visit all deps of root
+        (for-each
+          (lambda (dep)
+            (let ([dep-pkg (hashtable-ref pkg-map (dep-name dep) #f)])
+              (unless dep-pkg
+                (error 'resolve-deps "unsatisfied dependency"
+                       (dep-name dep) (dep-version-constraint dep)))
+              (visit dep-pkg)))
+          (package-deps root-pkg))
+        result)))
 
-  ;; ========== Lock File ==========
+  (define (dependency-order packages root-pkg)
+    ;; Returns packages in dependency order: deps before dependents.
+    (resolve-deps packages root-pkg))
 
-  (define-record-type (lock-file make-lock-file lock-file?)
-    (fields (immutable entries lock-entries)))  ;; list of (name version source-hash)
+  ;; ========== Manifest ==========
 
-  (define (lock-file-write lf port)
-    ;; Write lock file as S-expression
-    (for-each
-      (lambda (e)
-        (write e port)
-        (newline port))
-      (lock-entries lf)))
+  (define-record-type (%manifest make-manifest manifest?)
+    (fields (mutable packages manifest-packages manifest-packages-set!)))  ;; list of package
 
-  (define (lock-file-read port)
-    ;; Read lock file from S-expression
-    (let loop ([entry (read port)] [entries '()])
-      (if (eof-object? entry)
-        (make-lock-file (reverse entries))
-        (loop (read port) (cons entry entries)))))
+  (define (manifest-add manifest pkg)
+    ;; Add or replace a package in the manifest.
+    (let ([existing (filter (lambda (p)
+                              (not (equal? (package-name p) (package-name pkg))))
+                            (manifest-packages manifest))])
+      (manifest-packages-set! manifest (cons pkg existing))))
 
-  ;; ========== Package File Reader ==========
+  (define (manifest-remove manifest name)
+    ;; Remove a package by name.
+    (manifest-packages-set! manifest
+      (filter (lambda (p) (not (equal? (package-name p) name)))
+              (manifest-packages manifest))))
 
-  (define (read-package-file path)
-    ;; Read a package manifest S-expression from file.
-    ;; Returns a package record.
-    (if (not (file-exists? path))
-      (error 'read-package-file "file not found" path)
-      (call-with-input-file path
-        (lambda (port)
-          (let ([form (read port)])
-            (parse-package-sexp form))))))
+  (define (manifest-lookup manifest name)
+    ;; Find a package by name; returns #f if not found.
+    (let loop ([pkgs (manifest-packages manifest)])
+      (cond
+        [(null? pkgs) #f]
+        [(equal? (package-name (car pkgs)) name) (car pkgs)]
+        [else (loop (cdr pkgs))])))
 
-  (define (parse-package-sexp form)
-    ;; Parse: (package (name "foo") (version "1.0.0") (dependencies ...) ...)
-    (if (not (and (pair? form) (eq? (car form) 'package)))
-      (error 'parse-package-sexp "invalid package form" form)
-      (let ([clauses (cdr form)])
-        (let ([name    (let ([c (assq 'name    clauses)]) (and c (cadr c)))]
-              [ver-str (let ([c (assq 'version clauses)]) (and c (cadr c)))]
-              [deps    (let ([c (assq 'dependencies clauses)]) (and c (cdr c)))]
-              [desc    (let ([c (assq 'description clauses)]) (and c (cadr c)))]
-              [authors (let ([c (assq 'authors clauses)]) (and c (cdr c)))]
-              [license (let ([c (assq 'license clauses)]) (and c (cadr c)))])
-          (unless name
-            (error 'parse-package-sexp "missing name in package"))
-          (make-package
-            name
-            (if ver-str (string->version ver-str) (make-version 0 0 0))
-            (map parse-dep (or deps '()))
-            (or desc "")
-            (or authors '())
-            (or license ""))))))
-
-  (define (parse-dep dep-form)
-    ;; Parse: (name "^1.0.0") or (name "1.0.0" (git "url" #:tag "v1.0"))
-    (if (not (pair? dep-form))
-      (error 'parse-dep "invalid dependency" dep-form)
-      (let ([name (car dep-form)]
-            [cstr (cadr dep-form)]
-            [src  (if (>= (length dep-form) 3) (caddr dep-form) #f)])
-        (make-dep-spec name cstr src))))
-
-  (define (write-package-file pkg path)
-    ;; Write package manifest to file.
-    (call-with-output-file path
-      (lambda (port)
-        (write
-          `(package
-             (name ,(package-name pkg))
-             (version ,(version->string (package-version pkg)))
-             (description ,(package-description pkg))
-             (dependencies
-               ,@(map (lambda (d)
-                        (if (dep-spec-source d)
-                          `(,(dep-spec-name d) ,(dep-spec-constraint d) ,(dep-spec-source d))
-                          `(,(dep-spec-name d) ,(dep-spec-constraint d))))
-                      (package-dependencies pkg))))
-          port)
-        (newline port))))
-
-  ) ;; end library
+) ;; end library
