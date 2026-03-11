@@ -140,6 +140,17 @@ test-phase4a:
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-type-infer.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-error-advice.ss
 
+test-phase4b:
+	@echo "--- Phase 4b: Type System and Safety tests ---"
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-hkt.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-monad.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-refine.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-solver.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-row2.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-effects-new.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-taint.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-sandbox.ss
+
 test-all: test test-features test-wrappers
 
 clean:
