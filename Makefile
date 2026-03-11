@@ -92,6 +92,10 @@ test-features:
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-staging.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-cluster.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-devex.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-capability.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-seq.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-table.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-concur.ss
 
 test-all: test test-features test-wrappers
 
