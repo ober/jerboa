@@ -4,6 +4,8 @@ Jerboa is a systems programming language built on Chez Scheme, providing Gerbil 
 compatibility with additional features: algebraic effects, gradual typing, native binary
 compilation, and a full actor/distributed system.
 
+**Current state**: 115 modules, ~17,000 lines, 887+ tests (Phases 1–13 + Phase 2 complete).
+
 ## New Feature Documentation (Phases 1–13)
 
 | Document | Features | Libraries |
@@ -23,6 +25,45 @@ compilation, and a full actor/distributed system.
 | [sequences.md](sequences.md) | Lazy sequences, transducers, parallel collections, data tables | `(std seq)`, `(std table)` |
 | [build.md](build.md) | Incremental/parallel build, cross-compilation, static linking | `(jerboa build)`, `(jerboa cache)` |
 | [concurrency.md](concurrency.md) | Thread-safety annotations, deadlock detection, resource leaks | `(std concur)` |
+
+## Phase 2 Libraries (2026-03-11)
+
+### Phase 2a: Foundations
+- `(std pvec)` — persistent vectors (Clojure-style 32-way HAMT trie)
+- `(std pmap)` — persistent hash maps
+- `(std select)` — channel select with priority, timeout, and default
+- `(std errors)` — structured error hierarchy with typed conditions
+- `(std derive)` — automatic derivation of `equal?`, `hash`, `show`, `compare`
+- `(std repl)` — interactive REPL with command dispatch and tab completion
+
+### Phase 2b: Performance
+- `(std dev partial-eval)` — compile-time partial evaluation (`define-ct`, `ct`, `ct/try`)
+- `(std dev pgo)` — profile-guided optimization with type feedback
+- `(std dev cont-mark-opt)` — linear handler analysis and optimized `with-linear-handler`
+- `(std dev devirt)` — whole-program devirtualization (`defmethod/tracked`, `devirt-call`)
+- `(std regex-ct-impl)` — NFA→DFA subset construction pipeline
+- `(std regex-ct)` — compile-time regex with `define-regex` and runtime fallback
+
+### Phase 2c: Type System
+- `(std typed gadt)` — GADTs as tagged vectors with `define-gadt` and `gadt-match`
+- `(std typed typeclass)` — Haskell-style type classes (`define-class`, `define-instance`, `with-class`)
+- `(std typed linear)` — linear types with use-once enforcement
+- `(std typed effect-typing)` — effect signatures with `typed-with-handler`
+
+### Phase 2d: Systems & Distributed
+- `(std sched)` — M:N cooperative scheduler with work queue and OS worker threads
+- `(std stream async)` — lazy async streams with backpressure over channels
+- `(std raft)` — full Raft consensus (follower/candidate/leader, log replication, heartbeats)
+- `(std net zero-copy)` — buffer pool with slice views and reference counting
+- `(std proc supervisor)` — OTP-style supervisor (one-for-one, one-for-all, rest-for-one)
+- `(std net pool)` — generic connection pool with health checking and timeout
+
+### Phase 2e: Ecosystem
+- `(std test framework)` — QuickCheck-style property testing with shrinking and test suites
+- `(std doc generator)` — documentation generator producing markdown and HTML
+- `(std config)` — S-expression config with schema validation and env variable overrides
+- `(std ds sorted-map)` — persistent sorted map (Okasaki red-black tree), O(log n)
+- `(std net grpc)` — gRPC-style RPC over TCP with S-expression framing
 
 ## Existing Documentation
 
@@ -91,16 +132,27 @@ make test-all       # everything
 - `(std concur)` — thread-safety annotations, deadlock detection, resource tracking
 - `(std task)` — task groups and structured concurrency
 - `(std misc channel)` — typed channels
+- `(std sched)` — M:N scheduler with OS worker threads *(Phase 2d)*
+- `(std stream async)` — lazy async streams with backpressure *(Phase 2d)*
+- `(std raft)` — Raft consensus protocol *(Phase 2d)*
+- `(std proc supervisor)` — OTP-style process supervisor *(Phase 2d)*
 
 ### Type System
 - `(std typed)` — gradual typing with zero-overhead release mode
 - `(std typed advanced)` — occurrence typing, row polymorphism, refinement types
+- `(std typed gadt)` — GADTs with `define-gadt` / `gadt-match` *(Phase 2c)*
+- `(std typed typeclass)` — Haskell-style type classes *(Phase 2c)*
+- `(std typed linear)` — linear types with use-once enforcement *(Phase 2c)*
+- `(std typed effect-typing)` — effect signatures and `typed-with-handler` *(Phase 2c)*
 - `(std match2)` — pattern matching with sealed hierarchies and active patterns
 - `(std staging)` — compile-time computation and code generation
 
 ### Data Structures
 - `(std seq)` — lazy sequences, transducers, parallel collections
 - `(std table)` — columnar in-memory data tables with SQL-like operations
+- `(std pvec)` — persistent vectors (HAMT trie, O(log₃₂ n)) *(Phase 2a)*
+- `(std pmap)` — persistent hash maps *(Phase 2a)*
+- `(std ds sorted-map)` — persistent sorted map (red-black tree) *(Phase 2e)*
 - `(std misc queue)` — mutable FIFO queue
 - `(std misc bytes)` — bytevector utilities
 - `(std misc list)` — list utilities
@@ -111,6 +163,9 @@ make test-all       # everything
 - `(std net request)` — HTTP client
 - `(std net httpd)` — HTTP server
 - `(std net ssl)` — TLS/TCP sockets
+- `(std net zero-copy)` — buffer pool with slice views, zero-copy I/O *(Phase 2d)*
+- `(std net pool)` — generic connection pool with health checking *(Phase 2d)*
+- `(std net grpc)` — gRPC-style RPC over TCP *(Phase 2e)*
 - `(std os fdio)` — file descriptor I/O (POSIX read/write)
 - `(std os path)` — path manipulation
 - `(std os signal)` — Unix signal handling
@@ -138,7 +193,13 @@ make test-all       # everything
 - `(std dev debug)` — time-travel debugger, execution recording
 - `(std dev profile)` — deterministic + sampling profiler
 - `(std dev reload)` — hot code reload
+- `(std dev partial-eval)` — compile-time partial evaluation (`define-ct`, `ct`) *(Phase 2b)*
+- `(std dev pgo)` — profile-guided optimization with type feedback *(Phase 2b)*
+- `(std dev cont-mark-opt)` — linear handler analysis *(Phase 2b)*
+- `(std dev devirt)` — whole-program devirtualization *(Phase 2b)*
 - `(std test)` — test framework (`test-suite`, `check`, `run-tests!`)
+- `(std test framework)` — QuickCheck property testing and test suites *(Phase 2e)*
+- `(std doc generator)` — doc generator (markdown + HTML) *(Phase 2e)*
 - `(std logger)` — structured logging with level filtering
 
 ### Build & Package
@@ -149,8 +210,13 @@ make test-all       # everything
 ### Utilities
 - `(std format)` — `format`, `printf`, `fprintf`
 - `(std sort)` — `sort`, `stable-sort`
+- `(std config)` — S-expression config with env overrides and schema validation *(Phase 2e)*
 - `(std pregexp)` — Perl-compatible regular expressions
 - `(std pcre2)` — PCRE2 bindings
+- `(std regex-ct)` — compile-time regex → DFA state machine (`define-regex`) *(Phase 2b)*
+- `(std select)` — channel select with priority, timeout, default *(Phase 2a)*
+- `(std errors)` — structured error hierarchy *(Phase 2a)*
+- `(std derive)` — auto-derive `equal?`, `hash`, `show`, `compare` *(Phase 2a)*
 - `(std srfi srfi-13)` — string operations (SRFI-13)
 - `(std srfi srfi-19)` — date/time (SRFI-19)
 - `(std misc uuid)` — UUID v4 generation

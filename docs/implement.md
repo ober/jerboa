@@ -1,5 +1,20 @@
 # Jerboa Implementation Plan: Phase 2 — The Superior Scheme
 
+## Status: COMPLETE ✓
+
+All Phase 2 sub-phases have been implemented and pushed (2026-03-11):
+
+| Phase | Libraries | Tests | Commit |
+|-------|-----------|-------|--------|
+| 2a: Foundations | 7 | 111 | `316cb5e` |
+| 2b: Performance | 6 | 101 | `691e709` |
+| 2c: Type System | 4 | 111 | `4e99988` |
+| 2d: Systems & Distributed | 6 | 105 | `53794bb` |
+| 2e: Ecosystem | 5 | 113 | `e1a0a5e` |
+| **Total** | **28** | **541** | |
+
+---
+
 ## Where We Are
 
 Jerboa's first 13 phases are complete: 87 modules, 14,876 lines, 346+ tests. We have algebraic effects, gradual typing, STM, actors, distributed computing, structured concurrency, lazy sequences, pattern matching, staging, capability security, and a native binary toolchain — all on stock Chez Scheme with zero shim layers.
