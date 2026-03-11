@@ -1,8 +1,23 @@
-# Jerboa Implementation Plan: Phase 2 — The Superior Scheme
+# Jerboa Implementation Plan: Phase 3 — Production Excellence
 
 ## Status: COMPLETE ✓
 
-All Phase 2 sub-phases have been implemented and pushed (2026-03-11):
+All Phase 3 sub-phases have been implemented and pushed (2026-03-11):
+
+| Phase | Libraries | Tests | Commit |
+|-------|-----------|-------|--------|
+| 3a: Observability | 5 | 131 | `cf41c35` |
+| 3b: Advanced Networking | 5 | 129 | `197ba30` |
+| 3c: Build & Package Tooling | 5 | 119 | `4e513a9` |
+| 3d: Language Extensions | 5 | 158 | `644a501` |
+| 3e: WASM Target | 3 | 100 | `9b8b16a` |
+| **Total** | **23** | **637** | |
+
+---
+
+## Phase 2 (Previous) — The Superior Scheme: COMPLETE ✓
+
+All Phase 2 sub-phases were implemented and pushed (2026-03-11):
 
 | Phase | Libraries | Tests | Commit |
 |-------|-----------|-------|--------|
@@ -15,13 +30,26 @@ All Phase 2 sub-phases have been implemented and pushed (2026-03-11):
 
 ---
 
-## Where We Are
+## Where We Are (After Phase 3)
 
-Jerboa's first 13 phases are complete: 87 modules, 14,876 lines, 346+ tests. We have algebraic effects, gradual typing, STM, actors, distributed computing, structured concurrency, lazy sequences, pattern matching, staging, capability security, and a native binary toolchain — all on stock Chez Scheme with zero shim layers.
+Jerboa now has 110+ modules, 1,178+ tests, and covers:
 
-That's a strong foundation. But it's not yet the standout Scheme. The existing implementation has API surfaces for these features but hasn't pushed any of them to the depth where they become *the reason* someone chooses Jerboa over Rust, Go, or Erlang. Phase 2 is about depth, not breadth.
+**Phase 2 additions**: PGO, devirtualization, compile-time regex, continuation mark optimization, GADTs, type classes, linear types, effect typing, M:N scheduler, async streams, Raft consensus, zero-copy networking, process supervision, connection pooling, property-based testing, doc generator, S-Expr config, gRPC, sorted maps, persistent vectors, persistent hash maps, channel select, error messages, derive system, memory-mapped I/O, REPL enhancements.
 
-This plan identifies **25 additions** organized into 8 tracks, each designed to exploit Chez Scheme's unique strengths in ways no other language implementation can match.
+**Phase 3 additions**:
+- **Observability**: structured logging, Prometheus metrics, distributed tracing, health checks, circuit breakers
+- **Advanced Networking**: WebSocket (RFC 6455), HTTP/2 framing + HPACK, DNS wire format, rate limiting, HTTP router
+- **Build & Package**: semantic versioning + dep resolver, lockfiles, hot code reload, sandboxed eval, cross-compilation config
+- **Language Extensions**: SQL-like query DSL, data schema validation, data pipeline DSL, term rewriting, source linting
+- **WASM Target**: binary format (LEB128, IEEE 754), Scheme→WASM compiler (i32 subset), stack-based interpreter
+
+The original Phase 2 plan identified 25 additions; those are now complete. Phase 3 added 23 more libraries to cover the "production excellence" gap — the tooling, observability, and interoperability needed to deploy Jerboa in real systems.
+
+---
+
+## Phase 2 Plan Details
+
+The following tracks were the Phase 2 design document (now fully implemented):
 
 ---
 
