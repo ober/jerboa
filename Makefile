@@ -82,6 +82,7 @@ test-features:
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-task.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-typed.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-cache.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-effect.ss
 
 test-all: test test-features test-wrappers
 

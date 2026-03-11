@@ -18,7 +18,10 @@
           register-type-predicate!
           type-predicate
           ;; Phase 3: op specialization
-          with-fixnum-ops with-flonum-ops)
+          with-fixnum-ops with-flonum-ops
+          ;; Phase 4 (Step 10): effect type annotations
+          define/te lambda/te
+          effect-type? make-effect-type effect-type-effect effect-type-result)
   (import (chezscheme))
 
   ;; ========== Configuration ==========
@@ -318,5 +321,97 @@
          (let ([transformed (map (lambda (b) (transform (syntax->datum b)))
                                  (syntax->list #'(body ...)))])
            (datum->syntax #'kw `(begin ,@transformed)))])))
+
+  ;; ========== Step 10: Effect Type Annotations ==========
+  ;;
+  ;; (Effect EffectName ReturnType) — type of a computation that performs EffectName
+  ;; and returns a value of ReturnType.
+  ;;
+  ;; (define/te (name [arg : type] ...) : (Effect E R) body ...)
+  ;;   Like define/t but allows (Effect E R) return type annotation.
+  ;;   In debug mode: checks non-effect argument types; the effect annotation
+  ;;   is informational (full effect tracking requires compile-time analysis).
+  ;;
+  ;; (lambda/te ([arg : type] ...) : (Effect E R) body ...)
+
+  (define-record-type effect-type
+    (fields (immutable effect) (immutable result))
+    (sealed #t))
+
+  ;; We handle (Effect E R) syntactically: the result type R is what
+  ;; gets checked at runtime; the E is recorded for tooling.
+
+  ;; define/te: define with typed effect return annotation
+  ;; (define/te (name [arg : type] ...) : (Effect EffName RetType) body ...)
+  (define-syntax define/te
+    (lambda (stx)
+      (define (parse-typed-args args)
+        (let loop ([rest (syntax->list args)] [result '()])
+          (if (null? rest)
+            (reverse result)
+            (let ([item (car rest)])
+              (syntax-case item ()
+                [(arg-name sep type-name)
+                 (eq? (syntax->datum #'sep) ':)
+                 (loop (cdr rest)
+                       (cons (list #'arg-name #'type-name) result))]
+                [arg-name
+                 (identifier? #'arg-name)
+                 (loop (cdr rest)
+                       (cons (list #'arg-name (datum->syntax #'arg-name 'any)) result))])))))
+      (syntax-case stx ()
+        ;; With (Effect E R) return type
+        [(k (name typed-arg ...) colon (Effect eff-name ret-type) body ...)
+         (eq? (syntax->datum #'colon) ':)
+         (let ([parsed (parse-typed-args #'(typed-arg ...))])
+           (with-syntax ([(arg ...) (map car parsed)]
+                         [((aname atype) ...) parsed])
+             ;; Only check arg types in debug mode; effect annotation is informational
+             #'(define (name arg ...)
+                 (check-type! 'name 'aname arg 'atype) ...
+                 (let ([result (begin body ...)])
+                   ;; Check return value against ret-type (not the Effect wrapper)
+                   (check-return-type! 'name result 'ret-type)
+                   result))))]
+        ;; Fallback: no effect annotation — delegate to define/t behavior
+        [(k (name typed-arg ...) colon ret-type body ...)
+         (eq? (syntax->datum #'colon) ':)
+         #'(define/t (name typed-arg ...) : ret-type body ...)]
+        [(k (name typed-arg ...) body ...)
+         #'(define/t (name typed-arg ...) body ...)])))
+
+  ;; lambda/te: lambda with effect return annotation
+  (define-syntax lambda/te
+    (lambda (stx)
+      (define (parse-typed-args args)
+        (let loop ([rest (syntax->list args)] [result '()])
+          (if (null? rest)
+            (reverse result)
+            (let ([item (car rest)])
+              (syntax-case item ()
+                [(arg-name sep type-name)
+                 (eq? (syntax->datum #'sep) ':)
+                 (loop (cdr rest)
+                       (cons (list #'arg-name #'type-name) result))]
+                [arg-name
+                 (identifier? #'arg-name)
+                 (loop (cdr rest)
+                       (cons (list #'arg-name (datum->syntax #'arg-name 'any)) result))])))))
+      (syntax-case stx ()
+        [(k (typed-arg ...) colon (Effect eff-name ret-type) body ...)
+         (eq? (syntax->datum #'colon) ':)
+         (let ([parsed (parse-typed-args #'(typed-arg ...))])
+           (with-syntax ([(arg ...) (map car parsed)]
+                         [((aname atype) ...) parsed])
+             #'(lambda (arg ...)
+                 (check-type! 'lambda 'aname arg 'atype) ...
+                 (let ([result (begin body ...)])
+                   (check-return-type! 'lambda result 'ret-type)
+                   result))))]
+        [(k (typed-arg ...) colon ret-type body ...)
+         (eq? (syntax->datum #'colon) ':)
+         #'(lambda/t (typed-arg ...) : ret-type body ...)]
+        [(k (typed-arg ...) body ...)
+         #'(lambda/t (typed-arg ...) body ...)])))
 
   ) ;; end library
