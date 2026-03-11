@@ -88,6 +88,7 @@ test-features:
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-iouring.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-stm.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-ffi-bind.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-match2.ss
 
 test-all: test test-features test-wrappers
 
