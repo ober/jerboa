@@ -151,6 +151,15 @@ test-phase4b:
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-taint.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-sandbox.ss
 
+test-phase4c:
+	@echo "--- Phase 4c: Systems and Performance tests ---"
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-arena.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-binary.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-mmap-btree.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-multishot.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-deadlock.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-concur-util.ss
+
 test-all: test test-features test-wrappers
 
 clean:
