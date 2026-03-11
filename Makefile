@@ -160,6 +160,14 @@ test-phase4c:
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-deadlock.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-concur-util.ss
 
+test-phase4d:
+	@echo "--- Phase 4d: Developer Experience tests ---"
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-timetravel.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-flamegraph.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-proptest.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-staging2.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-match-syntax.ss
+
 test-all: test test-features test-wrappers
 
 clean:

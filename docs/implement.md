@@ -1160,51 +1160,51 @@ Every build artifact is identified by the hash of its inputs. Same inputs → sa
 
 ### Phase 4d: Developer Experience
 
-| # | Item | Track | Est. LOC | Priority |
-|---|------|-------|----------|----------|
-| 19 | Time-travel debugger | 6.1 | 400 | Medium |
-| 20 | Flame graph profiler | 6.3 | 800 | High |
-| 21 | Property-based testing | 6.4 | 1,700 | High |
-| 22 | Multi-stage programming | 4.1 | 500 | Medium |
-| 23 | Syntax-level match | 4.2 | 350 | Medium |
-| 24 | Compile-time contracts | 4.3 | 250 | Low |
-| **Subtotal** | | | **~4,000** | |
+| #            | Item                    | Track | Est. LOC   | Priority |
+|--------------|-------------------------|-------|------------|----------|
+| 19           | Time-travel debugger    | 6.1   | 400        | Medium   |
+| 20           | Flame graph profiler    | 6.3   | 800        | High     |
+| 21           | Property-based testing  | 6.4   | 1,700      | High     |
+| 22           | Multi-stage programming | 4.1   | 500        | Medium   |
+| 23           | Syntax-level match      | 4.2   | 350        | Medium   |
+| 24           | Compile-time contracts  | 4.3   | 250        | Low      |
+| **Subtotal** |                         |       | **~4,000** |          |
 
 ### Phase 4e: Data and Distribution
 
-| # | Item | Track | Est. LOC | Priority |
-|---|------|-------|----------|----------|
-| 25 | Dataframes | 7.2 | 700 | Medium |
-| 26 | Stream windowing | 7.3 | 500 | Medium |
-| 27 | Distributed actors | 8.1 | 800 | High |
-| 28 | WASI support | 8.2 | 400 | Medium |
-| 29 | Continuation serialization | 1.3 | 250 | Low |
-| **Subtotal** | | | **~2,650** | |
+| #            | Item                       | Track | Est. LOC   | Priority |
+|--------------|----------------------------|-------|------------|----------|
+| 25           | Dataframes                 | 7.2   | 700        | Medium   |
+| 26           | Stream windowing           | 7.3   | 500        | Medium   |
+| 27           | Distributed actors         | 8.1   | 800        | High     |
+| 28           | WASI support               | 8.2   | 400        | Medium   |
+| 29           | Continuation serialization | 1.3   | 250        | Low      |
+| **Subtotal** |                            |       | **~2,650** |          |
 
 ### Phase 4f: Toolchain and Interop
 
-| # | Item | Track | Est. LOC | Priority |
-|---|------|-------|----------|----------|
-| 30 | LSP 2.0 | 8.3 | 1,600 | High |
-| 31 | Python interop | 8.4 | 600 | Medium |
-| 32 | File watching + incremental build | 10.1 | 400 | High |
-| 33 | Cross-compilation pipeline | 10.2 | 400 | Medium |
-| 34 | Reproducible builds | 10.3 | 350 | Medium |
-| **Subtotal** | | | **~3,350** | |
+| #            | Item                              | Track | Est. LOC   | Priority |
+|--------------|-----------------------------------|-------|------------|----------|
+| 30           | LSP 2.0                           | 8.3   | 1,600      | High     |
+| 31           | Python interop                    | 8.4   | 600        | Medium   |
+| 32           | File watching + incremental build | 10.1  | 400        | High     |
+| 33           | Cross-compilation pipeline        | 10.2  | 400        | Medium   |
+| 34           | Reproducible builds               | 10.3  | 350        | Medium   |
+| **Subtotal** |                                   |       | **~3,350** |          |
 
 ---
 
 ## Total Estimated Code
 
-| Phase | LOC | New Modules | New Tests |
-|-------|-----|-------------|-----------|
-| 4a: Core Runtime | 4,600 | ~10 | ~200 |
-| 4b: Type System | 3,800 | ~8 | ~180 |
-| 4c: Systems | 2,800 | ~8 | ~150 |
-| 4d: Developer Experience | 4,000 | ~10 | ~200 |
-| 4e: Data & Distribution | 2,650 | ~7 | ~150 |
-| 4f: Toolchain & Interop | 3,350 | ~8 | ~150 |
-| **Total Phase 4** | **~21,200** | **~51** | **~1,030** |
+| Phase                    | LOC         | New Modules | New Tests  |
+|--------------------------|-------------|-------------|------------|
+| 4a: Core Runtime         | 4,600       | ~10         | ~200       |
+| 4b: Type System          | 3,800       | ~8          | ~180       |
+| 4c: Systems              | 2,800       | ~8          | ~150       |
+| 4d: Developer Experience | 4,000       | ~10         | ~200       |
+| 4e: Data & Distribution  | 2,650       | ~7          | ~150       |
+| 4f: Toolchain & Interop  | 3,350       | ~8          | ~150       |
+| **Total Phase 4**        | **~21,200** | **~51**     | **~1,030** |
 
 Combined with existing ~52,000 lines across 138+ modules, Jerboa would be ~73,000 lines across ~190 modules with ~2,550 tests. Still dramatically more compact than Racket (~700K), Guile (~300K), or Gerbil+Gambit (~80K).
 
