@@ -96,6 +96,7 @@ test-features:
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-seq.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-table.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-concur.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-build.ss
 
 test-all: test test-features test-wrappers
 
