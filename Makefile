@@ -91,6 +91,7 @@ test-features:
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-match2.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-staging.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-cluster.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-devex.ss
 
 test-all: test test-features test-wrappers
 
