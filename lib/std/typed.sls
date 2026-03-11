@@ -17,6 +17,8 @@
           *typed-mode*
           register-type-predicate!
           type-predicate
+          check-type!
+          check-return-type!
           ;; Phase 3: op specialization
           with-fixnum-ops with-flonum-ops
           ;; Phase 4 (Step 10): effect type annotations
@@ -205,27 +207,15 @@
   ;;
   ;; (with-fixnum-ops body ...)
   ;;   Recursively replaces generic arithmetic operators in body with fixnum
-  ;;   variants: + → fx+, - → fx-, * → fx*, < → fx<, etc.
-  ;;   The programmer takes responsibility for ensuring the values are fixnums.
-  ;;   This allows Chez's cp0/cptypes to see the specialized ops directly.
+  ;;   variants: + -> fx+, - -> fx-, * -> fx*, < -> fx<, etc.
+  ;;   Walks the syntax tree directly to preserve lexical scopes of all
+  ;;   non-operator identifiers (e.g., function arguments a, b).
   ;;
   ;; (with-flonum-ops body ...)
-  ;;   Like with-fixnum-ops but replaces + → fl+, - → fl-, * → fl*, / → fl/, etc.
-
-  ;; ========== Phase 3: Op Specialization ==========
-  ;;
-  ;; (with-fixnum-ops body ...)
-  ;;   Recursively replaces generic arithmetic operators in body with fixnum
-  ;;   variants: + → fx+, - → fx-, * → fx*, < → fx<, etc.
-  ;;   The programmer takes responsibility for ensuring the values are fixnums.
-  ;;   This allows Chez's cp0/cptypes to see the specialized ops directly.
-  ;;
-  ;; (with-flonum-ops body ...)
-  ;;   Like with-fixnum-ops but replaces + → fl+, - → fl-, * → fl*, / → fl/, etc.
+  ;;   Like with-fixnum-ops but replaces + -> fl+, etc.
 
   (define-syntax with-fixnum-ops
     (lambda (stx)
-      ;; Map of generic op → fixnum op (both as symbols)
       (define fx-map
         '((+          . fx+)
           (-          . fx-)
@@ -246,31 +236,32 @@
           (max        . fxmax)
           (add1       . fx1+)
           (sub1       . fx1-)))
-      ;; Special forms whose head must not be transformed
       (define special-heads
         '(quote if begin let let* letrec letrec* cond case when unless
           and or lambda define set! do guard
           with-syntax define-syntax let-syntax letrec-syntax
           syntax-rules define-record-type library import export))
-      (define (transform datum)
-        (cond
-          [(pair? datum)
-           (let ([head (car datum)])
-             (cond
-               ;; Special forms: preserve head, recurse into subforms
-               [(memq head special-heads)
-                (cons head (map transform (cdr datum)))]
-               ;; Known arithmetic op: replace with fixnum version
-               [(assq head fx-map) =>
-                (lambda (pair) (cons (cdr pair) (map transform (cdr datum))))]
-               ;; Other applications: recurse everywhere
-               [else (map transform datum)]))]
-          [else datum]))
+      ;; Walk syntax tree; use let* to avoid deep paren nesting.
+      (define (transform s)
+        (if (not (pair? (syntax->datum s)))
+          s
+          (let* ([lst      (syntax->list s)]
+                 [head     (and lst (not (null? lst)) (car lst))]
+                 [tail     (and lst (not (null? lst)) (cdr lst))]
+                 [head-sym (and head (identifier? head) (syntax->datum head))])
+            (cond
+              [(not lst)  s]
+              [(null? lst) s]
+              [(and head-sym (memq head-sym special-heads))
+               #`(#,head #,@(map transform tail))]
+              [(and head-sym (assq head-sym fx-map))
+               => (lambda (p)
+                    (let ([new-head (datum->syntax head (cdr p))])
+                      #`(#,new-head #,@(map transform tail))))]
+              [else #`(#,@(map transform lst))]))))
       (syntax-case stx ()
         [(kw body ...)
-         (let ([transformed (map (lambda (b) (transform (syntax->datum b)))
-                                 (syntax->list #'(body ...)))])
-           (datum->syntax #'kw `(begin ,@transformed)))])))
+         #`(begin #,@(map transform (syntax->list #'(body ...))))])))
 
   (define-syntax with-flonum-ops
     (lambda (stx)
@@ -305,22 +296,26 @@
           and or lambda define set! do guard
           with-syntax define-syntax let-syntax letrec-syntax
           syntax-rules define-record-type library import export))
-      (define (transform datum)
-        (cond
-          [(pair? datum)
-           (let ([head (car datum)])
-             (cond
-               [(memq head special-heads)
-                (cons head (map transform (cdr datum)))]
-               [(assq head fl-map) =>
-                (lambda (pair) (cons (cdr pair) (map transform (cdr datum))))]
-               [else (map transform datum)]))]
-          [else datum]))
+      (define (transform s)
+        (if (not (pair? (syntax->datum s)))
+          s
+          (let* ([lst      (syntax->list s)]
+                 [head     (and lst (not (null? lst)) (car lst))]
+                 [tail     (and lst (not (null? lst)) (cdr lst))]
+                 [head-sym (and head (identifier? head) (syntax->datum head))])
+            (cond
+              [(not lst)  s]
+              [(null? lst) s]
+              [(and head-sym (memq head-sym special-heads))
+               #`(#,head #,@(map transform tail))]
+              [(and head-sym (assq head-sym fl-map))
+               => (lambda (p)
+                    (let ([new-head (datum->syntax head (cdr p))])
+                      #`(#,new-head #,@(map transform tail))))]
+              [else #`(#,@(map transform lst))]))))
       (syntax-case stx ()
         [(kw body ...)
-         (let ([transformed (map (lambda (b) (transform (syntax->datum b)))
-                                 (syntax->list #'(body ...)))])
-           (datum->syntax #'kw `(begin ,@transformed)))])))
+         #`(begin #,@(map transform (syntax->list #'(body ...))))])))
 
   ;; ========== Step 10: Effect Type Annotations ==========
   ;;

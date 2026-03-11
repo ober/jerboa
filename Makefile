@@ -81,6 +81,7 @@ test-features:
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-channel2.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-task.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-typed.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-typed-advanced.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-cache.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-effect.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-async.ss
