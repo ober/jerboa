@@ -1,1168 +1,1271 @@
-# Jerboa Implementation Plan: Phase 3 — Production Excellence
+# Jerboa Implementation Plan: Phase 4 — The Definitive Scheme
 
-## Status: COMPLETE ✓
+## Status: Phase 3 Complete, Phase 4 Proposed
 
-All Phase 3 sub-phases have been implemented and pushed (2026-03-11):
+Phases 1-3 established Jerboa as a compelling Gerbil-on-Chez implementation with 138+ modules and 1,524+ tests. Phase 4 pushes Jerboa beyond any existing Scheme into territory occupied by Rust, Go, Haskell, and OCaml — while retaining the macro system that none of them have.
 
-| Phase | Libraries | Tests | Commit |
+### Where We Stand
+
+| Phase | Libraries | Tests | Status |
 |-------|-----------|-------|--------|
-| 3a: Observability | 5 | 131 | `cf41c35` |
-| 3b: Advanced Networking | 5 | 129 | `197ba30` |
-| 3c: Build & Package Tooling | 5 | 119 | `4e513a9` |
-| 3d: Language Extensions | 5 | 158 | `644a501` |
-| 3e: WASM Target | 3 | 100 | `9b8b16a` |
-| **Total** | **23** | **637** | |
+| 1: Core | 51 | 289 | Complete |
+| 2: Advanced | 28 | 541 | Complete |
+| 3: Production | 23 | 637 | Complete |
+| **4: Definitive** | **~65** | **~1,200** | **Proposed** |
 
 ---
 
-## Phase 2 (Previous) — The Superior Scheme: COMPLETE ✓
+## Design Philosophy
 
-All Phase 2 sub-phases were implemented and pushed (2026-03-11):
+Jerboa's architectural advantage is that `defstruct` maps to native Chez records, methods dispatch via `eq-hashtable`, and macros compile to idiomatic Chez code that cp0 can fully optimize. Phase 4 leverages this foundation to build features no other Scheme has, drawing from the best ideas across programming languages:
 
-| Phase | Libraries | Tests | Commit |
-|-------|-----------|-------|--------|
-| 2a: Foundations | 7 | 111 | `316cb5e` |
-| 2b: Performance | 6 | 101 | `691e709` |
-| 2c: Type System | 4 | 111 | `4e99988` |
-| 2d: Systems & Distributed | 6 | 105 | `53794bb` |
-| 2e: Ecosystem | 5 | 113 | `e1a0a5e` |
-| **Total** | **28** | **541** | |
+- **From Rust**: ownership tracking, borrow checking (via linear types), fearless concurrency
+- **From Haskell**: type classes with coherence, kind system, deriving via generics
+- **From OCaml 5**: direct-style effects with deep handlers, multicore domains
+- **From Erlang/BEAM**: hot code swapping, distribution, process isolation
+- **From Go**: channels with select, fast compilation, single-binary deployment
+- **From Clojure**: persistent data structures, transducers, spec/schema
+- **From Zig**: comptime execution, no hidden allocations in systems code
+- **From Unison**: content-addressed code, structural editing
 
----
-
-## Where We Are (After Phase 3)
-
-Jerboa now has 110+ modules, 1,178+ tests, and covers:
-
-**Phase 2 additions**: PGO, devirtualization, compile-time regex, continuation mark optimization, GADTs, type classes, linear types, effect typing, M:N scheduler, async streams, Raft consensus, zero-copy networking, process supervision, connection pooling, property-based testing, doc generator, S-Expr config, gRPC, sorted maps, persistent vectors, persistent hash maps, channel select, error messages, derive system, memory-mapped I/O, REPL enhancements.
-
-**Phase 3 additions**:
-- **Observability**: structured logging, Prometheus metrics, distributed tracing, health checks, circuit breakers
-- **Advanced Networking**: WebSocket (RFC 6455), HTTP/2 framing + HPACK, DNS wire format, rate limiting, HTTP router
-- **Build & Package**: semantic versioning + dep resolver, lockfiles, hot code reload, sandboxed eval, cross-compilation config
-- **Language Extensions**: SQL-like query DSL, data schema validation, data pipeline DSL, term rewriting, source linting
-- **WASM Target**: binary format (LEB128, IEEE 754), Scheme→WASM compiler (i32 subset), stack-based interpreter
-
-The original Phase 2 plan identified 25 additions; those are now complete. Phase 3 added 23 more libraries to cover the "production excellence" gap — the tooling, observability, and interoperability needed to deploy Jerboa in real systems.
+The key insight: Chez Scheme's cp0 optimizer is so good that macro-generated code performs like hand-written C. Every feature compiles down through macros to native Chez — the macro system *is* the compiler, and it's user-extensible.
 
 ---
 
-## Phase 2 Plan Details
+## Track 1: Multicore Runtime — Beyond Erlang, Beyond Go
 
-The following tracks were the Phase 2 design document (now fully implemented):
+Jerboa already has actors, channels, STM, and a work-stealing scheduler. Phase 4 makes this the most sophisticated concurrency runtime in any Scheme.
 
----
+### 1.1 Engine-Based Preemptive Actor Scheduling
 
-## Track 1: Compiler Infrastructure — The Performance Moat
-
-Chez Scheme has the best optimizing compiler in the Lisp world. Jerboa should be the language that gives users direct access to that power. No other Scheme exposes compile-time optimization hooks this way.
-
-### 1.1 Profile-Guided Optimization (PGO)
-
-Record type feedback from production runs, feed it back to the compiler.
-
-**What Chez gives us**: `cp0` (copy propagation pass 0) already does aggressive inlining and constant folding. With type profiles, we can tell it which branches to favor.
+Chez Scheme has a built-in `make-engine` mechanism — preemptible computations with fuel-based scheduling. No other Scheme exposes this. Use it to build a true preemptive actor runtime where no actor can monopolize a worker thread.
 
 ```scheme
-;; Instrument: record which types flow through each call site
-(jerboa build myapp.ss --profile)
-./myapp --workload production < data.txt
-;; Produces myapp.profile — type histograms per call site
-
-;; Optimize: use the profile to specialize
-(jerboa build myapp.ss --pgo myapp.profile -o myapp-fast)
-;; Now (+ x y) at line 47 emits fx+ because the profile shows x,y are always fixnums
-```
-
-**Implementation**:
-- `lib/std/dev/pgo.sls` — instrumentation macros that wrap call sites with type counters
-- A `define-syntax` transformer that reads profile data at compile time and emits specialized code paths
-- Integration with `(jerboa build)`: `--profile` flag instruments, `--pgo` flag applies
-- Store profiles as FASL files (native Chez serialization, fast to read)
-
-**Why this is unique**: No Scheme, no Lisp, no ML has PGO. Only C/C++ (GCC/LLVM), Go, and Rust (via LLVM) have it. Jerboa would be the first functional language with PGO.
-
-**LOC**: ~500
-
-### 1.2 Whole-Program Devirtualization
-
-When the compiler can see all implementations of a method, replace dynamic dispatch with a `cond` on the type.
-
-```scheme
-;; Before: runtime hashtable lookup
-({area} shape)  ;; → find-method → eq-hashtable-ref → call
-
-;; After (when only circle, rect, triangle implement area):
-(cond
-  [(circle? shape) (circle-area shape)]    ;; native record predicate, inlineable
-  [(rect? shape) (rect-area shape)]
-  [(triangle? shape) (triangle-area shape)]
-  [else (error 'area "no method" shape)])
-```
-
-**Implementation**:
-- Collect all `bind-method!` calls during WPO's whole-program analysis
-- For each method, if the set of implementing types is closed, emit a `cond` dispatch
-- Chez's cp0 can then inline the accessor bodies if they're small
-- Result: method call → record predicate check → inlined body. Two instructions.
-
-**Why this matters**: This is the optimization that makes Java's HotSpot fast (speculative devirtualization). Jerboa can do it statically at compile time because WPO sees the whole program.
-
-**LOC**: ~400
-
-### 1.3 Compile-Time Partial Evaluation
-
-Go beyond macros — let the compiler evaluate any pure expression at compile time.
-
-```scheme
-(define-ct (fib n)
-  (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))
-
-(define answer (fib 30))
-;; At compile time: evaluates to 832040
-;; At runtime: (define answer 832040) — zero-cost constant
-```
-
-**Implementation**:
-- Extend `(std staging)` with a binding-time analysis: classify expressions as static (known at compile time) or dynamic
-- Static expressions are evaluated by the macro expander via `eval`
-- Hybrid: partially evaluate a function, leaving dynamic parts as residual code
-- Guard: pure functions only (no mutation, no I/O)
-
-**What this enables**:
-- Compile-time regex → DFA conversion (specialized matcher, no regex engine at runtime)
-- Compile-time JSON schema → specialized parser
-- Compile-time SQL query → optimized access plan
-- Compile-time protocol buffer → serializer/deserializer
-
-**LOC**: ~600
-
-### 1.4 Continuation Mark Optimization
-
-Chez's `call/1cc` is fast but not free. For the common case where an effect handler resumes exactly once (async/await, state, exceptions), eliminate the continuation capture entirely.
-
-**Implementation**:
-- Extend `with-handler` with a static analysis: if the handler's `resume` is called exactly once and is in tail position, the handler is "linear"
-- Linear handlers compile to a direct call (no continuation capture)
-- This makes algebraic effects zero-cost for the 90% case
-
-```scheme
-;; The State effect handler is linear — get/put always resume once
-(with-handler ([State
-                (get (k) (resume k current-state))
-                (put (v k) (set! current-state v) (resume k (void)))])
-  body)
-
-;; Compiles to (approximately):
-(let ([current-state init])
-  (fluid-let ([*state-get* (lambda () current-state)]
-              [*state-put* (lambda (v) (set! current-state v))])
-    body))
-;; No call/1cc at all!
-```
-
-**LOC**: ~350
-
----
-
-## Track 2: Type System — From Gradual to Powerful
-
-The existing type system is annotations-as-assertions. That's step 1. Step 2 is making the type system powerful enough that typed Jerboa code runs measurably faster than untyped code.
-
-### 2.1 Algebraic Data Types with GADT Patterns
-
-Combine sealed struct hierarchies with type-indexed pattern matching. This is the feature that makes Haskell, OCaml, and Rust's type systems so expressive.
-
-```scheme
-;; Typed expression language — the type parameter tracks the result type
-(deftype (Expr a)
-  (IntLit  [val : Fixnum]          : (Expr Fixnum))
-  (BoolLit [val : Boolean]         : (Expr Boolean))
-  (Add     [l : (Expr Fixnum)]
-           [r : (Expr Fixnum)]     : (Expr Fixnum))
-  (If      [test : (Expr Boolean)]
-           [then : (Expr a)]
-           [else : (Expr a)]       : (Expr a))
-  (Equal   [l : (Expr Fixnum)]
-           [r : (Expr Fixnum)]     : (Expr Boolean)))
-
-;; Type-safe evaluator — the return type matches the GADT index
-(define/t (eval-expr [e : (Expr a)]) : a
-  (match-type e
-    [(IntLit v)      v]              ;; v : Fixnum, return : Fixnum ✓
-    [(BoolLit v)     v]              ;; v : Boolean, return : Boolean ✓
-    [(Add l r)       (fx+ (eval-expr l) (eval-expr r))]
-    [(If test then else)
-     (if (eval-expr test) (eval-expr then) (eval-expr else))]
-    [(Equal l r)     (fx= (eval-expr l) (eval-expr r))]))
-```
-
-**Implementation**:
-- `deftype` macro generates sealed record types with an extra phantom type parameter tracked at compile time
-- `match-type` refines the phantom type in each branch, enabling type-directed code generation
-- Runtime representation: standard records (no type parameter at runtime — fully erased)
-- This is *the* feature for writing interpreters, compilers, and DSLs in Jerboa
-
-**LOC**: ~700
-
-### 2.2 Type Classes / Protocols
-
-Haskell's type classes, but simpler. Define a set of operations a type must support, then write generic code against the protocol.
-
-```scheme
-(defprotocol Printable
-  (to-string [self] : String))
-
-(defprotocol Hashable
-  (hash-code [self] : Fixnum))
-
-(defprotocol (Functor f)
-  (fmap [fn : (-> a b)] [fa : (f a)] : (f b)))
-
-;; Implement for specific types
-(implement Printable point
-  (to-string [self] (format "(~a, ~a)" (point-x self) (point-y self))))
-
-(implement (Functor list)
-  (fmap [fn lst] (map fn lst)))
-
-;; Generic code — works for any Printable
-(define/t (show-all [xs : (List (Printable a))]) : (List String)
-  (map to-string xs))
-```
-
-**Implementation**:
-- `defprotocol` generates a vtable struct per protocol
-- `implement` registers a vtable instance in a compile-time registry
-- At call sites where the concrete type is known → direct call (no vtable indirection)
-- At call sites where the type is abstract → vtable dispatch (one pointer chase)
-- Chez cp0 can inline the direct-call case entirely
-
-**Why not just methods?** Methods dispatch on a single argument. Protocols can dispatch on multiple type parameters (`Functor f` abstracts over the container type). This is what makes generic programming work.
-
-**LOC**: ~600
-
-### 2.3 Linear Types for Resource Safety
-
-Mark values that must be used exactly once. Prevents resource leaks at compile time.
-
-```scheme
-(define/t (open-file [path : String]) : (Linear Port)
-  (open-input-file path))
-
-(define/t (read-all [p : (Linear Port)]) : (Values String (Linear Port))
-  ;; Must return the port — can't drop it
-  (let ([data (get-string-all p)])
-    (values data p)))
-
-(define/t (close [p : (Linear Port)]) : Void
-  ;; Consumes the port — type system ensures it's not used again
-  (close-port p))
-
-;; This is a compile-time error:
-(define/t (leak [path : String]) : String
-  (let ([p (open-file path)])
-    (let-values ([(data _p) (read-all p)])
-      data)))  ;; ERROR: linear value _p not consumed
-```
-
-**Implementation**:
-- Linear types tracked at compile time via the macro expander's environment
-- Each linear binding has a "consumed" flag; checked at scope exit
-- `values` and `let-values` thread linear bindings through
-- In release mode: checks erased (the type system proved correctness)
-
-**LOC**: ~500
-
-### 2.4 Effect Typing — Know What Your Code Does
-
-Annotate functions with the effects they may perform. The compiler warns on unhandled effects.
-
-```scheme
-(define/t (fetch-user [id : Fixnum]) : (Eff [IO, Async] User)
-  (let ([response (perform (Async await (http-get (format "/users/~a" id))))])
-    (json->user (perform (IO read-body response)))))
-
-;; Pure function — the type proves it
-(define/t (validate [user : User]) : (Eff [] Boolean)
-  (and (string? (user-name user))
-       (> (user-age user) 0)))
-
-;; Compiler warns: fetch-user performs IO, Async — but no handler installed
-(define (main)
-  (fetch-user 42))  ;; WARNING: unhandled effects [IO, Async]
-```
-
-**Implementation**:
-- Extend the type syntax with `(Eff [effects...] result-type)`
-- Effect inference: scan function bodies for `perform` calls, accumulate effect sets
-- Handler checking: `with-handler` discharges effects from the body's effect set
-- Polymorphic effects: `(define/t (map-eff [f : (-> a (Eff e b))] [xs : (List a)]) : (Eff e (List b)))`
-
-**LOC**: ~500
-
----
-
-## Track 3: Concurrency — Beyond Erlang
-
-Jerboa already has actors, STM, and structured concurrency. Now make them industrial-strength.
-
-### 3.1 M:N Runtime with Preemptive Scheduling
-
-Currently actors run on OS threads. For 100,000+ concurrent actors, we need lightweight green threads multiplexed onto OS threads — but unlike Gerbil's approach, do it on top of Chez's native thread support.
-
-```scheme
-;; Spawn 1,000,000 actors on 8 OS threads
-(define pool (make-scheduler #:workers 8))
+;; Spawn 1,000,000 actors — each gets fair CPU time slices
+(define pool (make-actor-pool #:workers (cpu-count) #:fuel 10000))
 
 (for-each
   (lambda (i)
     (spawn-actor pool
-      (lambda (msg)
-        (match msg
-          [('ping sender) (send sender 'pong)]))))
+      (lambda (self)
+        (actor-receive self
+          [('ping sender) (actor-send sender 'pong)]
+          [('compute n) (fib n)]))))  ;; even long-running fib gets preempted
   (iota 1000000))
-
-;; Each actor is ~200 bytes (continuation + mailbox pointer)
-;; Total: ~200 MB for 1M actors
 ```
 
 **Implementation**:
-- Extend `(std actor scheduler)` with a timer-interrupt based preemption mechanism
-- Use Chez's `timer-interrupt-handler` to yield the current actor after a time slice
-- Actor state = saved one-shot continuation (from `call/1cc`) + mailbox ref
-- The scheduler dequeues the next ready actor and resumes its continuation
-- Work-stealing between worker threads for load balancing
+- Wrap each actor's message handler in `make-engine` with a configurable fuel count
+- When fuel exhausts, engine suspends → actor goes back on the run queue
+- Worker threads pop actors from work-stealing deques, run engine for one quantum
+- Actor state = engine continuation + mailbox ref (~200 bytes per actor)
+- Use Chez's `set-timer` + `timer-interrupt-handler` as the fuel mechanism
 
-**Key Chez primitives**: `timer-interrupt-handler`, `set-timer`, `call/1cc`, `engine` (Chez's built-in coroutine mechanism — engines are preemptible computations!)
+**Why unique**: Go's goroutines aren't preemptible (they yield at function calls). Erlang's reduction counting is similar but tied to BEAM. Jerboa gets preemption via Chez engines on native threads — the best of both worlds.
 
-**Chez engines**: Chez has a built-in `make-engine` / `engine-return` / `engine-block` mechanism that provides preemptive, timed evaluation. Each engine gets a fuel count (ticks); when fuel runs out, the engine suspends and returns its continuation. This is *exactly* what we need for actor scheduling:
+**Files**: `lib/std/actor/engine.sls` (~400 LOC)
+**Tests**: 20 tests (preemption fairness, fuel exhaustion, million-actor spawn)
 
-```scheme
-(define (run-actor actor fuel)
-  (let ([eng (make-engine (lambda () (actor-body actor)))])
-    (eng fuel
-      ;; Completed within fuel
-      (lambda (remaining-fuel value) (actor-complete! actor value))
-      ;; Ran out of fuel — preempted
-      (lambda (remaining-engine) (reschedule! actor remaining-engine)))))
-```
+### 1.2 Affinity-Based Scheduling and NUMA Awareness
 
-**Why this is better than goroutines**: Goroutines can't be inspected or migrated. Jerboa actors have typed mailboxes, supervision trees, and can be transparently distributed across nodes.
-
-**LOC**: ~800
-
-### 3.2 Channel Select with Priority and Default
-
-Go's `select` is one of its best features. Jerboa should have it, but better.
+For high-performance servers, schedule actors to the same core that owns their data.
 
 ```scheme
-(select
-  ;; Receive from channels with priority (first match wins on tie)
-  [(recv ch1) => (lambda (msg) (handle-request msg))]
-  [(recv ch2) => (lambda (msg) (handle-event msg))]
-  ;; Send to a channel (blocks if full)
-  [(send result-ch answer) => (lambda () (log "sent"))]
-  ;; Timer
-  [(after 5000) => (lambda () (log "timeout"))]
-  ;; Default — non-blocking poll
-  [default => (lambda () (log "nothing ready"))])
+(define-actor-group db-actors
+  #:affinity 'core-pinned
+  #:workers 4)
+
+(define-actor-group compute-actors
+  #:affinity 'numa-local    ;; keep on same NUMA node
+  #:workers (numa-node-count))
+
+;; Actor-to-actor messages within same group avoid cross-core cache invalidation
+(spawn-in-group db-actors (lambda (self) ...))
 ```
 
 **Implementation**:
-- `select` macro compiles to a wait on multiple condition variables with a shared "claimed" flag
-- When any channel becomes ready, it signals the select's condition variable
-- Priority: check channels in order; first ready one wins
-- `default`: if no channel is ready, execute immediately (non-blocking)
-- `after`: register a timer with the event loop; fires if no channel fires first
+- FFI to `sched_setaffinity` / `pthread_setaffinity_np` for core pinning
+- NUMA topology discovery via `/sys/devices/system/node/`
+- Per-group work-stealing deques — stealing prefers same NUMA node
+- Thread-local allocator hints for NUMA-aware memory placement
 
-**Integration with actors**: `receive` in an actor body becomes syntactic sugar for `select` on the actor's mailbox.
+**Files**: `lib/std/actor/affinity.sls` (~300 LOC), `lib/std/os/numa.sls` (~200 LOC)
+**Tests**: 15 tests
 
-**LOC**: ~400
+### 1.3 Continuations as Serializable Values
 
-### 3.3 Async Streams
-
-Lazy sequences that produce values asynchronously. The marriage of `(std seq)` and `(std async)`.
+Chez's one-shot continuations (`call/1cc`) can be serialized to bytevectors via `fasl-write`. This enables actor migration, distributed checkpointing, and time-travel debugging.
 
 ```scheme
-;; An async stream of lines from a network connection
-(define (line-stream conn)
-  (async-generate
-    (lambda (yield)
-      (let loop ()
-        (let ([line (await (tcp-read-line conn))])
-          (unless (eof-object? line)
-            (yield line)
-            (loop)))))))
+;; Checkpoint an actor's state
+(define (checkpoint-actor actor)
+  (let ([cont (actor-continuation actor)]
+        [mailbox (actor-mailbox-snapshot actor)])
+    (fasl-write (list cont mailbox) "actor-checkpoint.fasl")))
 
-;; Process with familiar sequence operations — but each step may suspend
-(async-for-each
-  (lambda (line)
-    (await (process-line line)))
-  (async-filter
-    (lambda (line) (string-prefix? "DATA:" line))
-    (line-stream connection)))
+;; Restore on a different machine
+(define (restore-actor path)
+  (let ([state (fasl-read path)])
+    (spawn-actor-from-checkpoint (car state) (cadr state))))
 ```
 
 **Implementation**:
-- `async-generate` creates a producer that yields values via one-shot continuation
-- `async-for-each`, `async-map`, `async-filter` — standard operations that `await` between elements
-- Back-pressure: the producer suspends when the consumer isn't ready
-- Cancellation: dropping the stream reference triggers cleanup via guardian
+- Use `fasl-write` / `fasl-read` for continuation serialization
+- Strip non-serializable closures (FFI pointers, ports) with a pre-serialization walk
+- Integration with `(std actor transport)` for live actor migration
 
-**LOC**: ~450
+**Files**: `lib/std/actor/checkpoint.sls` (~250 LOC)
+**Tests**: 15 tests
 
-### 3.4 Distributed Consensus (Raft)
+### 1.4 Structured Concurrency with Deadlock Detection
 
-CRDTs give eventual consistency. For strong consistency, implement Raft.
+Extend `with-task-group` with automatic deadlock detection using a wait-for graph.
 
 ```scheme
-(define cluster (raft-cluster
-  #:nodes '("node1:9001" "node2:9001" "node3:9001")
-  #:state-machine (lambda (state command)
-                    (match command
-                      [('set key val) (hash-set state key val)]
-                      [('get key) (values state (hash-ref state key))]))))
-
-;; Strongly consistent reads and writes
-(raft-apply! cluster '(set "user:1" "Alice"))   ;; replicated to majority
-(raft-query cluster '(get "user:1"))             ;; reads from leader → "Alice"
+(with-task-group (lambda (tg)
+  (let ([ch1 (make-channel 0)]
+        [ch2 (make-channel 0)])
+    ;; Deadlock: task A waits on ch2, task B waits on ch1
+    (task-group-spawn tg (lambda () (channel-get ch2) (channel-put ch1 'a)))
+    (task-group-spawn tg (lambda () (channel-get ch1) (channel-put ch2 'b)))
+    ;; Runtime detects the cycle and raises &deadlock with the wait-for graph
+    )))
 ```
 
 **Implementation**:
-- Build on `(std actor transport)` for RPC and `(std actor cluster)` for node management
-- Leader election, log replication, and safety per the Raft paper
-- State machine interface: user provides a pure function `(state, command) → (state, response)`
-- Snapshotting for log compaction
-- Joint consensus for cluster membership changes
+- Global wait-for graph (hash table: thread-id → waiting-on-resource)
+- Updated at every blocking operation (channel-get, mutex-lock, condition-wait)
+- Background detector thread runs DFS cycle detection periodically
+- On cycle detection: raise `&deadlock` condition with the cycle path
+- Opt-in via `(parameterize ([*detect-deadlocks* #t]) ...)`
 
-**LOC**: ~1200
+**Files**: `lib/std/concur/deadlock.sls` (~300 LOC)
+**Tests**: 15 tests
+
+---
+
+## Track 2: Type System — Toward Dependent Types
+
+Phase 2 gave us gradual typing, GADTs, type classes, and linear types. Phase 4 pushes toward a type system competitive with Haskell, Scala 3, and Idris — but always optional.
+
+### 2.1 Compile-Time Type Checking (Not Just Runtime Assertions)
+
+Currently `define/t` emits runtime assertions. Phase 4 adds a static checker that runs at macro-expansion time, reporting errors before the program runs.
+
+```scheme
+(define/t (add [x : fixnum] [y : fixnum]) : fixnum
+  (string-append x y))
+;; COMPILE ERROR: string-append expects (string, string), got (fixnum, fixnum)
+;; at lib/myapp.sls:5:3
+```
+
+**Implementation**:
+- Type environment threaded through macro expansion via syntax properties
+- Bidirectional type checking: annotations flow down, inferred types flow up
+- Constraint-based local inference within function bodies
+- Error messages with source location, expected vs actual, and suggestions
+- `define/t` becomes dual-mode: static check at expand time + optional runtime assert
+
+**Why this matters**: Typed Racket proved that a Scheme can have serious static typing. But TR's approach (separate #lang) fractures the ecosystem. Jerboa's approach (opt-in per-function via `define/t`) is gradual without fragmentation.
+
+**Files**: `lib/std/typed/check.sls` (~800 LOC), `lib/std/typed/infer.sls` (~600 LOC), `lib/std/typed/env.sls` (~300 LOC)
+**Tests**: 40 tests
+
+### 2.2 Higher-Kinded Types and Functor/Monad/Applicative
+
+Type classes that abstract over type constructors, not just types.
+
+```scheme
+(defprotocol (Functor f)
+  (fmap [fn : (-> a b)] [fa : (f a)] : (f b)))
+
+(defprotocol (Monad m) #:extends (Functor m)
+  (return [a] : (m a))
+  (bind [ma : (m a)] [f : (-> a (m b))] : (m b)))
+
+;; Implement for Option type
+(deftype (Option a) (Some [val : a]) (None))
+
+(implement (Functor Option)
+  (fmap [fn fa]
+    (match fa
+      [(Some v) (Some (fn v))]
+      [(None) (None)])))
+
+(implement (Monad Option)
+  (return [a] (Some a))
+  (bind [ma f]
+    (match ma
+      [(Some v) (f v)]
+      [(None) (None)])))
+
+;; do-notation via macro
+(do/m Option
+  [x <- (Some 3)]
+  [y <- (Some 4)]
+  (return (+ x y)))
+;; => (Some 7)
+```
+
+**Implementation**:
+- Extend `defprotocol` to accept type-constructor parameters `(f)`, `(m)`
+- `#:extends` clause for protocol inheritance
+- `do/m` macro desugars to nested `bind` calls
+- Instance resolution at macro-expansion time when concrete type is known
+- Fallback to vtable dispatch when type is abstract
+
+**Files**: `lib/std/typed/hkt.sls` (~500 LOC), `lib/std/typed/monad.sls` (~400 LOC)
+**Tests**: 30 tests
+
+### 2.3 Refinement Types with SMT-Backed Verification
+
+Go beyond runtime `assert-refined` — verify refinements statically using an embedded decision procedure.
+
+```scheme
+(define/t (safe-divide [n : number] [d : (Refine number (not zero?))]) : number
+  (/ n d))
+
+(safe-divide 10 0)
+;; COMPILE ERROR: refinement violation
+;;   d must satisfy (not zero?)
+;;   but literal 0 is always zero
+;;   at lib/math.sls:3:18
+
+;; Flow-sensitive refinement
+(define/t (safe-head [lst : (Refine list (not null?))]) : any
+  (car lst))
+
+(define/t (process [xs : list])
+  (if (null? xs)
+    'empty
+    (safe-head xs)))  ;; OK — refinement satisfied by the (not null?) branch
+```
+
+**Implementation**:
+- Lightweight constraint solver for linear arithmetic and boolean predicates
+- Integration with occurrence typing — branch conditions refine types
+- Only checks what it can prove; unresolvable refinements fall back to runtime checks
+- Special rules for `null?`, `zero?`, `negative?`, `positive?`, comparison operators
+
+**Files**: `lib/std/typed/refine.sls` (~500 LOC), `lib/std/typed/solver.sls` (~400 LOC)
+**Tests**: 30 tests
+
+### 2.4 Type-Safe Extensible Records (Row Polymorphism Done Right)
+
+Go beyond structural row checks to full row-polymorphic record operations.
+
+```scheme
+;; Function works on any record with at least 'name' and 'age' fields
+(define/t (greet [person : (Row name: string age: fixnum | r)]) : string
+  (format "Hello ~a, age ~a" (name person) (age person)))
+
+;; Works with any record that has those fields
+(defstruct employee (name age department salary))
+(defstruct student (name age university gpa))
+
+(greet (make-employee "Alice" 30 "Engineering" 100000))  ;; OK
+(greet (make-student "Bob" 20 "MIT" 3.9))                ;; OK
+
+;; Record extension
+(define/t (with-id [rec : (Row | r)] [id : fixnum]) : (Row id: fixnum | r)
+  (record-extend rec 'id id))
+```
+
+**Implementation**:
+- Row type variables (`| r`) represent "and possibly more fields"
+- Unification of row types during type checking
+- `record-extend` / `record-restrict` as primitive operations
+- Compiles to Chez `define-record-type` with dynamic field tables for open rows
+
+**Files**: `lib/std/typed/row.sls` (~500 LOC)
+**Tests**: 25 tests
+
+---
+
+## Track 3: Effects System — Deep Handlers and Multishot
+
+Phase 2's effects use one-shot continuations. Phase 4 adds deep handlers (that re-install themselves) and limited multishot support for backtracking.
+
+### 3.1 Deep Effect Handlers
+
+Currently handlers are shallow — after resuming, the handler is no longer installed. Deep handlers automatically re-install for the remainder of the computation.
+
+```scheme
+;; Shallow (current): must manually re-install
+(with-handler ([State (get (k) (resume k cell))])
+  (State get)    ;; handled
+  (State get))   ;; NOT handled — handler consumed by first resume
+
+;; Deep (new): handler persists
+(with-deep-handler ([State (get (k) (resume k cell))])
+  (State get)    ;; handled
+  (State get)    ;; also handled — handler re-installed after resume
+  (State get))   ;; still handled
+```
+
+**Implementation**:
+- `with-deep-handler` wraps each `resume` call to re-install the handler frame before continuing
+- Uses `dynamic-wind` to ensure handler is on the stack during the resumed computation
+- Negligible overhead: one parameter mutation per resume
+
+**Files**: `lib/std/effect/deep.sls` (~200 LOC)
+**Tests**: 20 tests
+
+### 3.2 Multishot Continuations via Delimited Prompts
+
+For backtracking search, nondeterminism, and probabilistic programming, support continuations that can be invoked more than once.
+
+```scheme
+(defeffect Choose (choose options))
+
+;; Backtracking search — explore all choices
+(define (all-solutions thunk)
+  (let ([results '()])
+    (with-multishot-handler
+      ([Choose
+        (choose (k options)
+          (for-each (lambda (opt)
+                      (let ([r (resume k opt)])  ;; k invoked multiple times!
+                        (set! results (cons r results))))
+                    options))])
+      (thunk))
+    (reverse results)))
+
+(all-solutions (lambda ()
+  (let ([x (Choose choose '(1 2 3))]
+        [y (Choose choose '(a b))])
+    (list x y))))
+;; => ((1 a) (1 b) (2 a) (2 b) (3 a) (3 b))
+```
+
+**Implementation**:
+- Use Chez's full `call/cc` (not `call/1cc`) for multishot handlers
+- Stack copying cost is real — document performance implications
+- `with-multishot-handler` as explicit opt-in (don't slow down one-shot handlers)
+- Useful for: SAT solvers, probabilistic programming, parser combinators, logic programming
+
+**Files**: `lib/std/effect/multishot.sls` (~350 LOC)
+**Tests**: 20 tests
+
+### 3.3 Effect Polymorphism in the Type System
+
+Connect the effect system to the type system so the compiler knows which effects a function may perform.
+
+```scheme
+(define/te (pure-add [x : fixnum] [y : fixnum]) : (Eff [] fixnum)
+  (fx+ x y))
+
+(define/te (stateful-add [x : fixnum]) : (Eff [State] fixnum)
+  (let ([current (perform (State get))])
+    (perform (State put (fx+ current x)))
+    (perform (State get))))
+
+;; Compiler ensures all effects are handled
+(run-state 0 (lambda () (stateful-add 5)))  ;; OK — State handled
+
+(stateful-add 5)
+;; WARNING: unhandled effect [State] at lib/app.sls:10
+```
+
+**Implementation**:
+- Extend `define/te` with effect set inference
+- `with-handler` discharges named effects from the inferred set
+- Effect polymorphism: `(define/te (map-eff [f : (-> a (Eff e b))] [xs : list]) : (Eff e list) ...)`
+- Warning (not error) for unhandled effects — gradual adoption
+
+**Files**: `lib/std/typed/effects.sls` (~400 LOC)
+**Tests**: 25 tests
 
 ---
 
 ## Track 4: Metaprogramming — The Unfair Advantage
 
-Scheme's macro system is its superpower. Jerboa should push it further than any language has gone.
+### 4.1 Multi-Stage Programming (Staging à la MetaOCaml)
 
-### 4.1 Syntax-Level Computation (Typed Macros)
-
-Macros that carry type information through the expansion. The macro system becomes a type-level programming language.
+Go beyond `define-ct` to proper staged computation with code quotation and splicing.
 
 ```scheme
-;; Type-level natural numbers
-(define-type-syntax Zero)
-(define-type-syntax (Succ n))
+;; Stage 0: generate optimized code at compile time
+(define-staged (make-power n)
+  (lambda/staged (x)
+    (let loop ([i n])
+      (if (= i 0)
+        (quote-stage 1)
+        (quote-stage (* x ~(loop (- i 1))))))))
 
-;; Type-safe heterogeneous list indexed by length
-(define-syntax HList
-  (syntax-rules ()
-    [(_ ()) '()]
-    [(_ (t . ts)) (cons t (HList ts))]))
+;; At compile time: (make-power 5) generates:
+;; (lambda (x) (* x (* x (* x (* x (* x 1))))))
+;; Chez cp0 then folds the (* ... 1) away
 
-;; Type-safe vector access — out-of-bounds is a compile-time error
-(define-syntax vec-ref/safe
-  (lambda (stx)
-    (syntax-case stx ()
-      [(_ vec idx)
-       (let ([len (syntax-local-value #'vec 'vector-length)]
-             [i (syntax->datum #'idx)])
-         (when (>= i len)
-           (syntax-error stx "index out of bounds"))
-         #'(vector-ref vec idx))])))
+(define power5 (make-power 5))
+(power5 3)  ;; => 243, computed with 4 multiplications, no loop
 ```
 
 **Implementation**:
-- Extend the macro expander environment with compile-time value bindings
-- `syntax-local-value` retrieves compile-time metadata for a binding
-- `define-for-syntax` binds values available during macro expansion
-- Type-level computation happens entirely at compile time — zero runtime cost
+- `quote-stage` / `~` (splice) for code quotation and antiquotation
+- Type-safe: spliced expressions must have the right type
+- Cross-stage persistence for values that survive from stage 0 to stage 1
+- Integration with Chez's `eval` for compile-time evaluation
 
-**LOC**: ~500
+**Why unique**: MetaOCaml has this. BER MetaScheme has a prototype. Nobody has it integrated with a macro system AND algebraic effects.
 
-### 4.2 Declarative Derive System
+**Files**: `lib/std/staging/multi.sls` (~500 LOC)
+**Tests**: 25 tests
 
-Automatically generate implementations from struct definitions. Like Rust's `#[derive]` or Haskell's `deriving`.
+### 4.2 Syntax-Level Pattern Matching (Match on AST)
+
+Pattern matching on syntax objects for writing macros more naturally.
 
 ```scheme
-(defstruct point (x y)
-  #:derive (equal hash print json serializable))
-
-;; Auto-generates:
-;; - (point=? a b) — structural equality
-;; - (point-hash p) — consistent hash code
-;; - Custom print method: #<point x: 3 y: 4>
-;; - (point->json p) → {"x": 3, "y": 4}
-;; - (json->point j) → (make-point 3 4)
-;; - (point->bytes p) / (bytes->point bv) — binary serialization
-
-;; Users can define custom derivations:
-(define-derivation comparable
-  (lambda (struct-info)
-    (let ([fields (struct-info-fields struct-info)])
-      #`(define (#,(format-id 'compare (symbol->string (struct-info-name struct-info)))
-                 a b)
-          (let loop ([fs '#,fields])
-            (if (null? fs) 0
-                (let ([cmp (compare (field-ref a (car fs))
-                                    (field-ref b (car fs)))])
-                  (if (zero? cmp) (loop (cdr fs)) cmp))))))))
+(define-syntax my-let
+  (syntax-match ()
+    [(_ ([var expr] ...) body ...)
+     #'((lambda (var ...) body ...) expr ...)]
+    [(_ loop ([var init] ...) body ...)
+     #'(letrec ([loop (lambda (var ...) body ...)])
+         (loop init ...))]))
 ```
 
 **Implementation**:
-- Extend `defstruct` to accept `#:derive` clause
-- Each derivation is a macro that receives struct metadata (name, fields, types, parent) and produces definitions
-- Built-in derivations: `equal`, `hash`, `print`, `json`, `serializable`, `comparable`, `copy`, `builder`
-- User-extensible via `define-derivation`
+- `syntax-match` — pattern matching on syntax objects with template output
+- Integrates with `match2` patterns (guards, nested patterns, `or` patterns)
+- Syntax patterns: `...` for repetition, `_` for wildcard, `#:keyword` for keywords
+- Much more readable than nested `syntax-case` with `with-syntax`
 
-**LOC**: ~700
+**Files**: `lib/std/staging/syntax-match.sls` (~350 LOC)
+**Tests**: 20 tests
 
-### 4.3 Compile-Time Regular Expressions
+### 4.3 Compile-Time Code Contracts
 
-Compile regex patterns to DFA state machines at compile time. No regex engine overhead at runtime.
+Verify properties of generated code at macro-expansion time.
 
 ```scheme
-(define-regex email-pattern
-  "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$")
-
-;; At compile time: parses regex, builds NFA, converts to DFA, generates code
-;; At runtime: a direct state machine — no interpretation
-
-(email-pattern "user@example.com")   ;; => #t
-(email-pattern "invalid")            ;; => #f
-
-;; With capture groups
-(define-regex url-pattern
-  "^(https?)://([^/]+)(/.*)?$"
-  #:captures (scheme host path))
-
-(url-pattern "https://example.com/api")
-;; => #<match scheme: "https" host: "example.com" path: "/api">
+(define-syntax/contract (safe-vector-ref vec idx)
+  #:pre (and (identifier? #'vec) (integer? (syntax->datum #'idx)))
+  #:post (lambda (expanded) (not (contains-unsafe? expanded)))
+  #'(let ([v vec] [i idx])
+      (assert (< i (vector-length v)))
+      (vector-ref v i)))
 ```
 
 **Implementation**:
-- Regex parser → NFA → DFA (subset construction) → code generator, all at compile time
-- Code generator emits a `case`-based state machine that Chez compiles to a jump table
-- Capture groups track start/end positions during the DFA walk
-- Fallback to PCRE2 for features DFA can't handle (backreferences, lookahead)
+- `define-syntax/contract` wraps a transformer with pre/post checks
+- Pre-conditions: validated on the input syntax
+- Post-conditions: validated on the expanded output
+- Violations are compile-time errors with source locations
+- Useful for macro libraries that must guarantee safety properties
 
-**Why faster than PCRE2**: No function call overhead per character. The DFA is inlined code. For simple patterns, 5-10x faster than interpreted regex.
-
-**LOC**: ~800
+**Files**: `lib/std/staging/contract.sls` (~250 LOC)
+**Tests**: 15 tests
 
 ---
 
-## Track 5: Data & Collections — The Clojure Playbook
+## Track 5: Systems Programming — The Rust Alternative
 
-Clojure proved that immutable persistent data structures can be the default for a practical language. Jerboa should have the best persistent data structures of any Scheme.
+### 5.1 Async I/O Runtime with io_uring Backend
 
-### 5.1 Persistent Vectors (HAMT-Based)
-
-Immutable vectors with O(log32 n) ≈ O(1) access, update, and append. 32-way branching trie.
+Build a proper async runtime that uses Linux io_uring for zero-copy, zero-syscall I/O.
 
 ```scheme
-(define v (persistent-vector 1 2 3 4 5))
+(define runtime (make-io-runtime #:backend 'io-uring #:workers (cpu-count)))
 
-(persistent-vector-ref v 2)        ;; => 3, O(~1)
-(define v2 (persistent-vector-set v 2 99))   ;; => [1 2 99 4 5], O(~1)
-(persistent-vector-ref v 2)        ;; => 3 (original unchanged)
-
-(define v3 (persistent-vector-append v 6))   ;; => [1 2 3 4 5 6]
-
-;; Transient for batch mutation (like Clojure)
-(define v4 (persistent!
-  (let ([t (transient v)])
-    (transient-set! t 0 100)
-    (transient-set! t 1 200)
-    (transient-append! t 999)
-    t)))
-```
-
-**Implementation**:
-- 32-way branching trie (5 bits per level, max 7 levels for 2^35 elements)
-- Path copying on update (structural sharing)
-- Tail optimization: last chunk stored separately for O(1) append
-- Transient mode: mutable operations on a thread-owned copy, then freeze
-
-**Why this matters**: Persistent vectors are thread-safe by construction. No locks, no copying, no races. Combined with STM, this gives Clojure-style concurrency without the JVM.
-
-**LOC**: ~600
-
-### 5.2 Persistent Hash Maps (CHAMP)
-
-Compressed Hash Array Mapped Trie — the state of the art for immutable hash maps.
-
-```scheme
-(define m (persistent-map 'a 1 'b 2 'c 3))
-
-(persistent-map-ref m 'b)             ;; => 2
-(define m2 (persistent-map-set m 'd 4))  ;; => {a:1 b:2 c:3 d:4}
-(persistent-map-ref m 'd)             ;; => error (original unchanged)
-
-;; Efficient merge
-(persistent-map-merge m m2 (lambda (k v1 v2) v2))
-
-;; Works with STM
-(define state (make-tvar (persistent-map)))
-(atomically
-  (tvar-write! state
-    (persistent-map-set (tvar-read state) 'counter
-      (+ 1 (persistent-map-ref (tvar-read state) 'counter 0)))))
-```
-
-**Implementation**:
-- CHAMP trie with bitmap-indexed nodes (Steindorfer & Vinju 2015)
-- ~2x more memory-efficient than HAMT due to compressed node layout
-- Equality checking in O(1) for identical tries (pointer equality)
-- Efficient diff: `persistent-map-diff` walks only differing subtrees
-
-**LOC**: ~700
-
-### 5.3 Immutable Sorted Maps (Red-Black Trees)
-
-For ordered data — range queries, min/max, ordered iteration.
-
-```scheme
-(define s (sorted-map < 3 "c" 1 "a" 5 "e" 2 "b"))
-
-(sorted-map-min s)                    ;; => (1 . "a")
-(sorted-map-max s)                    ;; => (5 . "e")
-(sorted-map-range s 2 4)              ;; => ((2 . "b") (3 . "c"))
-(sorted-map-ref s 3)                  ;; => "c"
-
-;; Persistent — all operations return new trees
-(define s2 (sorted-map-set s 4 "d"))
-```
-
-**Implementation**:
-- Okasaki-style persistent red-black trees
-- O(log n) insert, delete, lookup
-- O(log n) split and join for efficient range operations
-- Integration with `(std seq)`: `sorted-map->lazy-seq` for lazy ordered traversal
-
-**LOC**: ~500
-
----
-
-## Track 6: Systems Programming — The Rust Alternative
-
-Make Jerboa the best Scheme for writing the kind of software people currently write in Rust or Go.
-
-### 6.1 Memory-Mapped I/O
-
-Direct access to file contents as bytevectors without copying.
-
-```scheme
-(define mapping (mmap "large-file.dat" #:mode 'read-only))
-
-;; Access bytes directly — no read() syscall, no buffer copy
-(bytevector-u64-ref mapping 0 (endianness little))
-
-;; Memory-mapped writes
-(define writable (mmap "output.dat" #:mode 'read-write #:size (* 1024 1024)))
-(bytevector-u64-set! writable 0 42 (endianness little))
-(msync writable)  ;; flush to disk
-
-;; Auto-cleanup
-(munmap mapping)
-```
-
-**Implementation**:
-- FFI wrapper around `mmap`/`munmap`/`msync`/`madvise`
-- Return a Chez bytevector backed by the mapped region (via `foreign-ref` on the mmap pointer)
-- Guardian-based cleanup for GC safety
-- `madvise` integration: `sequential`, `random`, `willneed`, `dontneed`
-
-**LOC**: ~300
-
-### 6.2 Zero-Copy Networking
-
-Avoid copies between kernel and user space for high-throughput networking.
-
-```scheme
-;; sendfile — kernel-to-kernel copy, zero user-space involvement
-(define (serve-static-file conn path)
-  (let ([fd (open-fd path O_RDONLY)]
-        [size (file-size path)])
-    (sendfile (connection-fd conn) fd 0 size)
-    (close-fd fd)))
-
-;; splice — pipe data between fds without user-space copy
-(define (proxy src-conn dst-conn)
-  (let ([pipe-fds (pipe)])
+(run-io runtime (lambda ()
+  ;; All I/O is non-blocking, submitted to io_uring in batches
+  (let ([listener (tcp-listen "0.0.0.0" 8080)])
     (let loop ()
-      (let ([n (splice (connection-fd src-conn) (pipe-read pipe-fds) 65536)])
-        (when (> n 0)
-          (splice (pipe-write pipe-fds) (connection-fd dst-conn) n)
-          (loop))))))
-
-;; io_uring scatter-gather I/O
-(define (batch-read ring fds buffers)
-  (for-each
-    (lambda (fd buf)
-      (io-uring-prep-read ring fd buf (bytevector-length buf) 0))
-    fds buffers)
-  (io-uring-submit ring)
-  (io-uring-wait ring (length fds)))
+      (let ([conn (await (tcp-accept listener))])
+        (spawn-task (lambda ()
+          (let ([request (await (read-http-request conn))])
+            (let ([response (handle-request request)])
+              (await (write-http-response conn response))
+              (await (close conn))))))
+        (loop))))))
 ```
 
 **Implementation**:
-- FFI wrappers for `sendfile`, `splice`, `tee`, `vmsplice`
-- Integration with `(std os iouring)` for batched scatter-gather
-- Buffer pool for recycling bytevectors (avoid GC pressure)
+- `(std os iouring)` already exists — extend with high-level async wrappers
+- Submission queue batching: collect I/O requests, submit in one syscall
+- Completion queue polling in a dedicated thread, dispatching to actor/task callbacks
+- Fallback to epoll on older kernels (< 5.1)
+- File I/O, socket I/O, timer, and fsync all via io_uring
 
-**LOC**: ~400
+**Files**: `lib/std/async/ioruntime.sls` (~600 LOC), `lib/std/async/iouring-ops.sls` (~400 LOC)
+**Tests**: 25 tests
 
-### 6.3 Process Supervision and Signals
+### 5.2 Arena Allocators for Zero-GC Hot Paths
 
-Production-grade process management.
+For latency-sensitive code, allocate from a fixed arena that gets bulk-freed, avoiding GC pauses entirely.
 
 ```scheme
-(define (main)
-  (install-signal-handlers!
-    [SIGTERM (lambda () (graceful-shutdown!))]
-    [SIGHUP  (lambda () (reload-config!))]
-    [SIGUSR1 (lambda () (dump-stats!))])
+(define arena (make-arena (* 1024 1024)))  ;; 1 MB arena
 
-  ;; Supervised child processes
-  (with-process-group
-    (spawn-process "worker" "./worker" '("--port" "8001")
-      #:restart 'on-failure
-      #:max-restarts 5
-      #:backoff 'exponential)
-    (spawn-process "logger" "./logger" '()
-      #:restart 'always)))
+(with-arena arena
+  ;; All allocations in this scope use the arena
+  (let ([buf (arena-alloc-bytevector 4096)])
+    (read-into! fd buf)
+    (process buf)))
+;; Arena reset — all memory freed in O(1), no GC involvement
+
+;; For request handlers:
+(define (handle-request req)
+  (with-arena (request-arena req)
+    ;; Temporary allocations for parsing/serialization live in per-request arena
+    ;; Arena freed when request completes
+    (let ([body (parse-json (request-body req))])
+      (json->bytevector (process body)))))
 ```
 
 **Implementation**:
-- Extend `(std os signal)` with proper signal handling (signalfd or self-pipe trick)
-- Process group management via `setpgid`/`waitpid`
-- Supervised processes with restart policies (like an OS-level supervisor tree)
-- PID file management, daemon mode
+- `make-arena` allocates a contiguous block via `foreign-alloc`
+- `arena-alloc-bytevector` returns bytevectors backed by arena memory
+- `with-arena` resets the bump pointer on scope exit
+- Guardian integration: arena itself is GC-managed, but contents are not
+- Thread-local arena parameter for implicit arena selection
 
-**LOC**: ~500
+**Why this matters**: Java's ZGC and Go's GC still have tail latencies. Arena allocation gives deterministic latency for request-processing hot paths. Zig popularized this pattern; Jerboa brings it to a GC'd language.
 
-### 6.4 Async DNS and Connection Pooling
+**Files**: `lib/std/mem/arena.sls` (~350 LOC)
+**Tests**: 20 tests
 
-Essential for any network service.
+### 5.3 Structured Binary Data (Like Rust's `repr(C)`)
+
+Define packed binary layouts that map directly to C structs, network packets, and file formats.
 
 ```scheme
-;; Non-blocking DNS resolution
-(define ips (await (dns-resolve "example.com" #:type 'A)))
+(define-binary-struct ip-header
+  #:endian 'big
+  (version      uint4)
+  (ihl          uint4)
+  (dscp         uint6)
+  (ecn          uint2)
+  (total-length uint16)
+  (id           uint16)
+  (flags        uint3)
+  (frag-offset  uint13)
+  (ttl          uint8)
+  (protocol     uint8)
+  (checksum     uint16)
+  (src-addr     uint32)
+  (dst-addr     uint32))
 
-;; Connection pool with health checks
-(define pool (make-connection-pool
-  #:create (lambda () (tcp-connect "db.internal" 5432))
-  #:destroy close-port
-  #:validate (lambda (conn) (db-ping conn))
-  #:max-size 20
-  #:max-idle-time 300))
+;; Zero-copy parsing from a bytevector
+(define header (bytevector->ip-header packet 0))
+(ip-header-src-addr header)  ;; => #x0A000001
 
-(with-pooled-connection pool
-  (lambda (conn)
-    (db-query conn "SELECT * FROM users")))
+;; Zero-copy serialization
+(define bv (ip-header->bytevector header))
 ```
 
 **Implementation**:
-- `c-ares` FFI wrapper for async DNS (or `getaddrinfo_a` on glibc)
-- Generic connection pool with idle timeout, max size, health checks
-- Integration with `(std async)` for non-blocking acquire/release
-- Exponential backoff on connection failures
+- `define-binary-struct` generates `foreign-ref` / `foreign-set!` accessors at computed offsets
+- Bit-field support via shift-and-mask operations
+- Endianness specified per-struct or per-field
+- Nested structs and fixed-size arrays
+- Validation: field values checked against bit-width at write time
 
-**LOC**: ~600
+**Files**: `lib/std/binary.sls` (~500 LOC)
+**Tests**: 25 tests
+
+### 5.4 Safe Memory-Mapped Persistent Data Structures
+
+Combine `(std os mmap)` with persistent data structures for databases and caches.
+
+```scheme
+;; Memory-mapped B+ tree
+(define db (mmap-btree-open "data.db"
+  #:key-type 'string
+  #:value-type 'bytevector
+  #:page-size 4096))
+
+(mmap-btree-put! db "user:1" (string->utf8 "Alice"))
+(mmap-btree-get db "user:1")  ;; => #vu8(65 108 105 99 101)
+
+;; Crash-safe: uses write-ahead log + msync
+(mmap-btree-transaction db
+  (lambda (txn)
+    (txn-put! txn "counter" (fixnum->bytevector (+ 1 (bytevector->fixnum (txn-get txn "counter")))))
+    (txn-put! txn "updated" (fixnum->bytevector (current-time)))))
+```
+
+**Implementation**:
+- B+ tree with 4K pages mapped via mmap
+- Write-ahead log for crash recovery
+- Copy-on-write pages for MVCC transactions
+- `msync` for durability guarantees
+- Compaction and defragmentation
+
+**Files**: `lib/std/db/mmap-btree.sls` (~800 LOC)
+**Tests**: 30 tests
 
 ---
 
-## Track 7: Developer Experience — What Makes People Stay
+## Track 6: Developer Experience — What Makes People Stay
 
-### 7.1 Interactive REPL with Rich Features
+### 6.1 Time-Travel Debugger with Replay
 
-The REPL should be the best in any Scheme.
+Record execution history and navigate backward through time.
 
-```
-jerboa> (defstruct point (x y))
-;; point, make-point, point?, point-x, point-y defined
+```scheme
+(with-time-travel
+  (lambda ()
+    (define x 1)       ;; frame 0
+    (set! x (+ x 1))  ;; frame 1
+    (set! x (* x 3))  ;; frame 2
+    (error "bug!")))   ;; frame 3
 
-jerboa> (make-point 3 4)
-#<point x: 3 y: 4>          ;; auto-print with field names
-
-jerboa> ,type (make-point 3 4)
-(Struct point (x: Any) (y: Any))
-
-jerboa> ,time (fib 35)
-;; 9227465
-;; 0.234s elapsed, 0.001s GC, 48 MB allocated
-
-jerboa> ,doc hash-ref
-;; (hash-ref ht key [default]) → any
-;; Look up key in hash table. If not found and default given,
-;; return default. Otherwise, raise an error.
-
-jerboa> ,apropos channel
-;; make-channel, channel-put, channel-get, channel-select,
-;; channel-close, channel?, async-channel, ...
-
-jerboa> ,trace (fibonacci 5)
-;; (fibonacci 5)
-;;   (fibonacci 4)
-;;     (fibonacci 3)
-;;       (fibonacci 2) → 1
-;;       (fibonacci 1) → 1
-;;     → 2
-;;     (fibonacci 2) → 1
-;;   → 3
-;;   (fibonacci 3) ...
-;; → 5
-
-jerboa> ,profile (run-benchmark)
-;; Top 5 hot functions:
-;;   1. parse-json        34.2%  (1,234 calls)
-;;   2. hash-ref          21.1%  (45,678 calls)
-;;   3. string-split       8.3%  (2,345 calls)
-;;   ...
+;; After the error:
+;; jerboa> ,rewind 1
+;; frame 1: x = 2, at lib/app.sls:4
+;; jerboa> ,rewind 0
+;; frame 0: x = 1, at lib/app.sls:3
+;; jerboa> ,inspect x
+;; x = 1 : fixnum
 ```
 
 **Implementation**:
-- REPL commands (`,type`, `,time`, `,doc`, `,apropos`, `,trace`, `,profile`, `,expand`)
-- Tab completion from imported modules
-- Multi-line input with bracket balancing
-- History with reverse search
-- Colored output (types, values, errors)
-- Auto-import: unknown identifier triggers `suggest-imports`
+- Instrumentation macro that records variable bindings in a circular buffer
+- Each frame: source location + variable snapshot (name → value)
+- Configurable buffer size (default 10,000 frames)
+- Integration with REPL `,rewind` command
+- Conditional recording: only record when a predicate is true (for production)
 
-**LOC**: ~800
+**Files**: `lib/std/dev/time-travel.sls` (~400 LOC)
+**Tests**: 20 tests
 
-### 7.2 Error Messages That Don't Suck
+### 6.2 Error Messages with Fix Suggestions
 
-The #1 complaint about every Scheme. Fix it.
+Go beyond "did you mean?" to actionable fix suggestions with auto-apply.
 
 ```scheme
-;; Before (stock Chez):
-;; Exception: incorrect number of arguments to #<procedure fibonacci>
+;; Unbound identifier with fix
+;; error: unbound identifier 'htable-ref'
+;;   15 | (htable-ref config 'port)
+;;      |  ^^^^^^^^^^
+;;   fix: replace with 'hash-ref' (from (jerboa runtime))
+;;   fix: replace with 'hashtable-ref' (from (chezscheme))
 
-;; After (Jerboa):
-;; error: fibonacci called with 2 arguments, but expects 1
-;;
-;;   12 | (fibonacci 10 20)
-;;      |  ^^^^^^^^^
-;;      |  defined at lib/math.ss:5
-;;      |  signature: (fibonacci n : Fixnum) → Fixnum
-;;
-;;   hint: did you mean (fibonacci 10)?
+;; Wrong arity with signature
+;; error: string-split called with 1 argument, expects 2
+;;   8 | (string-split line)
+;;     |  ^^^^^^^^^^^^
+;;   signature: (string-split str delimiter) from (std misc string)
+;;   fix: (string-split line " ")
 
-;; Type error:
-;; error: type mismatch in argument 1 of string-length
-;;
-;;   8 | (string-length 42)
-;;     |                ^^
-;;     |  expected: String
-;;     |  got:      Fixnum (42)
-;;
-;;   hint: use (number->string 42) to convert
-
-;; Unbound identifier:
-;; error: unbound identifier 'hassh-ref'
-;;
-;;   15 | (hassh-ref table key)
-;;      |  ^^^^^^^^^
-;;      |  did you mean: hash-ref (from (std hash))?
+;; Missing import with auto-add
+;; error: unbound identifier 'json-object->string'
+;;   3 | (json-object->string data)
+;;     |  ^^^^^^^^^^^^^^^^^^^^
+;;   fix: add (import (std text json))
+;;   [press 'f' to apply fix]
 ```
 
 **Implementation**:
-- Wrap Chez's `condition` system with enhanced formatters
-- Source location tracking: store file/line/col in syntax objects through macro expansion
-- Levenshtein distance for "did you mean?" suggestions
-- Type annotation integration: show expected vs. actual types
-- Stack traces with source locations (not just procedure names)
+- Wrap `compile-file` to capture all diagnostics
+- Post-process error messages with Levenshtein matching against all visible bindings
+- Arity database built from `library-exports` + procedure metadata
+- Fix application: source file rewriting via `(std lint)` infrastructure
+- REPL integration: `,fix` command applies the most recent suggestion
 
-**LOC**: ~600
+**Files**: `lib/std/dev/errors.sls` (~500 LOC), `lib/std/dev/suggest.sls` (~300 LOC)
+**Tests**: 25 tests
 
-### 7.3 Documentation Generator
+### 6.3 Interactive Profiler with Flame Graphs
 
-Generate documentation from source code annotations.
+Beyond counters — generate flame graphs for visual performance analysis.
 
 ```scheme
-;; In source:
-(def (hash-ref ht key (default (void)))
-  "Look up KEY in hash table HT.
-   If KEY is not found and DEFAULT is provided, return DEFAULT.
-   Otherwise, raise an error.
+(with-flame-profile "output.svg"
+  (lambda ()
+    (run-benchmark)))
 
-   Examples:
-     (hash-ref (hash (a 1) (b 2)) 'a) => 1
-     (hash-ref (hash) 'missing 'default) => default
+;; Produces an interactive SVG flame graph
+;; Each bar = function, width = CPU time, depth = call stack
+;; Click to zoom into subtrees
 
-   See also: hash-set, hash-has-key?, hash-update"
-  ...)
-
-;; Generate:
-;; $ jerboa doc --format html lib/
-;; $ jerboa doc --format markdown lib/std/
+;; Allocation profiling
+(with-alloc-profile
+  (lambda ()
+    (process-data large-dataset))
+  (lambda (report)
+    ;; report: per-function allocation counts, sizes, GC pressure
+    (display-allocation-report report)))
 ```
 
 **Implementation**:
-- Parse docstrings from `def`, `defstruct`, `defprotocol` forms
-- Extract type signatures from `define/t` annotations
-- Cross-reference: hyperlink "See also" references
-- Output formats: HTML, Markdown, man pages
-- Searchable index with symbol categorization
+- Stack sampling via `timer-interrupt-handler` at 1000 Hz
+- Call stack capture via Chez inspector API
+- Folded stack format → SVG flame graph generation
+- Allocation tracking via Chez's `statistics` + per-function instrumentation
+- HTML output with interactive zoom, search, and annotation
 
-**LOC**: ~700
+**Files**: `lib/std/dev/flame.sls` (~500 LOC), `lib/std/dev/alloc-profile.sls` (~300 LOC)
+**Tests**: 15 tests
 
-### 7.4 Test Framework Enhancements
+### 6.4 Property-Based Testing with Integrated Shrinking
 
-Make `(std test)` competitive with property-based testing frameworks.
+QuickCheck-style testing with smart shrinking and stateful model checking.
 
 ```scheme
-;; Property-based testing (QuickCheck-style)
-(check-property
-  "reverse is involutive"
-  (forall ([xs (gen:list (gen:integer))])
+(import (std test prop))
+
+;; Basic property
+(check-property "reverse is involutive"
+  (forall ([xs (gen:list-of (gen:integer))])
     (equal? (reverse (reverse xs)) xs)))
 
-(check-property
-  "sort produces sorted output"
-  (forall ([xs (gen:list (gen:integer))])
-    (sorted? <= (sort xs <=))))
+;; Stateful model checking (like Erlang PropEr)
+(define-model counter-model
+  #:state 0
+  #:commands
+  [(increment () (lambda (state) (+ state 1)))
+   (decrement () (lambda (state) (max 0 (- state 1))))
+   (reset     () (lambda (state) 0))]
+  #:invariant (lambda (state) (>= state 0)))
 
-;; Generators compose
-(define gen:point
-  (gen:map make-point (gen:integer) (gen:integer)))
-
-;; Shrinking — on failure, automatically find minimal counterexample
-(check-property
-  "all points have positive coordinates"  ;; intentionally wrong
-  (forall ([p gen:point])
-    (and (> (point-x p) 0) (> (point-y p) 0))))
-;; FAIL: shrunk to (make-point 0 0)
+(check-model counter-model
+  #:commands-per-test 50
+  #:num-tests 1000)
+;; Tests random command sequences against the model
+;; On failure: shrinks to minimal failing command sequence
 ```
 
 **Implementation**:
-- Generators: `gen:integer`, `gen:string`, `gen:list`, `gen:one-of`, `gen:map`, `gen:bind`
-- Shrinking: binary search on failing inputs to find minimal counterexample
-- Integration with `(std test)`: `check-property` as a new assertion type
-- Coverage tracking: instrument tested code, report uncovered branches
+- Generators: `gen:integer`, `gen:string`, `gen:list-of`, `gen:one-of`, `gen:frequency`, `gen:such-that`
+- Integrated shrinking: each generator knows how to make values smaller
+- Stateful testing: generate command sequences, check invariants after each step
+- On failure: shrink the command sequence to minimal reproducer
+- Parallel property testing: run test cases across worker threads
 
-**LOC**: ~700
+**Files**: `lib/std/test/prop.sls` (~600 LOC), `lib/std/test/gen.sls` (~400 LOC), `lib/std/test/shrink.sls` (~300 LOC), `lib/std/test/model.sls` (~400 LOC)
+**Tests**: 30 tests
 
 ---
 
-## Track 8: Interoperability — Reach Beyond Scheme
+## Track 7: Data Processing — The Clojure+ Playbook
 
-### 8.1 WASM Compilation Target
+### 7.1 Transducers with Parallel Execution
 
-Compile Jerboa programs to WebAssembly for browser and edge deployment.
-
-```bash
-$ jerboa build --target wasm myapp.ss -o myapp.wasm
-```
-
-**Implementation approach**:
-- **Phase 1**: Compile a restricted subset of Jerboa (no continuations, no FFI) to WASM via Chez's code generator or a custom backend
-- **Phase 2**: Implement a minimal runtime (GC, basic types) in WAT (WebAssembly text format)
-- **Phase 3**: Support full Jerboa by compiling continuations to WASM's exception handling proposal
-
-This is a major undertaking but transformative — Jerboa in the browser, Jerboa on Cloudflare Workers, Jerboa on Fastly Compute.
-
-**LOC**: ~3000 (runtime) + ~2000 (compiler backend) — this is a multi-month project
-
-### 8.2 S-Expression Configuration Language
-
-A safe subset of Jerboa for configuration files. Like Dhall, but with Scheme syntax.
+Composable data transformations that work on any sequential or parallel data source.
 
 ```scheme
-;; config.jerboa — no I/O, no mutation, no side effects, terminates
-{
-  server: {
-    host: "0.0.0.0"
-    port: 8080
-    workers: (* 2 (cpu-count))    ;; computed at load time
-    tls: {
-      cert: (env "TLS_CERT_PATH")
-      key: (env "TLS_KEY_PATH")
-    }
-  }
-  database: {
-    url: (string-append "postgres://" (env "DB_HOST") ":5432/myapp")
-    pool-size: (max 5 (quotient (cpu-count) 2))
-  }
-  features: (if (env? "PRODUCTION")
-              '(caching rate-limiting metrics)
-              '(debug-logging hot-reload))
-}
+(import (std xform))
+
+;; Define a transducer pipeline
+(define process-pipeline
+  (compose-xf
+    (xf:filter even?)
+    (xf:map (lambda (x) (* x x)))
+    (xf:take 10)
+    (xf:partition-by (lambda (x) (> x 100)))))
+
+;; Apply to different data sources — same pipeline
+(transduce process-pipeline conj '() (range 1 1000))           ;; list
+(transduce process-pipeline conj '() (file-lines "data.txt"))  ;; lazy file
+(transduce process-pipeline + 0 (channel->seq ch))              ;; channel
+
+;; Parallel execution — split data, apply independently, combine
+(parallel-transduce process-pipeline + 0
+  (range 1 10000000)
+  #:workers (cpu-count))
 ```
 
 **Implementation**:
-- Subset of Jerboa: arithmetic, string ops, conditionals, `let`, `env`, `env?`, `cpu-count`
-- No: mutation, I/O (except `env`), recursion (total language — always terminates)
-- Evaluate using `(std capability)` sandbox with minimal capabilities
-- Output: Scheme value (hash table, list, etc.)
-- Type-check config against a schema: `(define-config-schema ...)`
+- Transducer = `(reducing-fn -> reducing-fn)` — composable via function composition
+- Standard transducers: `xf:map`, `xf:filter`, `xf:take`, `xf:drop`, `xf:partition-by`, `xf:dedupe`, `xf:interpose`, `xf:mapcat`
+- Early termination via `reduced` wrapper (like Clojure)
+- Parallel mode: partition input, apply transducer per partition, combine results
+- Works with lists, vectors, channels, generators, files
 
-**LOC**: ~500
+**Files**: `lib/std/xform.sls` (~500 LOC)
+**Tests**: 30 tests
 
-### 8.3 gRPC / Protocol Buffers Support
+### 7.2 Dataframes for Tabular Data
 
-First-class support for the dominant RPC framework.
+SQL-like operations on in-memory columnar data, optimized for analytics.
 
 ```scheme
-(define-proto user.proto
-  (message User
-    (string name  1)
-    (int32  age   2)
-    (string email 3))
+(import (std dataframe))
 
-  (service UserService
-    (GetUser    (GetUserRequest)    → (User))
-    (ListUsers  (ListUsersRequest)  → (stream User))))
+(define df (make-dataframe
+  '((name   "Alice" "Bob" "Carol" "Dave")
+    (age    30      25    35      28)
+    (salary 90000   60000 120000  75000)
+    (dept   "eng"   "eng" "mgmt"  "sales"))))
 
-;; Client
-(define client (grpc-connect "localhost:50051"))
-(define user (grpc-call client 'UserService/GetUser
-               (make-GetUserRequest #:id 42)))
+;; SQL-like operations chain naturally
+(-> df
+  (df:filter (lambda (row) (> (row 'age) 26)))
+  (df:group-by 'dept)
+  (df:aggregate 'salary mean)
+  (df:sort-by 'salary >)
+  (df:to-csv "report.csv"))
 
-;; Server
-(define-grpc-service UserServiceImpl
-  (GetUser (req)
-    (db-lookup-user (GetUserRequest-id req)))
-  (ListUsers (req)
-    (async-generate
-      (lambda (yield)
-        (for-each yield (db-list-users))))))
-
-(grpc-serve UserServiceImpl #:port 50051)
+;; Column-wise operations (vectorized)
+(df:mutate! df 'bonus (lambda (row) (* 0.1 (row 'salary))))
+(df:select df '(name salary bonus))
 ```
 
 **Implementation**:
-- Proto3 parser (text format) → Jerboa struct definitions
-- Wire format encoder/decoder (varint, length-delimited, etc.)
-- HTTP/2 framing via existing TLS + custom frame parser
-- Streaming via async generators from Track 3.3
+- Columnar storage: each column is a vector (fixnum, flonum, or string)
+- Vectorized operations on columns (map over raw vectors, not row-by-row)
+- Group-by with hash-based partitioning
+- Join operations: inner, left, right, cross
+- CSV/JSON serialization/deserialization
+- Integration with `(std query)` for SQL-like syntax
 
-**LOC**: ~1500
+**Files**: `lib/std/dataframe.sls` (~700 LOC)
+**Tests**: 30 tests
+
+### 7.3 Stream Processing with Windowing
+
+Real-time event processing with tumbling, sliding, and session windows.
+
+```scheme
+(import (std stream window))
+
+(define event-stream (channel->async-stream events-channel))
+
+;; Tumbling window: count events per 5-second window
+(async-for-each
+  (lambda (window)
+    (log-metric "events-per-5s" (length window)))
+  (stream:tumbling-window event-stream (seconds 5)))
+
+;; Sliding window: moving average of last 100 events
+(async-for-each
+  (lambda (window)
+    (log-metric "avg-latency" (mean (map event-latency window))))
+  (stream:sliding-window event-stream 100))
+
+;; Session window: group events by user with 30s gap
+(async-for-each
+  (lambda (session)
+    (process-user-session (session-key session) (session-events session)))
+  (stream:session-window event-stream
+    #:key event-user-id
+    #:gap (seconds 30)))
+```
+
+**Implementation**:
+- Window types: tumbling (fixed-size, non-overlapping), sliding (fixed-size, overlapping), session (gap-based)
+- Watermark-based event-time processing (not just wall-clock)
+- Late event handling: configurable allowed lateness
+- State management: window state in STM tvars for thread-safe access
+- Integration with `(std async)` and `(std stream async)`
+
+**Files**: `lib/std/stream/window.sls` (~500 LOC)
+**Tests**: 25 tests
+
+---
+
+## Track 8: Distribution and Interop
+
+### 8.1 Actor Distribution with Location Transparency
+
+Send messages to actors on remote nodes with the same syntax as local actors.
+
+```scheme
+;; Node A
+(define registry (make-distributed-registry
+  #:transport 'tcp
+  #:bind "0.0.0.0:9000"
+  #:cluster '("node-b:9000" "node-c:9000")))
+
+(define counter (spawn-actor registry 'counter
+  (lambda (self)
+    (let ([n 0])
+      (actor-receive self
+        [('increment) (set! n (+ n 1))]
+        [('get sender) (actor-send sender n)])))))
+
+;; Node B — same send syntax, but message goes over the network
+(define remote-counter (actor-ref registry "node-a:9000" 'counter))
+(actor-send remote-counter 'increment)
+(actor-ask remote-counter '(get ,self))  ;; => 1
+```
+
+**Implementation**:
+- Extend `(std actor transport)` with actor discovery via distributed registry
+- Serialization of messages via `fasl-write` (fast, handles all Scheme values)
+- Connection pooling between nodes with heartbeat
+- Failure detection via phi accrual failure detector
+- Transparent retry with configurable at-least-once / at-most-once semantics
+
+**Files**: `lib/std/actor/distributed.sls` (~500 LOC), `lib/std/actor/discovery.sls` (~300 LOC)
+**Tests**: 20 tests
+
+### 8.2 WASM System Interface (WASI) Support
+
+Extend the WASM target to support WASI for running Jerboa programs outside the browser.
+
+```scheme
+;; Compile to WASM+WASI
+;; $ jerboa build --target wasi myapp.ss -o myapp.wasm
+;; $ wasmtime myapp.wasm
+
+;; WASI capabilities
+(import (jerboa wasm wasi))
+
+(define (main args)
+  (let ([contents (wasi:read-file (cadr args))])
+    (wasi:write-stdout (process contents))
+    0))  ;; exit code
+```
+
+**Implementation**:
+- Extend `(jerboa wasm codegen)` with WASI import declarations
+- System calls: fd_read, fd_write, args_get, environ_get, clock_time_get
+- String encoding: UTF-8 memory layout for WASI string passing
+- Linear memory management for the WASM heap
+
+**Files**: `lib/jerboa/wasm/wasi.sls` (~400 LOC)
+**Tests**: 20 tests
+
+### 8.3 Language Server Protocol 2.0
+
+Full LSP with semantic tokens, inlay hints, and code actions.
+
+```scheme
+;; Features:
+;; - Semantic highlighting (distinguish macros, types, effects, variables)
+;; - Inlay hints: show inferred types inline
+;; - Code actions: auto-import, extract function, inline function
+;; - Workspace diagnostics: type errors, unused imports, missing exports
+;; - Go to definition across modules
+;; - Find all references
+;; - Rename symbol with preview
+```
+
+**Implementation**:
+- Semantic token provider using `(std lint)` + type information
+- Incremental document sync for responsive editing
+- Workspace-wide symbol index built from `library-exports`
+- Code action engine for automated refactorings
+- Integration with type checker for diagnostic overlays
+
+**Files**: `lib/std/lsp/server.sls` (~600 LOC), `lib/std/lsp/semantic.sls` (~300 LOC), `lib/std/lsp/actions.sls` (~400 LOC), `lib/std/lsp/diagnostics.sls` (~300 LOC)
+**Tests**: 25 tests
+
+### 8.4 Python Interop via Shared Memory
+
+Call Python libraries (numpy, pandas, ML frameworks) from Jerboa without serialization overhead.
+
+```scheme
+(import (std interop python))
+
+(define py (python-init))
+
+;; Call numpy
+(python-exec py "import numpy as np")
+(define arr (python-eval py "np.array([1, 2, 3, 4, 5])"))
+
+;; Zero-copy: share memory between Chez bytevector and numpy array
+(define bv (python-array->bytevector arr))  ;; shared memory, no copy
+(bytevector-ieee-double-ref bv 0 (endianness native))  ;; => 1.0
+
+;; Call ML model
+(python-exec py "import torch")
+(define model (python-eval py "torch.load('model.pt')"))
+(define input (python-eval py "torch.tensor([[1.0, 2.0, 3.0]])"))
+(define output (python-call py model "forward" input))
+```
+
+**Implementation**:
+- Embed CPython via `libpython3.so` FFI
+- `Py_Initialize` / `PyRun_SimpleString` / `PyObject_CallObject` wrappers
+- Shared memory for bytevectors ↔ numpy arrays (via Python buffer protocol)
+- Reference counting bridge: Chez guardian releases PyObject references
+- Thread safety: GIL acquisition around Python calls
+
+**Files**: `lib/std/interop/python.sls` (~600 LOC)
+**Tests**: 15 tests
+
+---
+
+## Track 9: Security and Sandboxing
+
+### 9.1 Capability-Based Module System
+
+Extend `(std capability)` to control what imported modules can do.
+
+```scheme
+;; Load a plugin with restricted capabilities
+(define plugin-env (make-sandbox
+  #:allow '(read-file "config/*")           ;; only config files
+  #:allow '(network "api.example.com" 443)  ;; only one host
+  #:deny  '(exec)                           ;; no subprocess execution
+  #:deny  '(ffi)                            ;; no foreign functions
+  #:memory-limit (* 50 1024 1024)           ;; 50 MB heap
+  #:time-limit 30))                         ;; 30 seconds
+
+(sandbox-eval plugin-env '(import (plugin main)))
+(sandbox-call plugin-env 'plugin-entry-point config)
+```
+
+**Implementation**:
+- Extend `(jerboa embed)` with fine-grained capability tokens
+- Intercept `foreign-procedure`, `open-file-input-port`, `process` at the sandbox boundary
+- Resource limits via Chez's engines (fuel = time limit) and heap tracking
+- Capability attenuation: plugins can grant sub-capabilities to their own sub-plugins
+- Audit log: record all capability exercises for security analysis
+
+**Files**: `lib/std/capability/sandbox.sls` (~500 LOC), `lib/std/capability/audit.sls` (~200 LOC)
+**Tests**: 25 tests
+
+### 9.2 Taint Tracking for Input Validation
+
+Track which values came from untrusted sources and prevent them from reaching sensitive sinks.
+
+```scheme
+(define user-input (taint (read-line) 'user-input))
+
+;; Tainted values propagate through operations
+(define query-part (string-append "SELECT * FROM users WHERE name = '" user-input "'"))
+;; query-part is tainted with 'user-input
+
+;; Sensitive sinks reject tainted values
+(sql-execute db query-part)
+;; ERROR: tainted value ('user-input) reached sql-execute
+;; fix: use parameterized query: (sql-execute db "SELECT ... WHERE name = ?" user-input)
+
+;; Sanitization removes taint
+(define safe-input (untaint (sql-escape user-input) 'user-input))
+(sql-execute db (string-append "..." safe-input))  ;; OK
+```
+
+**Implementation**:
+- `taint` wraps a value in a record with a taint label set
+- Taint propagates through string operations, list operations, hash operations
+- `untaint` removes a specific label after sanitization
+- Sensitive sinks (`sql-execute`, `eval`, `system`, `open-file`) check for taint
+- Compile-time mode: macro-expansion-time taint analysis for known patterns
+
+**Files**: `lib/std/security/taint.sls` (~400 LOC)
+**Tests**: 25 tests
+
+---
+
+## Track 10: Build System and Toolchain
+
+### 10.1 Incremental Compilation with File Watching
+
+`jerboa watch` recompiles only changed modules and re-runs affected tests.
+
+```scheme
+;; $ jerboa watch lib/ tests/
+;; Watching 138 modules, 92 test files...
+;; [12:00:01] lib/std/json.sls changed
+;; [12:00:01] Compiling (std text json)... OK (0.3s)
+;; [12:00:01] Running tests/test-json.ss... 15/15 passed (0.5s)
+;; [12:00:15] lib/std/actor/core.sls changed
+;; [12:00:15] Compiling (std actor core)... OK
+;; [12:00:15] Recompiling dependents: (std actor), (std actor supervisor)...
+;; [12:00:16] Running tests/test-actor-core.ss... 20/20 passed
+```
+
+**Implementation**:
+- Module dependency graph built from import analysis
+- `inotify` (already have `(std os inotify)`) for file change detection
+- Topological sort of changed modules + dependents for minimal recompilation
+- Parallel compilation of independent modules
+- Test selection: only run tests that import changed modules
+
+**Files**: `lib/jerboa/watch.sls` (~400 LOC)
+**Tests**: 15 tests
+
+### 10.2 Cross-Compilation for ARM64 and RISC-V
+
+Build binaries for different architectures from a single host.
+
+```scheme
+;; $ jerboa build --target aarch64-linux myapp.ss -o myapp-arm64
+;; $ jerboa build --target riscv64-linux myapp.ss -o myapp-riscv64
+```
+
+**Implementation**:
+- Extend `(jerboa cross)` with full cross-compilation pipeline
+- Boot file generation for target architecture via `make-boot-file`
+- Cross-gcc invocation for C shim compilation
+- FFI library compilation for target (via pkg-config cross queries)
+- Testing via QEMU user-mode emulation
+
+**Files**: `lib/jerboa/cross/pipeline.sls` (~400 LOC)
+**Tests**: 10 tests
+
+### 10.3 Reproducible Builds with Content-Addressed Everything
+
+Every build artifact is identified by the hash of its inputs. Same inputs → same outputs, always.
+
+```scheme
+;; Build produces a content-addressed artifact
+;; $ jerboa build --reproducible myapp.ss
+;; artifact: sha256:a1b2c3... (3.2 MB)
+;; deps: sha256:d4e5f6... (std text json)
+;;       sha256:789abc... (std actor core)
+;;       ...
+
+;; Verify a build
+;; $ jerboa verify myapp sha256:a1b2c3...
+;; OK: build is reproducible
+```
+
+**Implementation**:
+- Strip timestamps, temp paths, and nondeterministic data from compiled output
+- Hash chain: artifact hash = H(source + H(dep1) + H(dep2) + ... + chez-version + flags)
+- Build manifest: JSON file listing all inputs and their hashes
+- Verification: rebuild and compare hashes
+
+**Files**: `lib/jerboa/build/reproducible.sls` (~350 LOC)
+**Tests**: 15 tests
 
 ---
 
 ## Implementation Order
 
-The tracks are mostly independent and can be worked in parallel. Within each track, items are ordered by dependency.
+### Phase 4a: Core Runtime (Highest Impact)
 
-### Phase 2a: Foundations (High Impact, Moderate Effort)
+| # | Item | Track | Est. LOC | Priority |
+|---|------|-------|----------|----------|
+| 1 | Engine-based actor scheduling | 1.1 | 400 | Critical |
+| 2 | Deep effect handlers | 3.1 | 200 | High |
+| 3 | Static type checking | 2.1 | 1,700 | Critical |
+| 4 | Transducers | 7.1 | 500 | High |
+| 5 | Async I/O runtime (io_uring) | 5.1 | 1,000 | High |
+| 6 | Error messages with fixes | 6.2 | 800 | High |
+| **Subtotal** | | | **~4,600** | |
 
-| # | Item | Track | LOC | Dependencies |
-|---|------|-------|-----|-------------|
-| 1 | Persistent Vectors | 5.1 | 600 | None |
-| 2 | Persistent Hash Maps | 5.2 | 700 | None |
-| 3 | Channel Select | 3.2 | 400 | Existing channels |
-| 4 | Error Messages | 7.2 | 600 | None |
-| 5 | Derive System | 4.2 | 700 | Existing defstruct |
-| 6 | Memory-Mapped I/O | 6.1 | 300 | Existing FFI |
-| 7 | REPL Enhancements | 7.1 | 800 | None |
+### Phase 4b: Type System and Safety
 
-**Subtotal**: ~4,100 LOC
+| # | Item | Track | Est. LOC | Priority |
+|---|------|-------|----------|----------|
+| 7 | Higher-kinded types | 2.2 | 900 | High |
+| 8 | Refinement types + solver | 2.3 | 900 | Medium |
+| 9 | Row polymorphism v2 | 2.4 | 500 | Medium |
+| 10 | Effect polymorphism | 3.3 | 400 | Medium |
+| 11 | Taint tracking | 9.2 | 400 | Medium |
+| 12 | Capability sandbox | 9.1 | 700 | High |
+| **Subtotal** | | | **~3,800** | |
 
-### Phase 2b: Performance (The Moat)
+### Phase 4c: Systems and Performance
 
-| # | Item | Track | LOC | Dependencies |
-|---|------|-------|-----|-------------|
-| 8 | Continuation Mark Opt | 1.4 | 350 | Existing effects |
-| 9 | PGO | 1.1 | 500 | Existing build |
-| 10 | Devirtualization | 1.2 | 400 | Existing methods |
-| 11 | Compile-Time Regex | 4.3 | 800 | Existing staging |
-| 12 | Compile-Time Partial Eval | 1.3 | 600 | Existing staging |
+| # | Item | Track | Est. LOC | Priority |
+|---|------|-------|----------|----------|
+| 13 | Arena allocators | 5.2 | 350 | High |
+| 14 | Binary struct definitions | 5.3 | 500 | High |
+| 15 | Mmap B+ tree | 5.4 | 800 | Medium |
+| 16 | Multishot continuations | 3.2 | 350 | Medium |
+| 17 | NUMA-aware scheduling | 1.2 | 500 | Low |
+| 18 | Deadlock detection | 1.4 | 300 | Medium |
+| **Subtotal** | | | **~2,800** | |
 
-**Subtotal**: ~2,650 LOC
+### Phase 4d: Developer Experience
 
-### Phase 2c: Type System (The Differentiator)
+| # | Item | Track | Est. LOC | Priority |
+|---|------|-------|----------|----------|
+| 19 | Time-travel debugger | 6.1 | 400 | Medium |
+| 20 | Flame graph profiler | 6.3 | 800 | High |
+| 21 | Property-based testing | 6.4 | 1,700 | High |
+| 22 | Multi-stage programming | 4.1 | 500 | Medium |
+| 23 | Syntax-level match | 4.2 | 350 | Medium |
+| 24 | Compile-time contracts | 4.3 | 250 | Low |
+| **Subtotal** | | | **~4,000** | |
 
-| # | Item | Track | LOC | Dependencies |
-|---|------|-------|-----|-------------|
-| 13 | GADTs | 2.1 | 700 | Existing typed |
-| 14 | Type Classes | 2.2 | 600 | Existing typed |
-| 15 | Linear Types | 2.3 | 500 | Existing typed |
-| 16 | Effect Typing | 2.4 | 500 | Existing effects + typed |
+### Phase 4e: Data and Distribution
 
-**Subtotal**: ~2,300 LOC
+| # | Item | Track | Est. LOC | Priority |
+|---|------|-------|----------|----------|
+| 25 | Dataframes | 7.2 | 700 | Medium |
+| 26 | Stream windowing | 7.3 | 500 | Medium |
+| 27 | Distributed actors | 8.1 | 800 | High |
+| 28 | WASI support | 8.2 | 400 | Medium |
+| 29 | Continuation serialization | 1.3 | 250 | Low |
+| **Subtotal** | | | **~2,650** | |
 
-### Phase 2d: Systems & Distributed (The Killer Apps)
+### Phase 4f: Toolchain and Interop
 
-| # | Item | Track | LOC | Dependencies |
-|---|------|-------|-----|-------------|
-| 17 | M:N Scheduler | 3.1 | 800 | Existing actors |
-| 18 | Async Streams | 3.3 | 450 | Existing async + seq |
-| 19 | Raft Consensus | 3.4 | 1200 | Existing transport |
-| 20 | Zero-Copy Networking | 6.2 | 400 | Existing IO |
-| 21 | Process Supervision | 6.3 | 500 | Existing signals |
-| 22 | Connection Pooling | 6.4 | 600 | Existing async |
-
-**Subtotal**: ~3,950 LOC
-
-### Phase 2e: Ecosystem (Long-term)
-
-| # | Item | Track | LOC | Dependencies |
-|---|------|-------|-----|-------------|
-| 23 | Test Framework | 7.4 | 700 | Existing test |
-| 24 | Doc Generator | 7.3 | 700 | None |
-| 25 | S-Expr Config | 8.2 | 500 | Existing capability |
-| 26 | gRPC | 8.3 | 1500 | Existing async + FFI |
-| 27 | Sorted Maps | 5.3 | 500 | None |
-| 28 | WASM Target | 8.1 | 5000 | Everything |
-
-**Subtotal**: ~8,900 LOC (WASM is optional/aspirational)
+| # | Item | Track | Est. LOC | Priority |
+|---|------|-------|----------|----------|
+| 30 | LSP 2.0 | 8.3 | 1,600 | High |
+| 31 | Python interop | 8.4 | 600 | Medium |
+| 32 | File watching + incremental build | 10.1 | 400 | High |
+| 33 | Cross-compilation pipeline | 10.2 | 400 | Medium |
+| 34 | Reproducible builds | 10.3 | 350 | Medium |
+| **Subtotal** | | | **~3,350** | |
 
 ---
 
 ## Total Estimated Code
 
-| Phase | LOC | Modules |
-|-------|-----|---------|
-| 2a: Foundations | 4,100 | ~10 |
-| 2b: Performance | 2,650 | ~6 |
-| 2c: Type System | 2,300 | ~5 |
-| 2d: Systems | 3,950 | ~8 |
-| 2e: Ecosystem | 3,900 (excl. WASM) | ~8 |
-| **Total** | **~16,900** | **~37** |
+| Phase | LOC | New Modules | New Tests |
+|-------|-----|-------------|-----------|
+| 4a: Core Runtime | 4,600 | ~10 | ~200 |
+| 4b: Type System | 3,800 | ~8 | ~180 |
+| 4c: Systems | 2,800 | ~8 | ~150 |
+| 4d: Developer Experience | 4,000 | ~10 | ~200 |
+| 4e: Data & Distribution | 2,650 | ~7 | ~150 |
+| 4f: Toolchain & Interop | 3,350 | ~8 | ~150 |
+| **Total Phase 4** | **~21,200** | **~51** | **~1,030** |
 
-Combined with existing 14,876 lines across 87 modules, Jerboa would be ~31,800 lines across ~124 modules. Still vastly more compact than Racket (~700K LOC), Guile (~300K), or even Gerbil (~80K with Gambit).
+Combined with existing ~52,000 lines across 138+ modules, Jerboa would be ~73,000 lines across ~190 modules with ~2,550 tests. Still dramatically more compact than Racket (~700K), Guile (~300K), or Gerbil+Gambit (~80K).
 
 ---
 
-## Competitive Position After Phase 2
+## Competitive Position After Phase 4
 
-| Feature | Jerboa | Racket | Gerbil | OCaml | Haskell | Rust | Go | Erlang |
-|---------|--------|--------|--------|-------|---------|------|----|--------|
-| Algebraic effects | **Yes** | No | No | 5.x | Libs | No | No | No |
-| GADTs | **Yes** | No | No | **Yes** | **Yes** | No | No | No |
-| Type classes | **Yes** | No | No | Modules | **Yes** | Traits | No | No |
-| Linear types | **Yes** | No | No | No | Linear H | **Yes** | No | No |
-| Effect typing | **Yes** | No | No | 5.x | **Yes** | No | No | No |
-| STM | **Yes** | No | No | No | **Yes** | No | No | No |
-| Persistent data | **Yes** | No | No | **Yes** | **Yes** | Libs | No | No |
-| PGO | **Yes** | No | No | No | No | **Yes** | **Yes** | No |
-| Compile-time regex | **Yes** | No | No | No | No | **Yes** | No | No |
-| M:N scheduling | **Yes** | No | No | 5.x | Green | No | **Yes** | **Yes** |
-| Raft consensus | **Yes** | No | No | No | No | Libs | Libs | No |
-| Property testing | **Yes** | No | No | QCheck | QC | proptest | gopter | PropEr |
-| Distributed actors | **Yes** | No | Yes | No | Cloud H | No | No | **Yes** |
-| Zero-copy FFI | **Yes** | No | Yes | **Yes** | No | **Yes** | CGo | NIF |
-| Static binaries | **Yes** | Yes | Yes | **Yes** | **Yes** | **Yes** | **Yes** | **Yes** |
-| Macro system | **Yes** | **Yes** | **Yes** | No | TH | proc | No | No |
-| Derive/deriving | **Yes** | No | No | ppx | **Yes** | **Yes** | No | No |
-| WASM target | Planned | No | No | wasm_of | Asterius | **Yes** | **Yes** | No |
+| Feature | Jerboa | Racket | Gerbil | OCaml 5 | Haskell | Rust | Go | Erlang | Zig |
+|---------|--------|--------|--------|---------|---------|------|----|--------|-----|
+| Algebraic effects (deep) | **Yes** | No | No | **Yes** | Libs | No | No | No | No |
+| Multishot continuations | **Yes** | **Yes** | No | No | No | No | No | No | No |
+| Static type checking | **Yes** | TR | No | **Yes** | **Yes** | **Yes** | **Yes** | Dialyzer | **Yes** |
+| GADTs | **Yes** | No | No | **Yes** | **Yes** | No | No | No | No |
+| Higher-kinded types | **Yes** | No | No | Functors | **Yes** | No | No | No | No |
+| Type classes | **Yes** | No | No | Modules | **Yes** | Traits | No | No | No |
+| Linear types | **Yes** | No | No | No | Linear | **Yes** | No | No | No |
+| Refinement types | **Yes** | No | No | No | LH | No | No | No | No |
+| Effect typing | **Yes** | No | No | **Yes** | **Yes** | No | No | No | No |
+| STM | **Yes** | No | No | No | **Yes** | No | No | No | No |
+| Persistent data | **Yes** | No | No | **Yes** | **Yes** | Libs | No | No | No |
+| PGO | **Yes** | No | No | No | No | **Yes** | **Yes** | No | No |
+| Compile-time regex | **Yes** | No | No | No | No | **Yes** | No | No | **Yes** |
+| Engine-based scheduling | **Yes** | No | No | Domains | Green | No | Goroutine | Reduction | No |
+| Preemptive actors | **Yes** | No | No | No | No | No | No | **Yes** | No |
+| Distributed actors | **Yes** | No | Yes | No | Cloud H | No | No | **Yes** | No |
+| Raft consensus | **Yes** | No | No | No | No | Libs | Libs | No | No |
+| CRDTs | **Yes** | No | No | No | No | Libs | Libs | No | No |
+| Arena allocators | **Yes** | No | No | No | No | No | No | No | **Yes** |
+| Zero-copy FFI | **Yes** | No | Yes | **Yes** | No | **Yes** | CGo | NIF | **Yes** |
+| io_uring | **Yes** | No | No | Libs | No | **Yes** | Libs | No | **Yes** |
+| Binary struct defs | **Yes** | No | No | cstruct | No | `repr(C)` | No | No | packed |
+| Mmap databases | **Yes** | No | No | No | No | Libs | Libs | No | No |
+| Static binaries | **Yes** | Yes | Yes | **Yes** | **Yes** | **Yes** | **Yes** | **Yes** | **Yes** |
+| WASM+WASI | **Yes** | No | No | wasm_of | No | **Yes** | **Yes** | No | **Yes** |
+| Macro system | **Yes** | **Yes** | **Yes** | ppx | TH | proc | No | No | comptime |
+| Multi-stage programming | **Yes** | No | No | MetaOCaml | No | No | No | No | **Yes** |
+| Derive/deriving | **Yes** | No | No | ppx | **Yes** | **Yes** | No | No | No |
+| Property testing | **Yes** | No | No | QCheck | QC | proptest | gopter | PropEr | No |
+| Stateful model testing | **Yes** | No | No | No | No | No | No | PropEr | No |
+| Time-travel debugging | **Yes** | No | No | No | No | No | Delve | No | No |
+| Flame graph profiling | **Yes** | No | No | perf | No | cargo-flame | pprof | No | No |
+| Taint tracking | **Yes** | No | No | No | No | No | No | No | No |
+| Capability sandbox | **Yes** | Sandbox | No | No | No | No | No | No | No |
+| Python interop | **Yes** | No | No | No | No | PyO3 | No | No | No |
+| Dataframes | **Yes** | No | No | No | No | polars | No | No | No |
+| Stream windowing | **Yes** | No | No | No | conduit | No | No | No | No |
+| Content-addressed builds | **Yes** | No | No | No | Nix | No | No | No | **Yes** |
+| LSP with semantic tokens | **Yes** | **Yes** | No | **Yes** | HLS | r-a | gopls | No | ZLS |
 
-**Unique combination**: No other language has all of: algebraic effects + GADTs + type classes + linear types + STM + persistent data structures + distributed actors + Raft + property testing + PGO + compile-time regex + a macro system. Jerboa would.
+**The unique combination**: No other language has ALL of: algebraic effects (deep + multishot) + GADTs + higher-kinded types + type classes + linear types + refinement types + effect typing + STM + persistent data + distributed actors + Raft + CRDTs + preemptive engine-based scheduling + arena allocators + io_uring + binary struct definitions + multi-stage programming + property-based testing with model checking + a full macro system. Jerboa would be the first.
 
 ---
 
 ## The Thesis
 
-Phase 1 proved that Gerbil's ergonomics can run on Chez's compiler without compromise. Phase 2 proves that a macro-based language on a great compiler can rival purpose-built languages at their own game:
+Phases 1-3 proved that Gerbil's ergonomics run on Chez's compiler without compromise, and that a macro-based approach produces a comprehensive standard library in ~52K lines.
 
-- **Haskell's type system**: GADTs, type classes, linear types, effect typing — but with gradual adoption, not all-or-nothing
-- **Clojure's data model**: Persistent vectors, maps, sorted maps — but compiled, not JVM-interpreted
-- **Erlang's distribution**: Actors, supervision, Raft, CRDTs — but with static binaries and zero-copy FFI
-- **Rust's safety**: Linear types, capability security, ownership tracking — but with a GC for the 95% that doesn't need manual memory management
-- **Go's tooling**: Fast builds, static binaries, good error messages, batteries included — but with macros and a real type system
+Phase 4 proves that the right foundation — a great optimizing compiler, a powerful macro system, and native OS threads — can support every advanced feature found across the landscape of modern programming languages, without the complexity explosion that a VM-based approach (JVM, BEAM, CLR) requires.
 
-The key insight: Chez Scheme's compiler is so good that macro-generated code performs like hand-written C. Every feature in this plan compiles down to efficient native code through Chez's cp0 optimizer, not through interpretation or bytecode. The macro system is the compiler — and it's extensible.
+The insight is architectural: **macros are the universal language extension mechanism**. Every feature in this plan — effects, types, actors, arenas, transducers, binary structs, staging — compiles through macros into idiomatic Chez Scheme that cp0 optimizes to native code. There is no runtime interpreter, no bytecode, no JIT warmup, no hidden overhead.
 
-That's the unfair advantage no other approach can replicate.
+This is the unfair advantage: **the macro system is the compiler, and it's user-extensible**. Users can add new optimization passes, new type system features, new concurrency primitives — using the same mechanism the standard library uses. No other language architecture makes this possible.
+
+Jerboa: the Scheme that took the best ideas from every language and made them compose.
