@@ -187,6 +187,7 @@ test-phase4f:
 test-phase5:
 	@echo "--- Phase 5: Compiler as Library tests ---"
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-cp0-passes.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-compiler-partial-eval.ss
 
 test-all: test test-features test-wrappers
 
