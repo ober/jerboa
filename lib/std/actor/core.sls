@@ -46,6 +46,9 @@
 
     ;; Create a remote actor reference (for transport layer)
     make-remote-actor-ref
+
+    ;; Internal: mailbox accessor (used by checkpoint layer)
+    actor-ref-mailbox
   )
   (import (chezscheme) (std actor mpsc))
 

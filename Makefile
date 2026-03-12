@@ -168,6 +168,14 @@ test-phase4d:
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-staging2.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-match-syntax.ss
 
+test-phase4e:
+	@echo "--- Phase 4e: Data and Distribution tests ---"
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-dataframe.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-stream-window.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-distributed.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-wasi.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-checkpoint.ss
+
 test-all: test test-features test-wrappers
 
 clean:
