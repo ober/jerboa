@@ -183,6 +183,7 @@ test-phase4f:
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-build-watch.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-cross-compile.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-reproducible.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-musl.ss
 
 test-phase5: test-phase5a test-phase5b test-phase5c test-phase5d test-phase5e
 
