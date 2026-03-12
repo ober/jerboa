@@ -4,7 +4,7 @@ Jerboa is a systems programming language built on Chez Scheme, providing Gerbil 
 compatibility with additional features: algebraic effects, gradual typing, native binary
 compilation, and a full actor/distributed system.
 
-**Current state**: 138 modules, ~25,000 lines, 1,524+ tests (Phases 1–13 + Phase 2 + Phase 3 complete).
+**Current state**: 173 modules, ~35,000 lines, 2,898 tests (Phases 1–3 + Phase 4 complete).
 
 ## New Feature Documentation (Phases 1–13)
 
@@ -100,6 +100,55 @@ compilation, and a full actor/distributed system.
 - `(jerboa wasm codegen)` — Scheme→WASM compiler: compiles pure i32 Scheme subset (define, lambda, let, if, begin, arithmetic, comparisons) to valid WASM binary
 - `(jerboa wasm runtime)` — stack-based WASM interpreter: executes i32 arithmetic, comparisons, local.get/set/tee, if/else, function calls, memory, globals, traps
 
+## Phase 4 Libraries (2026-03-11)
+
+### Phase 4a: Core Runtime
+- `(std effect deep)` — deep algebraic effect handlers that re-install after each resume, enabling stateful and multi-shot effect semantics
+- `(std actor engine)` — engine-pool preemptive actor scheduler using Chez `make-engine`; `make-engine-pool`, `spawn-engine-actor`, `engine-pool-submit!`
+- `(std transducer)` — composable, source-independent transducers: `mapping`, `filtering`, `taking`, `dropping`, `flat-mapping`, `deduplicate`, `windowing`; `transduce`, `into`, `sequence`, `rf-cons`, `rf-sum`
+- `(std typed env)` — lexically-scoped type environment for static type checker, `type-env-extend`, `type-env-lookup`
+- `(std typed infer)` — bidirectional type inference: `infer-type`, `check-type`, `unify-types`, `subtype?`, `with-type-errors-collected`
+- `(std error-advice)` — error messages with fix suggestions: `advise-error`, `define-error-advice`, `with-error-advice`
+
+### Phase 4b: Type System and Safety
+- `(std typed hkt)` — higher-kinded types: `defprotocol-hkt`, `implement-hkt`, `do/m`, Option/Result/List functor instances
+- `(std typed monad)` — State/Reader/Writer monads, `run-state`, `state-get`, `state-put`, `monad-sequence`
+- `(std typed refine)` — refinement types: `make-refinement`, `NonNeg`, `Positive`, `NonNull`, `define/r`
+- `(std typed solver)` — lightweight constraint solver returning `'satisfied`/`'violated`/`'unknown`
+- `(std typed row2)` — open records with `record-extend`, `record-restrict`, `record-merge`, `Row` macro
+- `(std typed effects)` — effect typing with `Eff`/`Pure` types, `define/te`, `effect-set-union`
+- `(std taint)` — taint tracking: `taint`, `tainted?`, `define-sink`, `html-escape`, `sql-escape`
+- `(std capability sandbox)` — capability sandbox: `make-sandbox-policy`, `sandbox-run`, `sandbox-run/timeout`
+
+### Phase 4c: Systems and Performance
+- `(std arena)` — bump-pointer arena allocator: `make-arena`, `arena-alloc`, `arena-reset!`, `with-arena`, `arena-checkpoint`
+- `(std binary)` — packed binary structs: `define-binary-struct`, `binary-pack`, `binary-unpack`; field types u8/u16/u32/u64/f32/f64/bytes/cstring
+- `(std mmap-btree)` — file-backed B+ tree: `open-btree`, `btree-get`, `btree-put!`, `btree-delete!`, `btree-fold`, `btree-range`
+- `(std effect multishot)` — nondeterminism via choice-sequence backtracking: `choose`, `all-solutions`, `one-solution`, `amb`
+- `(std concur deadlock)` — runtime deadlock detection via wait-for graph: `register-waiting!`, `detect-deadlock`, `deadlock-condition?`
+- `(std concur util)` — semaphores, barriers, reader-writer locks, thread pools, futures, latches
+
+### Phase 4d: Developer Experience
+- `(std debug timetravel)` — event recorder with replay: `make-recorder`, `record-event!`, `trace-fn`, `with-recording`, `replay-to-step`
+- `(std debug flamegraph)` — manual enter/exit profiler: `profiler-enter!`, `profiler-exit!`, `profiler->flamegraph-text`, `profiler-timing-stats`
+- `(std proptest)` — property-based testing with shrinking: `gen-integer`, `gen-list`, `defproperty`, `check-property`
+- `(std staging2)` — multi-stage programming: `quote-stage`, `define-staged`, `specialize`, `partial-eval`, `constant-fold`, `inline-calls`
+- `(std match-syntax)` — AST pattern matching: `syntax-match`, `stx-*` predicates, `walk-syntax`, `fold-syntax`, `free-identifiers`, `build-*` constructors
+
+### Phase 4e: Data and Distribution
+- `(std dataframe)` — column-oriented dataframes: `make-dataframe`, `dataframe-filter`, `dataframe-group-by`, `dataframe-summarize`, `dataframe-join`, `col-sum/mean/min/max`, CSV I/O
+- `(std stream window)` — tumbling, sliding, session, and time windows: `window-add!`, `window-flush!`, `window-map`, `window-reduce`
+- `(std actor distributed)` — location-transparent `dsend`, `dsend/ask`, `cluster-register!`, `cluster-whereis`, `make-process-group`, `process-group-broadcast!`
+- `(std wasm wasi)` — WASI snapshot_preview1 host: `make-wasi-env`, `make-wasi-imports`, `wasi-fd-write`, `wasi-clock-time-get`, `wasi-proc-exit`
+- `(std actor checkpoint)` — value/mailbox serialization: `checkpoint-value`, `restore-value`, `checkpoint-serializable?`, `make-checkpoint-manager`
+
+### Phase 4f: Toolchain and Interop
+- `(std lsp)` — LSP 2.0 server: JSON-RPC/stdio with Content-Length framing, document store, `analyze-document`, `find-completions`, `find-definition`
+- `(std python)` — Python subprocess interop: embedded helper script, `start-python`, `stop-python`, `python-eval`, `python-exec`, `python-call`, `python-import`
+- `(std build watch)` — file watcher with incremental builds: `make-watcher`, `make-dep-graph`, `dep-graph-topo-sort`, `make-build-system`, `build-system-build!`
+- `(std build cross)` — cross-compilation pipeline: 5 built-in platforms, `current-platform`, `find-cross-compiler`, `run-build-matrix`
+- `(std build reproducible)` — reproducible builds: FNV-1a content hash, `make-artifact-store`, `make-manifest`, `make-build-cache`, `normalize-artifact`
+
 ## Existing Documentation
 
 | Document | Description |
@@ -148,7 +197,13 @@ scheme --libdirs lib --script -e '
 ### Run the test suite
 ```bash
 make test           # core tests
-make test-features  # all feature tests
+make test-features  # Phase 2 + Phase 3 feature tests
+make test-phase4a   # Core Runtime
+make test-phase4b   # Type System and Safety
+make test-phase4c   # Systems and Performance
+make test-phase4d   # Developer Experience
+make test-phase4e   # Data and Distribution
+make test-phase4f   # Toolchain and Interop
 make test-all       # everything
 ```
 
@@ -161,10 +216,17 @@ make test-all       # everything
 
 ### Concurrency
 - `(std effect)` — algebraic effects with one-shot continuations
+- `(std effect deep)` — deep effect handlers with automatic re-installation *(Phase 4a)*
+- `(std effect multishot)` — nondeterminism via `choose`/`all-solutions`/`amb` *(Phase 4c)*
 - `(std async)` — async/await, promises, channels
 - `(std stm)` — software transactional memory (TVars, `atomically`, `retry`)
 - `(std actor)` — full actor system (local + distributed)
+- `(std actor engine)` — engine-pool preemptive actor scheduler *(Phase 4a)*
+- `(std actor distributed)` — location-transparent `dsend`/`dsend/ask`, process groups *(Phase 4e)*
+- `(std actor checkpoint)` — actor mailbox and value serialization/restore *(Phase 4e)*
 - `(std concur)` — thread-safety annotations, deadlock detection, resource tracking
+- `(std concur deadlock)` — runtime wait-for graph deadlock detection *(Phase 4c)*
+- `(std concur util)` — semaphores, barriers, rwlocks, thread pools, latches *(Phase 4c)*
 - `(std task)` — task groups and structured concurrency
 - `(std misc channel)` — typed channels
 - `(std sched)` — M:N scheduler with OS worker threads *(Phase 2d)*
@@ -175,16 +237,33 @@ make test-all       # everything
 ### Type System
 - `(std typed)` — gradual typing with zero-overhead release mode
 - `(std typed advanced)` — occurrence typing, row polymorphism, refinement types
+- `(std typed env)` — lexically-scoped type environment *(Phase 4a)*
+- `(std typed infer)` — bidirectional type inference with unification *(Phase 4a)*
+- `(std typed hkt)` — higher-kinded types, `defprotocol-hkt`, `do/m` *(Phase 4b)*
+- `(std typed monad)` — State/Reader/Writer monads *(Phase 4b)*
+- `(std typed refine)` — refinement types (`NonNeg`, `Positive`, `NonNull`) *(Phase 4b)*
+- `(std typed solver)` — lightweight constraint solver *(Phase 4b)*
+- `(std typed row2)` — open records with `record-extend`/`record-restrict` *(Phase 4b)*
+- `(std typed effects)` — effect typing with `Eff`/`Pure` types *(Phase 4b)*
 - `(std typed gadt)` — GADTs with `define-gadt` / `gadt-match` *(Phase 2c)*
 - `(std typed typeclass)` — Haskell-style type classes *(Phase 2c)*
 - `(std typed linear)` — linear types with use-once enforcement *(Phase 2c)*
 - `(std typed effect-typing)` — effect signatures and `typed-with-handler` *(Phase 2c)*
 - `(std match2)` — pattern matching with sealed hierarchies and active patterns
+- `(std match-syntax)` — AST pattern matching with `syntax-match` and `walk-syntax` *(Phase 4d)*
 - `(std staging)` — compile-time computation and code generation
+- `(std staging2)` — multi-stage programming with `define-staged` and `specialize` *(Phase 4d)*
+- `(std taint)` — taint tracking with `define-sink`, `html-escape`, `sql-escape` *(Phase 4b)*
 
 ### Data Structures
 - `(std seq)` — lazy sequences, transducers, parallel collections
+- `(std transducer)` — composable transducers (`mapping`, `filtering`, `flat-mapping`, `windowing`) *(Phase 4a)*
 - `(std table)` — columnar in-memory data tables with SQL-like operations
+- `(std dataframe)` — column-oriented dataframes with group-by, summarize, join, CSV I/O *(Phase 4e)*
+- `(std stream window)` — tumbling, sliding, session, time windows over event streams *(Phase 4e)*
+- `(std arena)` — bump-pointer arena allocator with checkpoints *(Phase 4c)*
+- `(std binary)` — packed binary struct encode/decode (u8–u64, f32/f64, cstring) *(Phase 4c)*
+- `(std mmap-btree)` — file-backed B+ tree for persistent sorted key-value data *(Phase 4c)*
 - `(std pvec)` — persistent vectors (HAMT trie, O(log₃₂ n)) *(Phase 2a)*
 - `(std pmap)` — persistent hash maps *(Phase 2a)*
 - `(std ds sorted-map)` — persistent sorted map (red-black tree) *(Phase 2e)*
@@ -221,6 +300,8 @@ make test-all       # everything
 
 ### Security
 - `(std capability)` — object-capability model (unforgeable tokens, sandboxing)
+- `(std capability sandbox)` — capability-constrained sandbox with timeout *(Phase 4b)*
+- `(std taint)` — taint tracking to enforce parse-before-use at sinks *(Phase 4b)*
 - `(std crypto digest)` — SHA-256, MD5, SHA-512
 - `(std foreign)` — safe C FFI with memory management
 
@@ -231,6 +312,8 @@ make test-all       # everything
 
 ### Developer Tools
 - `(std dev debug)` — time-travel debugger, execution recording
+- `(std debug timetravel)` — event recorder with `trace-fn` and `replay-to-step` *(Phase 4d)*
+- `(std debug flamegraph)` — manual enter/exit profiler → flamegraph text output *(Phase 4d)*
 - `(std dev profile)` — deterministic + sampling profiler
 - `(std dev reload)` — hot code reload
 - `(std dev partial-eval)` — compile-time partial evaluation (`define-ct`, `ct`) *(Phase 2b)*
@@ -239,6 +322,8 @@ make test-all       # everything
 - `(std dev devirt)` — whole-program devirtualization *(Phase 2b)*
 - `(std test)` — test framework (`test-suite`, `check`, `run-tests!`)
 - `(std test framework)` — QuickCheck property testing and test suites *(Phase 2e)*
+- `(std proptest)` — property-based testing with `defproperty`, `check-property`, shrinking *(Phase 4d)*
+- `(std error-advice)` — error messages with context-aware fix suggestions *(Phase 4a)*
 - `(std doc generator)` — doc generator (markdown + HTML) *(Phase 2e)*
 - `(std logger)` — structured logging with level filtering
 - `(std log)` — structured logging with pluggable sinks and dynamic context *(Phase 3a)*
@@ -258,6 +343,12 @@ make test-all       # everything
 - `(jerboa wasm format)` — WebAssembly binary format primitives *(Phase 3e)*
 - `(jerboa wasm codegen)` — Scheme→WASM compiler (pure i32 subset) *(Phase 3e)*
 - `(jerboa wasm runtime)` — stack-based WASM interpreter *(Phase 3e)*
+- `(std build watch)` — file watcher with dependency graph and incremental builds *(Phase 4f)*
+- `(std build cross)` — cross-compilation pipeline for 5 platforms with build matrix runner *(Phase 4f)*
+- `(std build reproducible)` — FNV-1a content-addressed artifact store and build cache *(Phase 4f)*
+- `(std lsp)` — LSP 2.0 server (JSON-RPC/stdio, completions, go-to-definition) *(Phase 4f)*
+- `(std python)` — Python subprocess interop via JSON bridge *(Phase 4f)*
+- `(std wasm wasi)` — WASI snapshot_preview1 host implementation *(Phase 4e)*
 
 ### Utilities
 - `(std format)` — `format`, `printf`, `fprintf`

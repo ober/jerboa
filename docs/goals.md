@@ -1,11 +1,11 @@
 # Jerboa: Making Gerbil-on-Chez Superior to Other Schemes/Lisps
 
-## Current State (as of Phase 3 completion, 2026-03-11)
+## Current State (as of Phase 4 completion, 2026-03-11)
 
-- **138 stdlib + toolchain modules** across observability, networking, build tooling, language extensions, and WASM
-- Phases 1–13 + Phase 2 (28 libraries) + Phase 3 (23 libraries) all complete
-- 1,524+ tests passing
-- Full feature set: algebraic effects, GADTs, type classes, linear types, STM, persistent data structures, actors, Raft consensus, M:N scheduler, async streams, WASM compilation pipeline, structured logging, Prometheus metrics, distributed tracing, WebSocket, HTTP/2, rate limiting, package manager, hot reload, query DSL, schema validation, term rewriting, source linting
+- **173 stdlib + toolchain modules** across all phases — concurrency, type system, systems programming, developer tools, data processing, toolchain, and interop
+- Phases 1–3 + Phase 4 (35 libraries across 4a–4f) all complete
+- **2,898 tests passing**
+- Full feature set: algebraic effects (deep + multishot), GADTs, type classes, higher-kinded types, monads, refinement types, row polymorphism, linear types, taint tracking, STM, persistent data structures, arena allocators, B+ tree, actors, Raft consensus, M:N scheduler via engine pool, distributed actors, stream windowing, dataframes, transducers, async streams, WASM compilation + runtime + WASI, structured logging, Prometheus metrics, distributed tracing, WebSocket, HTTP/2, rate limiting, package manager, hot reload, query DSL, schema validation, term rewriting, source linting, time-travel debugger, flamegraph profiler, property-based testing, multi-stage programming, AST pattern matching, LSP 2.0 server, Python subprocess interop, incremental build with dep graph, cross-compilation pipeline, reproducible content-addressed builds
 
 All 8 features from the original goals doc below are implemented. See `docs/index.md` for the complete library catalog.
 
