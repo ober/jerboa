@@ -1,8 +1,8 @@
-# Jerboa Implementation Plan: Phase 4 — The Definitive Scheme
+# Jerboa Implementation Plan: Phase 5 — The World-Class Scheme
 
-## Status: Phase 4 Complete
+## Status: Phase 4 Complete, Phase 5 Planned
 
-Phases 1-4 establish Jerboa as the most capable Scheme implementation ever built, with 200+ modules and 2,700+ tests. Phase 4 pushed Jerboa beyond any existing Scheme into territory occupied by Rust, Go, Haskell, and OCaml — while retaining the macro system that none of them have.
+Phases 1-4 establish Jerboa as the most capable Scheme implementation ever built, with 200+ modules and 2,700+ tests. Phase 5 pushes Jerboa into uncharted territory by exploiting Chez Scheme's deepest capabilities — features that exist nowhere else in the Scheme ecosystem.
 
 ### Where We Stand
 
@@ -17,7 +17,1253 @@ Phases 1-4 establish Jerboa as the most capable Scheme implementation ever built
 | 4d: Dev Experience | 5 | 220 | Complete |
 | 4e: Data & Distribution | 5 | 247 | Complete |
 | 4f: Toolchain & Interop | 5 | 257 | Complete |
-| **Total** | **137** | **2,898** | **Complete** |
+| **Phase 4 Total** | **137** | **2,898** | **Complete** |
+| **Phase 5 (Planned)** | **~65** | **~1,500** | **In Progress** |
+
+---
+
+# Phase 5: Chez Scheme's Magical Powers Unleashed
+
+Phase 5 leverages Chez Scheme's unique capabilities that no other Scheme implementation has — features that Kent Dybvig spent 35+ years perfecting. These aren't just incremental improvements; they're architectural advantages that make certain classes of features possible that would be impossible or extremely difficult in other implementations.
+
+## The Chez Scheme Advantage
+
+Chez Scheme has capabilities that most developers don't even know exist:
+
+1. **Native Code Compilation with cp0** — The most sophisticated Scheme optimizer ever built, with constant folding, inlining, dead code elimination, and type-based specialization
+2. **Engines** — Preemptible computations with fuel-based scheduling (unique to Chez)
+3. **First-Class Continuations** — Both one-shot (`call/1cc`) and multi-shot (`call/cc`) with serialization via `fasl-write`
+4. **Native OS Threads** — True SMP with thread-local parameters, not green threads
+5. **Fasl Serialization** — Binary serialization of ANY Scheme value including closures and continuations
+6. **Foreign Procedure Interface** — Zero-copy FFI with automatic type marshaling
+7. **Profile-Guided Optimization** — Runtime profiling that feeds back into compilation
+8. **Inspector API** — Full runtime introspection of stack frames, closures, and records
+9. **Compile-Time Computation** — Arbitrary Scheme code at macro-expansion time
+10. **Whole-Program Optimization** — Cross-module inlining and dead code elimination
+
+---
+
+## Track 11: The Compiler as a Library — Self-Modifying Optimization
+
+### 11.1 User-Defined cp0 Optimization Passes
+
+Chez's cp0 optimizer is the crown jewel. Phase 5 exposes it as a library, letting users write custom optimization passes that run during compilation.
+
+```scheme
+(import (std compiler passes))
+
+;; Define a custom optimization pass
+(define-cp0-pass matrix-fusion
+  "Fuse consecutive matrix operations to avoid intermediate allocations"
+  #:pattern (matrix-* (matrix-* ?a ?b) ?c)
+  #:transform (matrix-*-fused ?a ?b ?c))
+
+;; Register it globally
+(register-optimization-pass! matrix-fusion #:priority 50)
+
+;; Now this code:
+(define result (matrix-* (matrix-* A B) C))
+;; Compiles to a single fused operation — no intermediate matrix
+
+;; Domain-specific optimizations
+(define-cp0-pass sql-query-fusion
+  "Combine consecutive SQL operations into single query"
+  #:pattern (sql-filter ?pred (sql-map ?fn ?table))
+  #:transform (sql-filter-map ?pred ?fn ?table))
+```
+
+**Implementation**:
+- Hook into Chez's nanopass framework (`(nanopass)` library)
+- Expose `define-cp0-pass` macro that generates nanopass transformers
+- Pattern language with `?var` for pattern variables, guards for predicates
+- Pass composition with explicit ordering via `#:priority`
+- Debug mode: dump intermediate representations between passes
+
+**Why unique**: No other language lets users write optimizations that run inside the compiler. LLVM has passes, but they operate on IR, not source semantics. This lets domain experts (numerical computing, databases, graphics) write optimizations that understand their domain.
+
+**Files**: `lib/std/compiler/passes.sls` (~600 LOC), `lib/std/compiler/pattern.sls` (~400 LOC)
+**Tests**: 30 tests
+
+### 11.2 Compile-Time Partial Evaluation
+
+Go beyond macros to automatic partial evaluation — the compiler evaluates what it can at compile time.
+
+```scheme
+(import (std compiler partial-eval))
+
+;; Mark a function for aggressive partial evaluation
+(define/pe (power base n)
+  (if (= n 0)
+      1
+      (* base (power base (- n 1)))))
+
+;; At compile time, if n is known:
+(define cube (lambda (x) (power x 3)))
+;; Expands to: (define cube (lambda (x) (* x (* x (* x 1)))))
+;; Then cp0 folds: (define cube (lambda (x) (* x x x)))
+
+;; Specialize entire functions
+(define-specialized power-5 (power _ 5))
+;; Generates: (define power-5 (lambda (base) (* base base base base base)))
+
+;; Automatic specialization based on call patterns
+(define/auto-specialize matrix-multiply
+  (lambda (A B)
+    ...)) ;; Compiler generates specialized versions for common matrix sizes
+```
+
+**Implementation**:
+- Binding-time analysis: classify expressions as static (compile-time) or dynamic (runtime)
+- Unfold calls with static arguments, residualize calls with dynamic arguments
+- Memoization table to avoid re-specializing identical configurations
+- Integration with `compile-time-value` for forcing compile-time evaluation
+- Specialization cache in `.jerboa/specializations/`
+
+**Files**: `lib/std/compiler/partial-eval.sls` (~800 LOC)
+**Tests**: 35 tests
+
+### 11.3 Profile-Guided Optimization Integration
+
+Use runtime profiling data to guide compilation decisions.
+
+```scheme
+(import (std compiler pgo))
+
+;; Collect profile data during test runs
+;; $ jerboa run --profile-collect myapp.ss
+;; Generates: .jerboa/profile/myapp.prof
+
+;; Rebuild with profile data
+;; $ jerboa build --profile-use myapp.ss -o myapp
+
+;; Or programmatically:
+(define-pgo-module (myapp main)
+  (import ...)
+  
+  ;; This hot function will be inlined aggressively
+  (define (process-event event)
+    (case (event-type event)
+      [(click) (handle-click event)]      ;; 73% of calls
+      [(scroll) (handle-scroll event)]    ;; 25% of calls
+      [(keypress) (handle-key event)]))   ;; 2% of calls
+  
+  ;; PGO reorders branches by frequency, inlines hot paths
+  )
+
+;; Query profile data programmatically
+(profile-hot-functions "myapp.prof" #:top 20)
+;; => ((process-event 45000000) (handle-click 32850000) ...)
+```
+
+**Implementation**:
+- Instrumentation pass: insert counters at basic block boundaries
+- Profile file format: binary, maps code locations to execution counts
+- Branch reordering: put most likely branch first for better prediction
+- Inline decisions: lower threshold for frequently-called functions
+- Dead code: functions never called in profile are candidates for removal
+
+**Files**: `lib/std/compiler/pgo.sls` (~500 LOC), `lib/std/compiler/instrument.sls` (~400 LOC)
+**Tests**: 25 tests
+
+---
+
+## Track 12: First-Class Continuations as a Superpower
+
+### 12.1 Delimited Continuations with Efficient Implementation
+
+Chez's continuation implementation is the fastest in any Scheme. Expose it with a cleaner API.
+
+```scheme
+(import (std control delimited))
+
+;; Shift/reset — the classic delimited control operators
+(reset
+  (+ 1 (shift k (k (k 5)))))
+;; => 7 (k applied twice: 1 + (1 + 5))
+
+;; Control/prompt — abortive variant
+(prompt
+  (+ 1 (control k 5)))
+;; => 5 (continuation k discarded)
+
+;; Named prompts for nested handlers
+(prompt 'outer
+  (prompt 'inner
+    (+ 1 (shift-at 'outer k (k 10)))))
+;; => 11 (jumps past inner prompt to outer)
+
+;; Efficient implementation: no stack copying for one-shot use
+(define (generator->stream gen)
+  (let ([resume #f])
+    (reset
+      (gen (lambda (value)
+             (shift k
+               (set! resume k)
+               value)))
+      'done)))
+```
+
+**Implementation**:
+- `reset`/`shift` via Chez's `call/cc` with prompt markers
+- One-shot optimization: use `call/1cc` when continuation used linearly
+- Named prompts via hash table mapping tags to prompt continuations
+- `control`/`prompt` as abortive variant (doesn't capture continuation)
+- Integration with effect system from Phase 4
+
+**Files**: `lib/std/control/delimited.sls` (~400 LOC)
+**Tests**: 30 tests
+
+### 12.2 Coroutine Library with Symmetric Coroutines
+
+True symmetric coroutines where any coroutine can transfer to any other.
+
+```scheme
+(import (std control coroutine))
+
+;; Create coroutines
+(define co1
+  (make-coroutine
+    (lambda (yield)
+      (displayln "co1: start")
+      (yield 'to-co2 1)
+      (displayln "co1: back with 2")
+      (yield 'to-co2 3)
+      'done)))
+
+(define co2
+  (make-coroutine
+    (lambda (yield)
+      (displayln "co2: received 1")
+      (yield 'to-co1 2)
+      (displayln "co2: received 3")
+      'finished)))
+
+;; Symmetric transfer
+(coroutine-transfer co1)
+;; Prints: co1: start, co2: received 1, co1: back with 2, co2: received 3
+
+;; Use for cooperative multitasking
+(define scheduler (make-round-robin-scheduler))
+(scheduler-add! scheduler co1)
+(scheduler-add! scheduler co2)
+(scheduler-run! scheduler)
+```
+
+**Implementation**:
+- Coroutine = one-shot continuation + state (ready, running, suspended, dead)
+- `yield` captures current continuation, stores it, transfers to target
+- Scheduler maintains run queue of ready coroutines
+- Deadlock detection: all coroutines waiting, none ready
+
+**Files**: `lib/std/control/coroutine.sls` (~350 LOC)
+**Tests**: 25 tests
+
+### 12.3 Continuation Marks for Dynamic Scoping
+
+Continuation marks attach key-value pairs to stack frames, enabling stack inspection without explicit passing.
+
+```scheme
+(import (std control marks))
+
+;; Attach a mark to the current continuation
+(with-continuation-mark 'user-id 42
+  (with-continuation-mark 'request-id "abc123"
+    (handle-request)))
+
+;; Inside handle-request, query marks:
+(define (log-event event)
+  (let ([user-id (current-continuation-marks 'user-id)]
+        [request-id (current-continuation-marks 'request-id)])
+    (format "~a: user=~a request=~a event=~a"
+            (current-time) user-id request-id event)))
+
+;; Get all marks for a key (stack trace of values)
+(continuation-marks->list 'user-id)
+;; => (42) — only one mark in this example
+
+;; Use for:
+;; - Logging context without threading through every function
+;; - Security context (current user, permissions)
+;; - Transaction context (current DB connection)
+;; - Error context (source location breadcrumbs)
+```
+
+**Implementation**:
+- Marks stored in a thread-local stack of (key . value) pairs
+- `with-continuation-mark` pushes on entry, pops on exit (via `dynamic-wind`)
+- `current-continuation-marks` walks the mark stack
+- Efficient: marks are hash-consed for fast comparison
+
+**Files**: `lib/std/control/marks.sls` (~300 LOC)
+**Tests**: 20 tests
+
+---
+
+## Track 13: Fasl — The Universal Serializer
+
+### 13.1 Persistent Closures and Hot Code Reload
+
+Chez can serialize closures to disk and reload them. This enables features impossible in most languages.
+
+```scheme
+(import (std persist closure))
+
+;; Serialize a closure to disk
+(define my-handler
+  (let ([config (load-config)])
+    (lambda (request)
+      (process request config))))
+
+(closure-save my-handler "handler.fasl")
+
+;; Later, in a different process:
+(define restored-handler (closure-load "handler.fasl"))
+(restored-handler some-request) ;; Works! Config is embedded
+
+;; Hot code reload without losing state
+(define (make-stateful-service initial-state)
+  (let ([state initial-state])
+    (lambda (msg)
+      (case (car msg)
+        [(get) state]
+        [(set) (set! state (cadr msg))]
+        [(upgrade code)
+         ;; Replace this closure's code while keeping state!
+         (let ([new-handler (eval code)])
+           (set! state (new-handler 'migrate state)))]))))
+
+;; Checkpoint long-running computations
+(define (checkpoint-computation comp-state)
+  (fasl-write comp-state "checkpoint.fasl"))
+
+(define (resume-computation)
+  (let ([state (fasl-read "checkpoint.fasl")])
+    (continue-from state)))
+```
+
+**Implementation**:
+- Wrap `fasl-write`/`fasl-read` with closure-aware preprocessing
+- Strip non-serializable values (ports, FFI pointers) with replacement markers
+- Versioning: include schema version in serialized data
+- Hot reload: combine with `eval` to replace code while preserving heap
+
+**Files**: `lib/std/persist/closure.sls` (~400 LOC)
+**Tests**: 25 tests
+
+### 13.2 Distributed Object Protocol
+
+Share objects between processes using fasl serialization.
+
+```scheme
+(import (std persist distributed))
+
+;; Create a distributed hash table
+(define dht (make-distributed-hashtable
+  #:nodes '("node1:9000" "node2:9000" "node3:9000")
+  #:replication 2))
+
+;; Store any Scheme value — including closures!
+(dht-put! dht 'my-handler
+  (lambda (x) (* x x)))
+
+;; On another node:
+(define handler (dht-get dht 'my-handler))
+(handler 5) ;; => 25
+
+;; Distributed actors with mobile code
+(define (spawn-remote node code)
+  (let ([serialized (fasl-write code)])
+    (remote-eval node
+      `(let ([thunk (fasl-read ',serialized)])
+         (spawn-actor thunk)))))
+```
+
+**Implementation**:
+- Consistent hashing for key distribution
+- Fasl-based value serialization over TCP
+- Replication with read-your-writes consistency
+- Failure detection via heartbeat
+- Mobile code: serialize lambdas, eval on remote
+
+**Files**: `lib/std/persist/distributed.sls` (~600 LOC)
+**Tests**: 30 tests
+
+### 13.3 Image-Based Development (Like Smalltalk)
+
+Save the entire program state to disk and resume later.
+
+```scheme
+(import (std persist image))
+
+;; Develop interactively in the REPL
+> (define counter 0)
+> (define (inc!) (set! counter (+ counter 1)))
+> (inc!) (inc!) (inc!)
+> counter
+3
+
+;; Save the entire image
+> (save-image "myapp.image")
+
+;; Later, in a fresh process:
+$ jerboa --image myapp.image
+> counter
+3  ;; State preserved!
+
+;; Create deployable images
+(define (main args)
+  (start-server 8080))
+
+(save-executable-image "server" main)
+;; Produces a single-file executable with all code and data baked in
+```
+
+**Implementation**:
+- Walk all reachable objects from roots (globals, threads, parameters)
+- Fasl-serialize the entire heap to a single file
+- On load: restore heap, reconnect ports, restart threads
+- Executable image: embed boot file + heap dump in single binary
+
+**Files**: `lib/std/persist/image.sls` (~500 LOC)
+**Tests**: 20 tests
+
+---
+
+## Track 14: The Inspector — Runtime Introspection
+
+### 14.1 Stack Frame Inspection and Modification
+
+Chez's inspector can examine and modify live stack frames.
+
+```scheme
+(import (std debug inspector))
+
+;; In an error handler, inspect the call stack
+(with-exception-handler
+  (lambda (exn)
+    (let ([frames (current-stack-frames)])
+      (for-each
+        (lambda (frame i)
+          (format #t "~a: ~a~%" i (frame-procedure-name frame))
+          (for-each
+            (lambda (var)
+              (format #t "    ~a = ~s~%" (car var) (cdr var)))
+            (frame-local-variables frame)))
+        frames
+        (iota (length frames)))))
+  dangerous-computation)
+
+;; Programmatic debugging: set values and continue
+(define (debug-repl frame)
+  (let loop ()
+    (display "debug> ")
+    (let ([cmd (read)])
+      (case (car cmd)
+        [(inspect) (pp (frame-local-ref frame (cadr cmd)))]
+        [(set!) (frame-local-set! frame (cadr cmd) (caddr cmd))]
+        [(continue) (frame-continue frame)]
+        [(up) (debug-repl (frame-parent frame))]
+        [(down) (debug-repl (frame-child frame))]
+        [else (loop)]))))
+```
+
+**Implementation**:
+- Use Chez's `inspect` API to access stack frames
+- `continuation->frames` decomposes a continuation into frame objects
+- Frame introspection: procedure, locals, source location
+- Frame modification: write back changed values before resuming
+- Integration with condition system for automatic debugging on error
+
+**Files**: `lib/std/debug/inspector.sls` (~500 LOC)
+**Tests**: 25 tests
+
+### 14.2 Closure Inspection and Mutation
+
+Examine and modify the captured environment of closures.
+
+```scheme
+(import (std debug closure-inspect))
+
+(define (make-counter start)
+  (let ([n start])
+    (lambda () (set! n (+ n 1)) n)))
+
+(define counter (make-counter 10))
+
+;; Inspect the closure's free variables
+(closure-free-variables counter)
+;; => ((n . 10))
+
+;; Modify a captured variable
+(closure-set-free-variable! counter 'n 100)
+(counter) ;; => 101
+
+;; Clone a closure with modified environment
+(define counter2 (closure-with counter '((n . 500))))
+(counter2) ;; => 501
+(counter)  ;; => 102 (original unchanged)
+
+;; Use for: debugging, hot-patching, dependency injection
+```
+
+**Implementation**:
+- `closure-code` and `closure-env` extract components
+- `closure-free-variables` walks the environment, associates names via debug info
+- `closure-set-free-variable!` mutates the environment vector
+- `closure-with` creates new closure with same code, different env
+
+**Files**: `lib/std/debug/closure-inspect.sls` (~300 LOC)
+**Tests**: 20 tests
+
+### 14.3 Record/Struct Introspection
+
+Full reflection on record types at runtime.
+
+```scheme
+(import (std debug record-inspect))
+
+(defstruct point (x y z))
+
+(define p (make-point 1 2 3))
+
+;; Introspect the record type
+(record-type-name (record-rtd p))  ;; => point
+(record-type-field-names (record-rtd p))  ;; => (x y z)
+(record-type-parent (record-rtd p))  ;; => #f
+
+;; Generic field access by name
+(record-ref p 'x)  ;; => 1
+(record-set! p 'y 20)
+
+;; Iterate over all fields
+(record->alist p)  ;; => ((x . 1) (y . 20) (z . 3))
+
+;; Create records dynamically
+(define rtd (make-record-type-descriptor 'dynamic-point #f #f #f #f
+              '#((mutable x) (mutable y))))
+(define maker (record-constructor (make-record-constructor-descriptor rtd #f #f)))
+(define dyn-point (maker 10 20))
+```
+
+**Implementation**:
+- Expose Chez's `record-rtd`, `record-type-name`, `record-type-field-names`
+- Build field-name → index mapping for named access
+- `record->alist` / `alist->record` for serialization-friendly formats
+- Dynamic record creation via `make-record-type-descriptor`
+
+**Files**: `lib/std/debug/record-inspect.sls` (~350 LOC)
+**Tests**: 25 tests
+
+---
+
+## Track 15: Zero-Cost Abstractions via cp0
+
+### 15.1 Compile-Time Regex
+
+Regex patterns compiled to native code, not interpreted at runtime.
+
+```scheme
+(import (std text regex-compile))
+
+;; This regex is compiled to a state machine at compile time
+(define-regex email-pattern
+  #rx"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}")
+
+;; At runtime, email-pattern is a native procedure — no regex engine involved
+(email-pattern "test@example.com")  ;; => #t
+(email-pattern "invalid")           ;; => #f
+
+;; Extract matches
+(define-regex url-pattern
+  #rx"(https?)://([^/]+)(/.*)?")
+
+(url-pattern-match "https://example.com/path")
+;; => #("https://example.com/path" "https" "example.com" "/path")
+
+;; Compile-time regex operations
+(define-regex combined
+  (regex-or email-pattern url-pattern))  ;; Combined at compile time
+```
+
+**Implementation**:
+- Parse regex at macro-expansion time
+- Generate DFA state machine as Scheme code
+- cp0 optimizes the generated state machine (dead states, redundant checks)
+- Result: regex matching as fast as hand-written character loops
+- No runtime regex library linked in
+
+**Files**: `lib/std/text/regex-compile.sls` (~700 LOC)
+**Tests**: 35 tests
+
+### 15.2 Compile-Time JSON Schema Validation
+
+Generate validators from JSON schemas at compile time.
+
+```scheme
+(import (std text json-schema))
+
+(define-json-schema user-schema
+  '{"type": "object"
+    "properties": {
+      "name": {"type": "string" "minLength": 1}
+      "age": {"type": "integer" "minimum": 0}
+      "email": {"type": "string" "format": "email"}}
+    "required": ["name" "email"]})
+
+;; At compile time, this generates:
+;; (define (validate-user obj)
+;;   (and (hashtable? obj)
+;;        (let ([name (hashtable-ref obj "name" #f)])
+;;          (and name (string? name) (>= (string-length name) 1)))
+;;        (let ([age (hashtable-ref obj "age" #f)])
+;;          (or (not age) (and (fixnum? age) (>= age 0))))
+;;        (let ([email (hashtable-ref obj "email" #f)])
+;;          (and email (string? email) (email-format? email)))))
+
+;; Zero runtime overhead — just field checks
+(validate-user (json-parse input))
+```
+
+**Implementation**:
+- Parse JSON schema at macro-expansion time
+- Generate Scheme validation code from schema structure
+- Inline format validators (email, uri, date-time)
+- Error messages include JSON path to invalid field
+
+**Files**: `lib/std/text/json-schema.sls` (~500 LOC)
+**Tests**: 30 tests
+
+### 15.3 Compile-Time Query Planning
+
+SQL queries analyzed and optimized at compile time.
+
+```scheme
+(import (std db query-compile))
+
+;; Query is analyzed at compile time
+(define-query get-user-orders
+  (select (u.name o.total o.date)
+    (from (users u) (orders o))
+    (where (and (= u.id o.user_id)
+                (= u.id ?user-id)
+                (> o.total ?min-total)))
+    (order-by o.date desc)
+    (limit 10)))
+
+;; At compile time:
+;; - Validates column names against schema (if available)
+;; - Generates optimal join order
+;; - Creates prepared statement with parameter slots
+;; - Generates result row destructuring code
+
+;; At runtime: just parameter binding and execution
+(get-user-orders db #:user-id 42 #:min-total 100.0)
+;; => ((name: "Alice" total: 250.0 date: ...) ...)
+```
+
+**Implementation**:
+- Query AST built at macro-expansion time
+- Schema information loaded from `.jerboa/db-schema.json`
+- Join ordering heuristics (small tables first)
+- Prepared statement caching
+- Row destructuring code generated per-query
+
+**Files**: `lib/std/db/query-compile.sls` (~600 LOC)
+**Tests**: 25 tests
+
+---
+
+## Track 16: Advanced Effect Handlers
+
+### 16.1 Effect Fusion and Optimization
+
+Combine multiple effect handlers into a single optimized handler.
+
+```scheme
+(import (std effect fusion))
+
+;; Separate handlers
+(defeffect Log (log message))
+(defeffect State (get) (put value))
+(defeffect Async (await promise))
+
+;; Naively, three handlers = three layers of continuation capture
+;; Effect fusion combines them:
+
+(with-fused-handlers
+  ([Log (log (k msg) (displayln msg) (resume k (void)))]
+   [State (get (k) (resume k state))
+          (put (k v) (set! state v) (resume k (void)))]
+   [Async (await (k p) (promise-then p (lambda (v) (resume k v))))])
+  (begin
+    (perform (Log log "Starting"))
+    (let ([x (perform (State get))])
+      (perform (State put (+ x 1)))
+      (perform (Async await (fetch-data))))))
+
+;; Fused handler: single continuation capture covers all effects
+;; ~3x faster than nested handlers
+```
+
+**Implementation**:
+- Analyze effect handler composition at compile time
+- Generate unified dispatch table for all effects
+- Single continuation capture point for the fused handler
+- Escape analysis: effects that don't escape can be inlined completely
+
+**Files**: `lib/std/effect/fusion.sls` (~450 LOC)
+**Tests**: 25 tests
+
+### 16.2 Scoped Effects with Regions
+
+Effects that are statically scoped, ensuring resources are properly released.
+
+```scheme
+(import (std effect scoped))
+
+(defeffect-scoped File
+  (open path mode)
+  (read handle n)
+  (write handle data)
+  (close handle))
+
+;; The 'close' effect is automatically called at scope exit
+(with-scoped-effect File
+  ([open (path mode) (let ([h (posix-open path mode)])
+                       (values h (lambda () (posix-close h))))]
+   [read (h n) (posix-read h n)]
+   [write (h data) (posix-write h data)])
+  (let ([h (perform (File open "/tmp/test" 'write))])
+    (perform (File write h "Hello"))
+    ;; At scope exit, close is called automatically
+    ;; Even if an exception is raised!
+    ))
+```
+
+**Implementation**:
+- Track opened resources in a scope-local list
+- `dynamic-wind` ensures cleanup on any exit (normal, exception, continuation)
+- Linear type checking (optional): resources used exactly once
+- Integration with capability system for resource access control
+
+**Files**: `lib/std/effect/scoped.sls` (~400 LOC)
+**Tests**: 25 tests
+
+### 16.3 Algebraic Effect Inference
+
+Automatically infer which effects a function may perform.
+
+```scheme
+(import (std effect infer))
+
+;; No annotations needed — effects inferred from usage
+(define (process-with-logging data)
+  (perform (Log log "Processing"))
+  (let ([result (transform data)])
+    (perform (Log log "Done"))
+    result))
+
+;; Compiler infers: process-with-logging : (-> any (Eff (Log) any))
+
+;; Effect polymorphism
+(define (map-eff f xs)
+  (if (null? xs)
+      '()
+      (cons (f (car xs)) (map-eff f (cdr xs)))))
+
+;; Inferred: map-eff : (forall (e) (-> (-> a (Eff e b)) (list a) (Eff e (list b))))
+
+;; Effect inference errors
+(define (bad-function)
+  (perform (State get)))  ;; Unhandled effect!
+
+;; WARNING: unhandled effect (State) in bad-function at line 10
+```
+
+**Implementation**:
+- Effect type variables for polymorphism
+- Unification-based inference algorithm
+- Warning (not error) for unhandled effects — gradual adoption
+- Effect annotations optional: `(define/e (f x) : (Eff (Log State) number) ...)`
+
+**Files**: `lib/std/effect/infer.sls` (~600 LOC)
+**Tests**: 30 tests
+
+---
+
+## Track 17: Advanced Concurrency Patterns
+
+### 17.1 Software Transactional Memory with Nested Transactions
+
+Full STM with support for nested transactions and retry.
+
+```scheme
+(import (std concur stm))
+
+(define balance-a (make-tvar 1000))
+(define balance-b (make-tvar 500))
+
+;; Atomic transfer
+(define (transfer! from to amount)
+  (atomically
+    (let ([from-bal (tvar-get from)]
+          [to-bal (tvar-get to)])
+      (when (< from-bal amount)
+        (retry))  ;; Block until condition might change
+      (tvar-set! from (- from-bal amount))
+      (tvar-set! to (+ to-bal amount)))))
+
+;; Nested transactions
+(define (batch-transfers! transfers)
+  (atomically
+    (for-each
+      (lambda (t)
+        (atomically  ;; Nested — commits with outer
+          (transfer! (car t) (cadr t) (caddr t))))
+      transfers)))
+
+;; Or-else: try first transaction, if it retries, try second
+(atomically
+  (or-else
+    (transfer! account-a account-b 100)
+    (transfer! account-c account-b 100)))
+```
+
+**Implementation**:
+- TVars: versioned mutable cells with read/write sets
+- Optimistic concurrency: read without locking, validate at commit
+- Conflict detection: version mismatch triggers rollback and retry
+- `retry`: block until any read TVar changes
+- `or-else`: composable transaction alternatives
+- Nested transactions: inner commits are provisional until outer commits
+
+**Files**: `lib/std/concur/stm.sls` (~600 LOC)
+**Tests**: 35 tests
+
+### 17.2 Lock-Free Data Structures
+
+Concurrent data structures using compare-and-swap.
+
+```scheme
+(import (std concur lockfree))
+
+;; Lock-free queue (Michael-Scott)
+(define q (make-lockfree-queue))
+(lockfree-enqueue! q 'item)
+(lockfree-dequeue! q)  ;; => 'item
+
+;; Lock-free stack (Treiber)
+(define s (make-lockfree-stack))
+(lockfree-push! s 'a)
+(lockfree-push! s 'b)
+(lockfree-pop! s)  ;; => 'b
+
+;; Lock-free hash table (split-ordered list)
+(define h (make-lockfree-hashtable))
+(lockfree-put! h 'key 'value)
+(lockfree-get h 'key)  ;; => 'value
+
+;; Hazard pointers for safe memory reclamation
+(with-hazard-pointer hp
+  (let ([node (lockfree-dequeue! q)])
+    (hp-protect! hp node)
+    (process node)))
+;; Node won't be reclaimed while protected
+```
+
+**Implementation**:
+- FFI to `__atomic_compare_exchange` for CAS operations
+- Michael-Scott queue: two-pointer with CAS
+- Treiber stack: single-pointer with CAS
+- Split-ordered list hashtable: O(1) amortized operations
+- Hazard pointers: safe deferred reclamation
+- ABA problem prevention via tagged pointers or hazard pointers
+
+**Files**: `lib/std/concur/lockfree.sls` (~800 LOC), `support/atomic.c` (~100 LOC)
+**Tests**: 40 tests
+
+### 17.3 Async/Await with Structured Concurrency
+
+Async/await syntax backed by structured concurrency guarantees.
+
+```scheme
+(import (std concur async-await))
+
+;; Async function returns a promise
+(define-async (fetch-user id)
+  (let ([response (await (http-get (format "/users/~a" id)))])
+    (json-parse (response-body response))))
+
+;; Awaiting in async context
+(define-async (get-user-with-orders id)
+  (let ([user (await (fetch-user id))]
+        [orders (await (fetch-orders id))])
+    (user-with-orders user orders)))
+
+;; Parallel await
+(define-async (get-dashboard user-id)
+  (let-values ([(user orders notifications)
+                (await-all (fetch-user user-id)
+                           (fetch-orders user-id)
+                           (fetch-notifications user-id))])
+    (make-dashboard user orders notifications)))
+
+;; Cancellation propagates
+(define cts (make-cancellation-token-source))
+(define dashboard-promise (get-dashboard 42 #:cancellation (cts-token cts)))
+(cts-cancel! cts)  ;; Cancels fetch-user, fetch-orders, fetch-notifications
+```
+
+**Implementation**:
+- `define-async` transforms to CPS with promise return
+- `await` captures continuation, resumes when promise resolves
+- `await-all`: spawn parallel tasks, collect results
+- Cancellation tokens: cooperative cancellation via check points
+- Structured concurrency: child tasks cancelled when parent completes
+
+**Files**: `lib/std/concur/async-await.sls` (~500 LOC)
+**Tests**: 30 tests
+
+---
+
+## Track 18: Systems Integration
+
+### 18.1 eBPF Program Generation
+
+Write eBPF programs in Scheme, compile to eBPF bytecode.
+
+```scheme
+(import (std os ebpf))
+
+;; Define an eBPF program that traces system calls
+(define-ebpf syscall-tracer
+  (tracepoint sys_enter_open
+    (let ([filename (bpf-probe-read-str (pt-regs-arg1 ctx) 256)])
+      (bpf-trace-printk "open: %s" filename))))
+
+;; Load and attach
+(define prog (ebpf-load syscall-tracer))
+(ebpf-attach prog 'tracepoint "syscalls" "sys_enter_open")
+
+;; Read trace output
+(with-input-from-file "/sys/kernel/debug/tracing/trace_pipe"
+  (lambda ()
+    (let loop ()
+      (displayln (read-line))
+      (loop))))
+```
+
+**Implementation**:
+- eBPF bytecode generation from Scheme AST
+- Restricted subset of Scheme (no recursion, limited loops)
+- BPF helpers: `bpf-map-lookup`, `bpf-probe-read`, `bpf-trace-printk`
+- Map types: hash, array, perf event, ring buffer
+- Verifier integration: check program before loading
+
+**Files**: `lib/std/os/ebpf.sls` (~800 LOC), `lib/std/os/ebpf-codegen.sls` (~600 LOC)
+**Tests**: 25 tests
+
+### 18.2 Seccomp Sandboxing
+
+Generate seccomp-bpf filters from high-level policy.
+
+```scheme
+(import (std os seccomp))
+
+;; Define a security policy
+(define-seccomp-policy web-server-policy
+  (allow read write close fstat mmap munmap)
+  (allow-if (= (syscall) SYS_open)
+            (or (path-prefix "/var/www/")
+                (path-prefix "/etc/ssl/")))
+  (allow socket bind listen accept
+         #:when (= (sock-domain) AF_INET))
+  (deny-all #:action 'kill))
+
+;; Apply to current process
+(seccomp-apply! web-server-policy)
+
+;; Now any disallowed syscall kills the process
+```
+
+**Implementation**:
+- Parse policy to BPF filter program
+- Syscall argument inspection via BPF
+- Path prefix checking for file operations
+- Socket family/type restrictions
+- Action modes: kill, trap, errno, log
+
+**Files**: `lib/std/os/seccomp.sls` (~500 LOC)
+**Tests**: 20 tests
+
+### 18.3 Namespaces and Containers
+
+Create isolated execution environments.
+
+```scheme
+(import (std os namespace))
+
+;; Create a new namespace
+(define ns (make-namespace
+  #:unshare '(mount pid net user)
+  #:uid-map '((0 1000 1))    ;; Map root to uid 1000
+  #:gid-map '((0 1000 1))))
+
+;; Run code in the namespace
+(in-namespace ns
+  (lambda ()
+    ;; We're now in an isolated environment
+    ;; PID 1, separate mount tree, separate network
+    (mount "none" "/" "none" '(MS_REC MS_PRIVATE))
+    (mount "/path/to/rootfs" "/newroot" "none" '(MS_BIND))
+    (pivot-root "/newroot" "/newroot/old")
+    (exec "/bin/sh")))
+
+;; Container-like isolation
+(define (run-container image cmd)
+  (let ([ns (make-namespace #:unshare '(mount pid net user ipc uts))])
+    (in-namespace ns
+      (lambda ()
+        (setup-rootfs image)
+        (setup-cgroups)
+        (drop-capabilities)
+        (exec cmd)))))
+```
+
+**Implementation**:
+- FFI to `clone`, `unshare`, `setns`
+- UID/GID mapping via `/proc/self/uid_map`
+- Mount namespace manipulation
+- `pivot_root` for filesystem isolation
+- Cgroup integration for resource limits
+
+**Files**: `lib/std/os/namespace.sls` (~600 LOC)
+**Tests**: 20 tests
+
+---
+
+## Track 19: Developer Tools
+
+### 19.1 Structural Code Editor Support
+
+Expose AST structure for paredit-like editing.
+
+```scheme
+(import (std dev structural))
+
+;; Parse code to navigable AST
+(define ast (parse-to-ast "(define (f x) (+ x 1))"))
+
+;; Structural navigation
+(ast-node-type ast)  ;; => 'define
+(ast-children ast)   ;; => (#<ast (f x)> #<ast (+ x 1)>)
+(ast-parent (car (ast-children ast)))  ;; => ast
+
+;; Structural editing operations
+(ast-wrap ast 'let '([y 2]))
+;; => (let ([y 2]) (define (f x) (+ x 1)))
+
+(ast-splice (cadr (ast-children ast)))
+;; => (define (f x) x 1)  ;; unwrapped the +
+
+;; Generate edit commands for editors
+(structural-edit->lsp-edits
+  (ast-wrap ast 'when '#t)
+  "file.ss")
+;; => LSP TextEdit objects
+```
+
+**Implementation**:
+- Full Scheme reader with position tracking
+- AST nodes with parent links for navigation
+- Structural operations: wrap, splice, raise, slurp, barf
+- LSP integration: generate TextEdit commands
+- Preserve comments and formatting where possible
+
+**Files**: `lib/std/dev/structural.sls` (~500 LOC)
+**Tests**: 30 tests
+
+### 19.2 Live Documentation Generator
+
+Generate documentation from code with live examples.
+
+```scheme
+(import (std dev docgen))
+
+;;; @doc
+;;; Reverses a list.
+;;; 
+;;; @example
+;;; (reverse '(1 2 3)) => (3 2 1)
+;;; (reverse '()) => ()
+;;; 
+;;; @complexity O(n)
+;;; @see append, list-reverse
+(define (reverse lst)
+  (fold-left (lambda (acc x) (cons x acc)) '() lst))
+
+;; Generate documentation
+(generate-docs "lib/" "docs/api/"
+  #:format 'markdown
+  #:run-examples #t      ;; Actually run examples and verify output
+  #:include-source #t    ;; Include source code in docs
+  #:cross-reference #t)  ;; Link @see references
+
+;; Produces:
+;; docs/api/
+;;   index.md
+;;   std/
+;;     list.md    (with reverse documented, examples tested)
+```
+
+**Implementation**:
+- Parse `@doc` comments with Markdown support
+- Extract `@example` blocks and run them
+- Verify example output matches specification
+- Cross-reference generation from `@see` tags
+- Multiple output formats: Markdown, HTML, man pages
+
+**Files**: `lib/std/dev/docgen.sls` (~600 LOC)
+**Tests**: 25 tests
+
+### 19.3 Benchmark Framework with Statistical Analysis
+
+Rigorous benchmarking with statistical significance testing.
+
+```scheme
+(import (std dev benchmark))
+
+(define-benchmark-suite sorting-benchmarks
+  
+  (define-benchmark quicksort-random
+    #:setup (lambda () (random-list 10000))
+    #:run (lambda (lst) (quicksort lst))
+    #:teardown (lambda (result) (assert (sorted? result))))
+  
+  (define-benchmark mergesort-random
+    #:setup (lambda () (random-list 10000))
+    #:run (lambda (lst) (mergesort lst)))
+  
+  #:warmup 100        ;; Warmup iterations
+  #:iterations 1000   ;; Measured iterations
+  #:gc-between #t)    ;; Force GC between iterations
+
+;; Run and analyze
+(define results (run-benchmark-suite sorting-benchmarks))
+
+(benchmark-report results)
+;; quicksort-random: 1.23ms ± 0.15ms (95% CI)
+;; mergesort-random: 1.45ms ± 0.12ms (95% CI)
+;; Difference: quicksort 15% faster (p < 0.001)
+
+;; Compare against baseline
+(benchmark-compare results "baseline.json")
+;; quicksort-random: 5% regression (was 1.17ms)
+;;                   SIGNIFICANT (p = 0.003)
+```
+
+**Implementation**:
+- Warmup phase to stabilize JIT/caches
+- Statistical analysis: mean, median, std dev, confidence intervals
+- Significance testing: t-test for comparing benchmarks
+- GC tracking: separate GC time from computation time
+- Baseline comparison with regression detection
+- JSON output for CI integration
+
+**Files**: `lib/std/dev/benchmark.sls` (~500 LOC)
+**Tests**: 25 tests
+
+---
+
+## Phase 5 Implementation Summary
+
+### Phase 5a: Compiler as Library (Highest Impact)
+
+| # | Item | Track | Est. LOC | Priority |
+|---|------|-------|----------|----------|
+| 1 | User-defined cp0 passes | 11.1 | 1,000 | Critical |
+| 2 | Compile-time partial evaluation | 11.2 | 800 | High |
+| 3 | Compile-time regex | 15.1 | 700 | High |
+| 4 | Delimited continuations | 12.1 | 400 | High |
+| 5 | PGO integration | 11.3 | 900 | Medium |
+| **Subtotal** | | | **~3,800** | |
+
+### Phase 5b: Persistence and Distribution
+
+| # | Item | Track | Est. LOC | Priority |
+|---|------|-------|----------|----------|
+| 6 | Persistent closures | 13.1 | 400 | High |
+| 7 | Distributed object protocol | 13.2 | 600 | High |
+| 8 | Image-based development | 13.3 | 500 | Medium |
+| 9 | Continuation marks | 12.3 | 300 | Medium |
+| 10 | Coroutines | 12.2 | 350 | Medium |
+| **Subtotal** | | | **~2,150** | |
+
+### Phase 5c: Inspector and Debugging
+
+| # | Item | Track | Est. LOC | Priority |
+|---|------|-------|----------|----------|
+| 11 | Stack frame inspection | 14.1 | 500 | High |
+| 12 | Closure inspection | 14.2 | 300 | Medium |
+| 13 | Record introspection | 14.3 | 350 | Medium |
+| 14 | Structural editor support | 19.1 | 500 | Medium |
+| 15 | Live documentation | 19.2 | 600 | Medium |
+| **Subtotal** | | | **~2,250** | |
+
+### Phase 5d: Advanced Effects and Concurrency
+
+| # | Item | Track | Est. LOC | Priority |
+|---|------|-------|----------|----------|
+| 16 | Effect fusion | 16.1 | 450 | High |
+| 17 | Scoped effects | 16.2 | 400 | High |
+| 18 | Effect inference | 16.3 | 600 | Medium |
+| 19 | STM with nesting | 17.1 | 600 | High |
+| 20 | Lock-free structures | 17.2 | 900 | Medium |
+| 21 | Async/await | 17.3 | 500 | High |
+| **Subtotal** | | | **~3,450** | |
+
+### Phase 5e: Systems and Zero-Cost
+
+| # | Item | Track | Est. LOC | Priority |
+|---|------|-------|----------|----------|
+| 22 | JSON schema compile | 15.2 | 500 | Medium |
+| 23 | Query compile | 15.3 | 600 | Medium |
+| 24 | eBPF generation | 18.1 | 1,400 | Low |
+| 25 | Seccomp policies | 18.2 | 500 | Low |
+| 26 | Namespaces | 18.3 | 600 | Low |
+| 27 | Benchmark framework | 19.3 | 500 | High |
+| **Subtotal** | | | **~4,100** | |
+
+---
+
+## Phase 5 Total
+
+| Phase | LOC | New Modules | New Tests |
+|-------|-----|-------------|-----------|
+| 5a: Compiler | 3,800 | ~8 | ~155 |
+| 5b: Persistence | 2,150 | ~5 | ~105 |
+| 5c: Inspector | 2,250 | ~5 | ~125 |
+| 5d: Effects/Concurrency | 3,450 | ~6 | ~165 |
+| 5e: Systems/Tools | 4,100 | ~7 | ~115 |
+| **Total Phase 5** | **~15,750** | **~31** | **~665** |
+
+Combined with Phase 4's ~73,000 lines across ~190 modules with ~2,550 tests, Phase 5 brings Jerboa to **~89,000 lines** across **~220 modules** with **~3,200 tests**.
+
+---
+
+## The World-Class Thesis
+
+Phase 5 exploits what makes Chez Scheme unique in the programming language landscape:
+
+1. **The compiler is a library** — Users can write optimization passes that run during compilation, something impossible in most languages
+2. **First-class continuations are fast** — Enables control flow abstractions (effects, coroutines, backtracking) that would be slow or impossible elsewhere  
+3. **Everything is serializable** — Closures, continuations, even entire program states can be saved and restored
+4. **The inspector is exposed** — Full runtime introspection for debugging, profiling, and metaprogramming
+5. **Compile-time computation is unlimited** — Any Scheme code can run at compile time, enabling zero-cost abstractions
+
+No other language has all of these. Combined with Phase 4's type system, effect handlers, and systems programming features, Jerboa becomes not just the best Scheme — but a serious contender against Rust, Haskell, and OCaml for systems programming, against Erlang for distributed computing, and against Clojure for data processing.
+
+**The unfair advantage**: Jerboa users can extend the compiler, serialize their programs, inspect running code, and compute at compile time — using the same language they write their applications in. No FFI to C, no separate metalanguage, no build system plugins. Just Scheme, all the way down.
 
 ---
 
