@@ -2370,6 +2370,68 @@ Every build artifact is identified by the hash of its inputs. Same inputs → sa
 **Files**: `lib/jerboa/build/reproducible.sls` (~350 LOC)
 **Tests**: 15 tests
 
+### 10.4 Static Binary Delivery with musl libc
+
+Build fully static executables with zero runtime dependencies using musl libc. These binaries run on any Linux system regardless of glibc version — ideal for deployment to containers, embedded systems, and legacy servers.
+
+```scheme
+;; Build a fully static binary with musl
+;; $ jerboa build --static --musl myapp.ss -o myapp-static
+;; Linking with musl-gcc...
+;; Built: myapp-static (4.2 MB, statically linked)
+
+;; Verify it has no dynamic dependencies
+;; $ ldd myapp-static
+;; => not a dynamic executable
+
+;; Programmatic API
+(import (jerboa build))
+
+(build-binary "src/server.sls" "dist/server"
+  'static: #t
+  'musl: #t)
+
+;; Cross-compile static ARM64 binary
+(build-binary "src/server.sls" "dist/server-arm64"
+  'static: #t
+  'musl: #t
+  'target: target-linux-aarch64)
+```
+
+**Implementation**:
+- Detect musl toolchain: `musl-gcc` (wrapper) or `x86_64-linux-musl-gcc` (cross)
+- Compile Chez Scheme runtime with musl: requires rebuilding `libkernel.a` against musl headers
+- Link flags: `-static -nostdlib` + musl's `crt1.o`, `crti.o`, `crtn.o`, `libc.a`
+- Handle musl-specific differences:
+  - No `dlopen` in static builds — all FFI must be linked at build time
+  - Thread-local storage via `__thread` instead of `pthread_key_create`
+  - Signal handling works identically (POSIX compliant)
+- Alpine Linux compatibility: musl is the native libc, so binaries work unmodified
+- Size optimization: musl binaries are typically 20-30% smaller than glibc static builds
+
+**Toolchain Setup**:
+```bash
+# Debian/Ubuntu: install musl toolchain
+apt install musl-tools
+
+# Or build musl-cross-make for cross-compilation
+git clone https://github.com/richfelker/musl-cross-make
+cd musl-cross-make
+make TARGET=aarch64-linux-musl install
+
+# Set path for cross builds
+export PATH=$HOME/musl-cross/bin:$PATH
+```
+
+**Limitations**:
+- No runtime `dlopen` (dynamic library loading) — all native extensions must be statically linked
+- Name resolution: musl's `getaddrinfo` doesn't read `/etc/nsswitch.conf` (uses `/etc/resolv.conf` directly)
+- Locale: musl has minimal locale support (C/POSIX only by default)
+- Thread stack size: musl defaults to 80KB (vs glibc's 8MB) — may need `pthread_attr_setstacksize`
+
+**Files**: `lib/jerboa/build/musl.sls` (~300 LOC), `support/musl-chez-build.sh` (~150 LOC)
+**Tests**: 12 tests
+
 ---
 
 ## Implementation Order
@@ -2442,7 +2504,8 @@ Every build artifact is identified by the hash of its inputs. Same inputs → sa
 | 32           | File watching + incremental build | 10.1  | 400        | High     |
 | 33           | Cross-compilation pipeline        | 10.2  | 400        | Medium   |
 | 34           | Reproducible builds               | 10.3  | 350        | Medium   |
-| **Subtotal** |                                   |       | **~3,350** |          |
+| 35           | Static musl builds                | 10.4  | 450        | High     |
+| **Subtotal** |                                   |       | **~3,800** |          |
 
 ---
 
@@ -2455,8 +2518,8 @@ Every build artifact is identified by the hash of its inputs. Same inputs → sa
 | 4c: Systems              | 2,800       | ~8          | ~150       |
 | 4d: Developer Experience | 4,000       | ~10         | ~200       |
 | 4e: Data & Distribution  | 2,650       | ~7          | ~150       |
-| 4f: Toolchain & Interop  | 3,350       | ~8          | ~150       |
-| **Total Phase 4**        | **~21,200** | **~51**     | **~1,030** |
+| 4f: Toolchain & Interop  | 3,800       | ~9          | ~162       |
+| **Total Phase 4**        | **~21,650** | **~52**     | **~1,042** |
 
 Combined with existing ~52,000 lines across 138+ modules, Jerboa would be ~73,000 lines across ~190 modules with ~2,550 tests. Still dramatically more compact than Racket (~700K), Guile (~300K), or Gerbil+Gambit (~80K).
 
