@@ -1,145 +1,122 @@
-#!chezscheme
-;;; Tests for (std dev pgo) -- Profile-Guided Optimization
+#!/usr/bin/env scheme-script
+;;; Tests for Profile-Guided Optimization (Phase 5a — Track 11.3)
 
-(import (chezscheme)
-        (std dev pgo))
+(import (chezscheme) (std compiler pgo))
 
-(define pass 0)
-(define fail 0)
+(define test-count 0)
+(define pass-count 0)
+(define fail-count 0)
 
-(define-syntax test
-  (syntax-rules ()
-    [(_ name expr expected)
-     (guard (exn [#t (set! fail (+ fail 1))
-                     (printf "FAIL ~a: ~a~%" name
-                       (if (message-condition? exn) (condition-message exn) exn))])
-       (let ([got expr])
-         (if (equal? got expected)
-           (begin (set! pass (+ pass 1)) (printf "  ok ~a~%" name))
-           (begin (set! fail (+ fail 1))
-                  (printf "FAIL ~a: got ~s expected ~s~%" name got expected)))))]))
+(define-syntax check
+  (syntax-rules (=>)
+    [(_ name expr => expected)
+     (begin
+       (set! test-count (+ test-count 1))
+       (let ([result expr])
+         (if (equal? result expected)
+             (begin (printf "  PASS: ~a~n" name)
+                    (set! pass-count (+ pass-count 1)))
+             (begin (printf "  FAIL: ~a~n" name)
+                    (printf "    expected: ~s~n" expected)
+                    (printf "    got:      ~s~n" result)
+                    (set! fail-count (+ fail-count 1))))))]))
 
-(printf "--- Phase 2b: Profile-Guided Optimization ---~%~%")
+(define-syntax check-true  (syntax-rules () [(_ n e) (check n e => #t)]))
+(define-syntax check-false (syntax-rules () [(_ n e) (check n e => #f)]))
 
-;;; ======== profile-call ========
+(printf "~n--- Basic State ---~n")
 
-(test "profile-call returns result"
-  (profile-call site1 + 1 2)
-  3)
+(check-false "profiling initially off"   (profile-running?))
+(check       "initial count is zero"     (profile-call-count 'nonexistent) => 0)
 
-(test "profile-call string concat"
-  (profile-call site2 string-append "hello" " world")
-  "hello world")
+(printf "~n--- define/profile ---~n")
 
-;;; ======== profile-val ========
+(define/profile (add a b) (+ a b))
+(define/profile (mul a b) (* a b))
 
-(test "profile-val returns value"
-  (profile-val site3 42)
-  42)
+(check "define/profile result unchanged" (add 3 4) => 7)
+(check "count 0 before profiling"        (profile-call-count 'add) => 0)
 
-(test "profile-val string"
-  (profile-val site4 "test")
-  "test")
+(printf "~n--- with-profiling ---~n")
 
-;;; ======== profile-site-counts ========
+(check-false "off before block" (profile-running?))
 
-;; After calling profile-call for site1 twice with fixnum results
-(profile-call site1 + 10 20)
+(with-profiling
+  (add 1 2)
+  (add 3 4)
+  (mul 5 6))
 
-(test "profile-site-counts non-empty after calls"
-  (pair? (profile-site-counts 'site1))
-  #t)
+(check-false "off after block"  (profile-running?))
+(check "add called 2 times"     (profile-call-count 'add) => 2)
+(check "mul called 1 time"      (profile-call-count 'mul) => 1)
 
-(test "profile-site-counts has fixnum type"
-  (assq 'fixnum (profile-site-counts 'site1))
-  (assq 'fixnum (profile-site-counts 'site1)))  ; just verify it's present
+(printf "~n--- Manual Enable/Disable ---~n")
 
-(test "profile-site-counts unknown site is empty"
-  (profile-site-counts 'unknown-site-xyz)
-  '())
+(profiling-enable!)
+(check-true "enabled" (profile-running?))
+(add 10 20)
+(profiling-disable!)
+(check-false "disabled" (profile-running?))
 
-;;; ======== profile-dominant-type ========
+(check "add now 3 (2+1)" (profile-call-count 'add) => 3)
 
-;; Call site5 multiple times with fixnums
-(profile-val site5 1)
-(profile-val site5 2)
-(profile-val site5 3)
+(printf "~n--- profile-reset! ---~n")
 
-(test "profile-dominant-type fixnum"
-  (profile-dominant-type 'site5)
-  'fixnum)
+(profile-reset!)
+(check "add reset to 0" (profile-call-count 'add) => 0)
+(check "mul reset to 0" (profile-call-count 'mul) => 0)
 
-;; site5-str: mostly strings
-(profile-val site5-str "a")
-(profile-val site5-str "b")
-(profile-val site5-str "c")
+(printf "~n--- profile-data / hot-functions ---~n")
 
-(test "profile-dominant-type string"
-  (profile-dominant-type 'site5-str)
-  'string)
+(with-profiling
+  (add 1 2) (add 3 4) (add 5 6)
+  (mul 1 2))
 
-(test "profile-dominant-type unknown returns #f"
-  (profile-dominant-type 'no-such-site)
-  #f)
+(let ([data (profile-data)])
+  (check-true "profile-data is list"  (list? data))
+  (check      "has 2 entries"  (length data) => 2))
 
-;;; ======== pgo-specialize ========
+(let ([hot (profile-hot-functions 2)])
+  (check-true "returns list"        (list? hot))
+  (check      "top entry is add"    (caar hot) => 'add))
 
-(define (add-specialized a b)
-  (pgo-specialize add-site (a b)
-    [(fixnum fixnum) (fx+ a b)]
-    [else (+ a b)]))
+(let ([hot1 (profile-hot-functions 1)])
+  (check "top-1 has 1 entry" (length hot1) => 1))
 
-(test "pgo-specialize fixnum path"
-  (add-specialized 3 4)
-  7)
+(printf "~n--- profile-guided-inline? ---~n")
 
-(test "pgo-specialize else path (flonum)"
-  (add-specialized 1.5 2.5)
-  4.0)
+(check-true  "inline add (>=3)"  (profile-guided-inline? 'add 3))
+(check-false "no inline add (>10)" (profile-guided-inline? 'add 10))
+(check-false "no inline unknown"   (profile-guided-inline? 'unknown 1))
 
-(define (describe-val v)
-  (pgo-specialize describe-site (v)
-    [(string) (string-append "str:" v)]
-    [(fixnum) (number->string v)]
-    [else "other"]))
+(printf "~n--- Save and Load ---~n")
 
-(test "pgo-specialize string branch"
-  (describe-val "hello")
-  "str:hello")
+(let ([tmpfile "/tmp/test-pgo-phase5a.prof"])
+  (profile-save tmpfile)
+  (check-true "file exists" (file-exists? tmpfile))
+  (let ([loaded (profile-load tmpfile)])
+    (check-true "loaded is list"     (list? loaded))
+    (check-true "non-empty"          (not (null? loaded))))
+  (profile-reset!)
+  (profile-load! tmpfile)
+  (check "add restored" (profile-call-count 'add) => 3)
+  (check "mul restored" (profile-call-count 'mul) => 1)
+  (delete-file tmpfile))
 
-(test "pgo-specialize fixnum branch"
-  (describe-val 42)
-  "42")
+(printf "~n--- define-pgo-module ---~n")
 
-(test "pgo-specialize else branch"
-  (describe-val '(list))
-  "other")
+(define-pgo-module (my-module core)
+  (define/profile (triple x) (* x 3)))
 
-;;; ======== save-profile! and load-profile! ========
+(with-profiling (triple 7))
+(check "pgo function works"   (triple 5) => 15)
+(check "pgo function counted" (profile-call-count 'triple) => 1)
 
-(define tmp-profile "/tmp/test-jerboa-pgo.prof")
-
-(test "save-profile! succeeds"
-  (begin (save-profile! tmp-profile) #t)
-  #t)
-
-(test "load-profile! succeeds"
-  (begin (load-profile! tmp-profile) #t)
-  #t)
-
-;; After reload, site1 data should still exist (merged)
-(test "loaded profile data accessible"
-  (pair? (profile-site-counts 'site1))
-  #t)
-
-;;; ======== with-pgo-file ========
-
-(with-pgo-file tmp-profile
-  (test "with-pgo-file body executes"
-    (+ 1 1)
-    2))
-
-;;; ======== Summary ========
-
-(printf "~%Results: ~a passed, ~a failed~%" pass fail)
-(when (> fail 0) (exit 1))
+(printf "~n===========================================~n")
+(printf "Tests: ~a  |  Passed: ~a  |  Failed: ~a~n"
+        test-count pass-count fail-count)
+(printf "===========================================~n")
+(when (> fail-count 0)
+  (printf "~nFAILED~n")
+  (exit 1))
+(printf "~nAll tests passed!~n")

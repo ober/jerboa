@@ -7,7 +7,7 @@ CHEZ_EXT_LIBDIRS = $(CHEZ_EXT_DIR)/chez-https/src:$(CHEZ_EXT_DIR)/chez-ssl/src:$
 # Shared object paths for FFI-based chez-* libraries
 CHEZ_EXT_LDPATH = $(CHEZ_EXT_DIR)/chez-ssl:$(CHEZ_EXT_DIR)/chez-zlib:$(CHEZ_EXT_DIR)/chez-pcre2:$(CHEZ_EXT_DIR)/chez-leveldb:$(CHEZ_EXT_DIR)/chez-epoll:$(CHEZ_EXT_DIR)/chez-inotify:$(CHEZ_EXT_DIR)/chez-crypto:$(CHEZ_EXT_DIR)/chez-sqlite:$(CHEZ_EXT_DIR)/chez-postgresql
 
-.PHONY: test test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded test-features test-wrappers test-phase4a test-phase4b test-phase4c test-phase4d test-phase4e test-phase4f test-phase5 clean
+.PHONY: test test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded test-features test-wrappers test-phase4a test-phase4b test-phase4c test-phase4d test-phase4e test-phase4f test-phase5 test-phase5e clean
 
 test: test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded
 
@@ -184,10 +184,40 @@ test-phase4f:
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-cross-compile.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-reproducible.ss
 
-test-phase5:
-	@echo "--- Phase 5: Compiler as Library tests ---"
+test-phase5: test-phase5a test-phase5b test-phase5c test-phase5d test-phase5e
+
+test-phase5a:
+	@echo "--- Phase 5a: Compiler as Library ---"
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-cp0-passes.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-compiler-partial-eval.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-regex-compile.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-delimited.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-pgo.ss
+
+test-phase5b:
+	@echo "--- Phase 5b: Persistence and Distribution ---"
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-persist-closure.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-persist-image.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-continuation-marks.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-coroutine.ss
+
+test-phase5c:
+	@echo "--- Phase 5c: Inspector and Debugging ---"
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-inspector.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-closure-inspect.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-record-inspect.ss
+
+test-phase5d:
+	@echo "--- Phase 5d: Advanced Effects and Concurrency ---"
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-effect-fusion.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-stm-nested.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-async-await.ss
+
+test-phase5e:
+	@echo "--- Phase 5e: Systems and Zero-Cost ---"
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-benchmark.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-json-schema.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-query-compile.ss
 
 test-all: test test-features test-wrappers
 

@@ -4,7 +4,7 @@ Jerboa is a systems programming language built on Chez Scheme, providing Gerbil 
 compatibility with additional features: algebraic effects, gradual typing, native binary
 compilation, and a full actor/distributed system.
 
-**Current state**: 173 modules, ~35,000 lines, 2,898 tests (Phases 1–3 + Phase 4 complete).
+**Current state**: ~204 modules, ~37,500 lines, ~3,196 tests (Phases 1–4 + Phase 5a–5e complete).
 
 ## New Feature Documentation (Phases 1–13)
 
@@ -149,6 +149,36 @@ compilation, and a full actor/distributed system.
 - `(std build cross)` — cross-compilation pipeline: 5 built-in platforms, `current-platform`, `find-cross-compiler`, `run-build-matrix`
 - `(std build reproducible)` — reproducible builds: FNV-1a content hash, `make-artifact-store`, `make-manifest`, `make-build-cache`, `normalize-artifact`
 
+## Phase 5 Libraries (2026-03-12)
+
+### Phase 5a: Compiler as Library
+- `(std compiler cp0-passes)` — user-defined cp0 optimization passes with priority, debugging, composition
+- `(std compiler partial-eval)` — compile-time partial evaluation with binding-time analysis
+- `(std text regex-compile)` — compile-time NFA→DFA regex compilation with `compile-regex`, `define-regex`, `regex-match`
+- `(std control delimited)` — delimited continuations: `shift`/`reset`, `control`/`prompt`, named prompts, `abort`
+- `(std compiler pgo)` — profile-guided optimization: `define/profile`, `with-profiling`, `profile-hot-functions`, save/load
+
+### Phase 5b: Persistence and Distribution
+- `(std persist closure)` — fasl-based closure serialization: `fasl-serialize`, `fasl-deserialize`, `closure-save`, `closure-load`
+- `(std persist image)` — image-based development: `image-set!`, `image-ref`, `save-image`, `load-image`
+- `(std control marks)` — continuation marks: `with-continuation-mark`, `current-continuation-marks`, `marks->list`
+- `(std control coroutine)` — symmetric coroutines: `make-coroutine`, `coroutine-transfer`, `yield`, `coroutine-scheduler`
+
+### Phase 5c: Inspector and Debugging
+- `(std debug inspector)` — stack frame inspection: `with-tracked-call`, `current-stack-frames`, `stack-trace`, `with-stack-inspector`
+- `(std debug closure-inspect)` — closure introspection: `make-tracked-closure`, `closure-free-variables`, `closure-with`, `closure-min-arity`
+- `(std debug record-inspect)` — record introspection: `record-ref`, `record-set!`, `record->alist`, `record-copy`
+
+### Phase 5d: Advanced Effects and Concurrency
+- `(std effect fusion)` — effect handler fusion: `with-fused-handlers`, `fuse-handlers`, `handler-fusion-stats`
+- `(std concur stm)` — STM with nested transactions: `make-tvar`, `atomically`, `retry`, `or-else`
+- `(std concur async-await)` — promise-based async/await: `async`, `await`, `await-all`, `await-any`, `define-async`, cancellation tokens
+
+### Phase 5e: Systems and Zero-Cost
+- `(std dev benchmark)` — statistical benchmarking: `define-benchmark`, `run-benchmark`, `benchmark-report`, `benchmark-compare`
+- `(std text json-schema)` — JSON schema validation: `define-json-schema`, `validate-json`, `schema-valid?`, constraint types
+- `(std db query-compile)` — SQL query builder: `from`, `where`, `select`, `compile-query`, `define-query`
+
 ## Existing Documentation
 
 | Document | Description |
@@ -205,6 +235,12 @@ make test-phase4d   # Developer Experience
 make test-phase4e   # Data and Distribution
 make test-phase4f   # Toolchain and Interop
 make test-all       # everything
+make test-phase5    # all Phase 5 sub-phases
+make test-phase5a   # Compiler as Library
+make test-phase5b   # Persistence and Distribution
+make test-phase5c   # Inspector and Debugging
+make test-phase5d   # Advanced Effects and Concurrency
+make test-phase5e   # Systems and Zero-Cost
 ```
 
 ## Standard Library Overview
@@ -227,6 +263,12 @@ make test-all       # everything
 - `(std concur)` — thread-safety annotations, deadlock detection, resource tracking
 - `(std concur deadlock)` — runtime wait-for graph deadlock detection *(Phase 4c)*
 - `(std concur util)` — semaphores, barriers, rwlocks, thread pools, latches *(Phase 4c)*
+- `(std concur stm)` — STM with nested transactions and `or-else` *(Phase 5d)*
+- `(std concur async-await)` — promise-based async/await with cancellation *(Phase 5d)*
+- `(std control delimited)` — shift/reset/control/prompt delimited continuations *(Phase 5a)*
+- `(std control marks)` — continuation marks with dynamic extent *(Phase 5b)*
+- `(std control coroutine)` — symmetric coroutines with cooperative scheduling *(Phase 5b)*
+- `(std effect fusion)` — handler fusion for reduced continuation overhead *(Phase 5d)*
 - `(std task)` — task groups and structured concurrency
 - `(std misc channel)` — typed channels
 - `(std sched)` — M:N scheduler with OS worker threads *(Phase 2d)*
@@ -291,6 +333,8 @@ make test-all       # everything
 
 ### Data Formats
 - `(std text json)` — JSON read/write
+- `(std text json-schema)` — JSON schema validation with `define-json-schema` *(Phase 5e)*
+- `(std text regex-compile)` — compile-time regex to DFA with `define-regex` *(Phase 5a)*
 - `(std text csv)` — CSV parsing/writing
 - `(std text xml)` — SXML → XML
 - `(std text yaml)` — YAML load/dump
@@ -306,11 +350,17 @@ make test-all       # everything
 - `(std foreign)` — safe C FFI with memory management
 
 ### Databases
+- `(std db query-compile)` — SQL query builder with compile-time validation *(Phase 5e)*
 - `(std db sqlite)` — SQLite
 - `(std db postgresql)` — PostgreSQL
 - `(std db leveldb)` — LevelDB key-value store
 
 ### Developer Tools
+- `(std debug inspector)` — pseudo stack frame inspection and `with-stack-inspector` *(Phase 5c)*
+- `(std debug closure-inspect)` — closure introspection and free variable mutation *(Phase 5c)*
+- `(std debug record-inspect)` — record field access by index or name, `record->alist` *(Phase 5c)*
+- `(std dev benchmark)` — statistical benchmarking with mean/stddev/CI *(Phase 5e)*
+- `(std compiler pgo)` — profile-guided optimization, `define/profile`, hot function detection *(Phase 5a)*
 - `(std dev debug)` — time-travel debugger, execution recording
 - `(std debug timetravel)` — event recorder with `trace-fn` and `replay-to-step` *(Phase 4d)*
 - `(std debug flamegraph)` — manual enter/exit profiler → flamegraph text output *(Phase 4d)*
