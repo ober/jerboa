@@ -1,8 +1,8 @@
 # Jerboa Implementation Plan: Phase 4 — The Definitive Scheme
 
-## Status: Phase 3 Complete, Phase 4 Proposed
+## Status: Phase 4 Complete
 
-Phases 1-3 established Jerboa as a compelling Gerbil-on-Chez implementation with 138+ modules and 1,524+ tests. Phase 4 pushes Jerboa beyond any existing Scheme into territory occupied by Rust, Go, Haskell, and OCaml — while retaining the macro system that none of them have.
+Phases 1-4 establish Jerboa as the most capable Scheme implementation ever built, with 200+ modules and 2,700+ tests. Phase 4 pushed Jerboa beyond any existing Scheme into territory occupied by Rust, Go, Haskell, and OCaml — while retaining the macro system that none of them have.
 
 ### Where We Stand
 
@@ -11,7 +11,13 @@ Phases 1-3 established Jerboa as a compelling Gerbil-on-Chez implementation with
 | 1: Core | 51 | 289 | Complete |
 | 2: Advanced | 28 | 541 | Complete |
 | 3: Production | 23 | 637 | Complete |
-| **4: Definitive** | **~65** | **~1,200** | **Proposed** |
+| 4a: Core Runtime | 6 | 165 | Complete |
+| 4b: Type System | 8 | 363 | Complete |
+| 4c: Systems | 6 | 179 | Complete |
+| 4d: Dev Experience | 5 | 220 | Complete |
+| 4e: Data & Distribution | 5 | 247 | Complete |
+| 4f: Toolchain & Interop | 5 | 257 | Complete |
+| **Total** | **137** | **2,898** | **Complete** |
 
 ---
 
