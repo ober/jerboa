@@ -148,7 +148,7 @@
            [len (bytevector-length data)])
       (call-with-string-output-port
         (lambda (port)
-          (format port "static const unsigned char ~a[] = {~%" var-name)
+           (format port "static unsigned char ~a[] = {~%" var-name)
           (do ([i 0 (+ i 1)])
               ((= i len))
             (format port "0x~2,'0x" (bytevector-u8-ref data i))
@@ -157,7 +157,7 @@
             (when (= (mod (+ i 1) 16) 0)
               (newline port)))
           (format port "~%};~%")
-          (format port "static const unsigned int ~a_len = ~a;~%" var-name len)))))
+                     (format port "static unsigned int ~a_len = ~a;~%" var-name len)))))
 
   ;; ========== Step 41: C Main Template ==========
 

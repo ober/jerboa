@@ -1,8 +1,22 @@
 #!chezscheme
 ;;; (jerboa build musl) — Static Binary Delivery with musl libc
 ;;;
-;;; Provides musl-specific build functionality for creating fully static
-;;; executables with zero runtime dependencies.
+;;; Builds fully static executables using:
+;;; - musl-gcc for C compilation
+;;; - A musl-built Chez Scheme (configured with --static CC=musl-gcc)
+;;; - Chez's native static boot embedding (main.o + static_boot_init)
+;;;
+;;; The musl-built Chez installation provides:
+;;;   main.o       — Chez's own main() with arg parsing, REPL, --script, etc.
+;;;   libkernel.a  — The Chez runtime (compiled with musl)
+;;;   libz.a       — zlib (compiled with musl)
+;;;   liblz4.a     — lz4 (compiled with musl)
+;;;   scheme.h     — C header for Chez API
+;;;   *.boot       — Boot files to embed
+;;;
+;;; We generate a static_boot.c that provides static_boot_init(), which
+;;; main.o calls to register embedded boot files. The application's compiled
+;;; .so is bundled into an app boot file via make-boot-file.
 
 (library (jerboa build musl)
   (export
@@ -21,6 +35,7 @@
     
     ;; Paths
     musl-libkernel-path
+    musl-chez-lib-dir
     musl-boot-files
     musl-crt-objects
     
@@ -36,11 +51,13 @@
 
   ;; ========== Configuration ==========
   
-  ;; Path to musl-built Chez Scheme installation
-  ;; Default: /opt/chez-musl (can be overridden)
+  ;; Path to musl-built Chez Scheme installation.
+  ;; Probed in order: $JERBOA_MUSL_CHEZ_PREFIX, ~/chez-musl, /opt/chez-musl
   (define *musl-chez-prefix* 
     (make-parameter 
       (or (getenv "JERBOA_MUSL_CHEZ_PREFIX")
+          (let ([home-prefix (format "~a/chez-musl" (getenv "HOME"))])
+            (if (file-directory? home-prefix) home-prefix #f))
           "/opt/chez-musl")))
   
   (define (musl-chez-prefix) (*musl-chez-prefix*))
@@ -62,16 +79,8 @@
           (close-port from-stderr)
           (if (eof-object? line)
             #f
-            (let ([trimmed (musl-string-trim-right line)])
+            (let ([trimmed (%musl-string-trim-right line)])
               (if (string=? trimmed "") #f trimmed)))))))
-  
-  (define (musl-string-trim-right s)
-    (let loop ([i (- (string-length s) 1)])
-      (if (< i 0)
-        ""
-        (if (char-whitespace? (string-ref s i))
-          (loop (- i 1))
-          (substring s 0 (+ i 1))))))
   
   (define (musl-gcc-path)
     "Return path to musl-gcc wrapper, or #f if not found"
@@ -84,13 +93,12 @@
   
   (define (musl-sysroot)
     "Return the musl sysroot directory"
-    ;; Query musl-gcc for its sysroot
     (let ([gcc (musl-gcc-path)])
       (if gcc
         (let ([result (with-output-to-string
                         (lambda ()
                           (system (format "~a -print-sysroot 2>/dev/null" gcc))))])
-          (let ([trimmed (musl-string-trim-right result)])
+          (let ([trimmed (%musl-string-trim-right result)])
             (if (string=? trimmed "")
               ;; Fallback: standard musl location
               "/usr/lib/x86_64-linux-musl"
@@ -103,38 +111,83 @@
     "Return the Chez Scheme machine type (e.g., ta6le)"
     (symbol->string (machine-type)))
   
-  (define (musl-libkernel-path)
-    "Return path to musl-built libkernel.a"
+  (define (musl-chez-lib-dir)
+    "Find the csv<version>/<machine> directory under the musl Chez prefix.
+     Scans lib/ for csv* directories since (scheme-version) returns a
+     human-readable string unsuitable for path construction."
     (let* ([prefix (musl-chez-prefix)]
            [machine (chez-machine-type)]
-           ;; Try common patterns
-           [paths (list
-                    (format "~a/lib/csv~a/~a/libkernel.a" 
-                            prefix (scheme-version) machine)
-                    (format "~a/lib/~a/libkernel.a" prefix machine)
-                    (format "~a/libkernel.a" prefix))])
-      (let loop ([ps paths])
-        (if (null? ps)
-          (error 'musl-libkernel-path 
-                 "Cannot find musl libkernel.a" 
-                 (musl-chez-prefix))
-          (if (file-exists? (car ps))
-            (car ps)
-            (loop (cdr ps)))))))
+           [lib-dir (format "~a/lib" prefix)])
+      (if (not (file-directory? lib-dir))
+        (error 'musl-chez-lib-dir
+               "Chez musl lib directory not found" lib-dir)
+        ;; Scan for csv* directories, pick the newest (last sorted)
+        (let* ([entries (directory-list lib-dir)]
+               [csv-dirs (filter
+                           (lambda (e)
+                             (and (> (string-length e) 3)
+                                  (string=? (substring e 0 3) "csv")))
+                           entries)]
+               ;; Sort so the highest version comes last
+               [sorted (sort string<? csv-dirs)])
+          (if (null? sorted)
+            (error 'musl-chez-lib-dir
+                   "No csv* directory found in" lib-dir)
+            ;; Try each csv dir (newest first) for one containing machine/
+            (let loop ([dirs (reverse sorted)])
+              (if (null? dirs)
+                (error 'musl-chez-lib-dir
+                       "No csv*/<machine> directory found"
+                       (cons lib-dir machine))
+                (let ([candidate (format "~a/~a/~a" lib-dir (car dirs) machine)])
+                  (if (file-directory? candidate)
+                    candidate
+                    (loop (cdr dirs)))))))))))
+  
+  (define (musl-libkernel-path)
+    "Return path to musl-built libkernel.a"
+    (let ([path (format "~a/libkernel.a" (musl-chez-lib-dir))])
+      (if (file-exists? path)
+        path
+        (error 'musl-libkernel-path 
+               "Cannot find musl libkernel.a" path))))
   
   (define (musl-boot-files)
     "Return list of (name . path) for musl-built boot files"
-    (let* ([prefix (musl-chez-prefix)]
-           [machine (chez-machine-type)]
-           [boot-dir (format "~a/lib/csv~a/~a" 
-                            prefix (scheme-version) machine)])
-      (if (file-directory? boot-dir)
+    (let ([dir (musl-chez-lib-dir)])
+      (let ([petite (format "~a/petite.boot" dir)]
+            [scheme (format "~a/scheme.boot" dir)])
+        (unless (file-exists? petite)
+          (error 'musl-boot-files "petite.boot not found" petite))
+        (unless (file-exists? scheme)
+          (error 'musl-boot-files "scheme.boot not found" scheme))
         (list
-          (cons "petite" (format "~a/petite.boot" boot-dir))
-          (cons "scheme" (format "~a/scheme.boot" boot-dir)))
-        (error 'musl-boot-files
-               "Cannot find musl boot directory"
-               boot-dir))))
+          (cons "petite" petite)
+          (cons "scheme" scheme)))))
+  
+  (define (musl-scheme-h-path)
+    "Return path to scheme.h from musl Chez installation"
+    (let ([path (format "~a/scheme.h" (musl-chez-lib-dir))])
+      (if (file-exists? path)
+        path
+        (error 'musl-scheme-h-path "scheme.h not found" path))))
+  
+  (define (musl-main-o-path)
+    "Return path to main.o from musl Chez installation"
+    (let ([path (format "~a/main.o" (musl-chez-lib-dir))])
+      (if (file-exists? path)
+        path
+        (error 'musl-main-o-path "main.o not found" path))))
+  
+  (define (musl-libz-path)
+    "Return path to libz.a (zlib) from musl Chez installation, or #f"
+    (let ([path (format "~a/libz.a" (musl-chez-lib-dir))])
+      (if (file-exists? path) path #f)))
+  
+  (define (musl-liblz4-path)
+    "Return path to liblz4.a from musl Chez installation, or #f"
+    (let ([path (format "~a/liblz4.a" (musl-chez-lib-dir))])
+      (if (file-exists? path) path #f)))
   
   (define (musl-crt-objects)
     "Return paths to musl CRT objects needed for static linking"
@@ -153,31 +206,48 @@
       [(not (musl-available?))
        (cons 'error "musl-gcc not found. Install musl-tools package.")]
       
-      [(not (file-exists? (musl-chez-prefix)))
+      [(not (file-directory? (musl-chez-prefix)))
        (cons 'error 
              (format "musl Chez prefix not found: ~a\n\
-                     Build Chez with musl or set JERBOA_MUSL_CHEZ_PREFIX"
+                     Build Chez with: ./configure --threads --static CC=musl-gcc\n\
+                     Then: make install"
                      (musl-chez-prefix)))]
       
-      [(guard (e [#t #f]) (musl-libkernel-path) #t)
+      [(guard (e [#t #f]) (musl-chez-lib-dir) #t)
        => (lambda (_)
-            (let ([crt (musl-crt-objects)])
-              (let loop ([objs crt])
-                (if (null? objs)
-                  (cons 'ok "musl toolchain validated")
-                  (if (file-exists? (car objs))
-                    (loop (cdr objs))
-                    (cons 'error 
-                          (format "CRT object not found: ~a" 
-                                  (car objs))))))))]
+            (cond
+              [(not (guard (e [#t #f]) (musl-libkernel-path) #t))
+               (cons 'error "musl libkernel.a not found")]
+              [(not (guard (e [#t #f]) (musl-main-o-path) #t))
+               (cons 'error "musl main.o not found (Chez not built with --static?)")]
+              [(not (guard (e [#t #f]) (musl-scheme-h-path) #t))
+               (cons 'error "scheme.h not found in musl Chez installation")]
+              [else
+               (let ([crt (musl-crt-objects)])
+                 (let loop ([objs crt])
+                   (if (null? objs)
+                     (cons 'ok 
+                           (format "musl toolchain validated (~a)" 
+                                   (musl-chez-lib-dir)))
+                     (if (file-exists? (car objs))
+                       (loop (cdr objs))
+                       (cons 'error 
+                             (format "CRT object not found: ~a" 
+                                     (car objs)))))))]))]
       
       [else
-       (cons 'error "musl libkernel.a not found")]))
+       (cons 'error 
+             (format "Cannot locate csv*/<machine> directory under ~a"
+                     (musl-chez-prefix)))]))
 
   ;; ========== Link Command Generation ==========
   
   (define (musl-link-command output-path object-files static-libs)
     "Generate the musl-gcc link command for a static binary.
+     
+     Uses musl-gcc -static which handles CRT objects and -lc automatically.
+     We only need to specify our object files, libkernel.a, and any extra
+     static libraries.
      
      Parameters:
        output-path  - Path for the output executable
@@ -187,42 +257,36 @@
      Returns: Command string"
     (let* ([gcc (musl-gcc-path)]
            [libkernel (musl-libkernel-path)]
-           [crt (musl-crt-objects)]
-           [crt1 (car crt)]
-           [crti (cadr crt)]
-           [crtn (caddr crt)]
-           [sysroot (musl-sysroot)]
+           [libz (musl-libz-path)]
+           [liblz4 (musl-liblz4-path)]
            
            ;; Object files as space-separated string
            [objs (apply string-append
                    (map (lambda (o) (format " '~a'" o))
                         object-files))]
            
-           ;; Static libraries
-           [libs (apply string-append
-                   (map (lambda (a) (format " '~a'" a))
-                        static-libs))]
+           ;; Chez runtime archives
+           [chez-libs (apply string-append
+                       (filter values
+                         (list (format " '~a'" libkernel)
+                               (and libz (format " '~a'" libz))
+                               (and liblz4 (format " '~a'" liblz4)))))]
            
-           ;; Standard libraries (provided by musl)
-           [std-libs "-lm -lpthread"])
+           ;; User static libraries
+           [user-libs (apply string-append
+                       (map (lambda (a) (format " '~a'" a))
+                            static-libs))]
+           
+           ;; Standard libraries needed by Chez runtime
+           [std-libs "-lm -lrt -lpthread"])
       
-      ;; Full link command
-      ;; Note: Order matters! CRT objects must be first and last
-      (format "~a -static -nostdlib \
-               '~a' '~a' \
-               ~a \
-               '~a' \
-               ~a \
-               ~a \
-               '~a' \
-               -o '~a'"
+      ;; musl-gcc -static handles CRT objects and libc linking automatically
+      (format "~a -static~a~a~a ~a -o '~a'"
               gcc
-              crt1 crti        ;; CRT start objects
-              objs             ;; Application objects
-              libkernel        ;; Chez runtime
-              libs             ;; User static libs (zlib, lz4, etc.)
-              std-libs         ;; musl libc
-              crtn             ;; CRT end object
+              objs             ;; Application + Chez main.o + static_boot.o
+              chez-libs        ;; Chez runtime archives
+              user-libs        ;; User static libs
+              std-libs         ;; Math, rt, pthreads
               output-path)))
 
   ;; ========== High-Level Build ==========
@@ -230,12 +294,18 @@
   (define (build-musl-binary source-path output-path . opts)
     "Build a fully static binary using musl libc.
      
+     Uses the Chez Scheme static build infrastructure:
+     - The installed main.o provides main() with argument parsing
+     - We generate static_boot.c with embedded boot files
+     - The application .so is bundled into an app boot file
+     
      Parameters:
-       source-path - Path to main .sls source file
+       source-path - Path to main .ss/.sls source file
        output-path - Path for output executable
      
      Keyword options:
        optimize-level: - Optimization level (0-3, default 2)
+       libdirs:        - Library directories for compilation (colon-separated or list)
        static-libs:    - Additional static libraries to link
        extra-c-files:  - Additional C files to compile
        extra-cflags:   - Additional C compiler flags
@@ -250,14 +320,20 @@
     
     ;; Parse options
     (let* ([opt-level (%musl-kwarg 'optimize-level: opts 2)]
+           [libdirs (%musl-kwarg 'libdirs: opts #f)]
            [static-libs (%musl-kwarg 'static-libs: opts '())]
            [extra-c (%musl-kwarg 'extra-c-files: opts '())]
            [extra-cflags (%musl-kwarg 'extra-cflags: opts "")]
            [verbose? (%musl-kwarg 'verbose: opts #f)]
            
            ;; Build directory
-           [build-dir (format "/tmp/jerboa-musl-~a" (current-time))]
-           [gcc (musl-gcc-path)])
+           [build-dir (format "/tmp/jerboa-musl-~a" 
+                              (time-second (current-time)))]
+           [gcc (musl-gcc-path)]
+           [scheme-h-dir (let ([p (musl-scheme-h-path)])
+                           ;; directory containing scheme.h
+                           (%musl-path-dir p))]
+           [chez-main-o (musl-main-o-path)])
       
       ;; Create build directory
       (system (format "mkdir -p '~a'" build-dir))
@@ -267,38 +343,42 @@
         
         (lambda ()
           ;; Step 1: Compile Scheme to .so
-          (when verbose? (display "[1/5] Compiling Scheme...\n"))
+          (when verbose? (printf "[1/5] Compiling Scheme source: ~a~n" source-path))
           (let ([so-path (format "~a/program.so" build-dir)])
             (parameterize ([optimize-level opt-level]
+                           [compile-imported-libraries #t]
                            [generate-inspector-information #f])
               (compile-program source-path so-path))
             
-            ;; Step 2: Generate boot file
+            ;; Step 2: Create app boot file (bundles the .so into a boot file)
             (when verbose? (display "[2/5] Creating boot file...\n"))
-            (let ([app-boot (format "~a/app.boot" build-dir)]
-                  [boots (musl-boot-files)])
+            (let* ([boots (musl-boot-files)]
+                   [app-boot (format "~a/app.boot" build-dir)])
               (make-boot-file app-boot 
                               (list "petite" "scheme")
                               so-path)
               
-              ;; Step 3: Generate C main with embedded boot files
-              (when verbose? (display "[3/5] Generating C...\n"))
-              (let ([main-c (format "~a/main.c" build-dir)])
-                (generate-musl-main-c main-c
-                                      (map cdr boots)  ;; boot file paths
-                                      app-boot
-                                      so-path)
+              ;; Step 3: Generate static_boot.c (embeds all boot files)
+              (when verbose? (display "[3/5] Generating static_boot.c...\n"))
+              (let ([static-boot-c (format "~a/static_boot.c" build-dir)])
+                (generate-static-boot-c static-boot-c
+                                        (map cdr boots)   ;; petite.boot, scheme.boot paths
+                                        app-boot)
                 
                 ;; Step 4: Compile C files
                 (when verbose? (display "[4/5] Compiling C...\n"))
-                (let* ([main-o (format "~a/main.o" build-dir)]
+                (let* ([static-boot-o (format "~a/static_boot.o" build-dir)]
+                       [include-flag (format "-I'~a'" scheme-h-dir)]
                        [compile-cmd 
-                        (format "~a -c -static -O2 ~a -o '~a' '~a'"
-                                gcc extra-cflags main-o main-c)]
-                       [rc (system compile-cmd)])
+                        (format "~a -c -O2 ~a ~a -o '~a' '~a'"
+                                gcc include-flag extra-cflags
+                                static-boot-o static-boot-c)]
+                       [rc (begin
+                             (when verbose? (printf "  ~a~n" compile-cmd))
+                             (system compile-cmd))])
                   (unless (= rc 0)
                     (error 'build-musl-binary 
-                           "C compilation failed" 
+                           "static_boot.c compilation failed" 
                            compile-cmd))
                   
                   ;; Compile extra C files
@@ -306,9 +386,12 @@
                          (map (lambda (c-file)
                                 (let ([o-file (format "~a/~a.o" 
                                                 build-dir
-                                                (%musl-path-root (%musl-path-last c-file)))])
-                                  (let ([cmd (format "~a -c -static -O2 ~a -o '~a' '~a'"
-                                                     gcc extra-cflags o-file c-file)])
+                                                (%musl-path-root 
+                                                  (%musl-path-last c-file)))])
+                                  (let ([cmd (format "~a -c -O2 ~a ~a -o '~a' '~a'"
+                                                     gcc include-flag extra-cflags 
+                                                     o-file c-file)])
+                                    (when verbose? (printf "  ~a~n" cmd))
                                     (unless (= (system cmd) 0)
                                       (error 'build-musl-binary
                                              "Extra C compilation failed"
@@ -318,12 +401,16 @@
                     
                     ;; Step 5: Link
                     (when verbose? (display "[5/5] Linking...\n"))
-                    (let* ([all-objs (cons main-o extra-objs)]
+                    (let* ([all-objs (cons* chez-main-o 
+                                            static-boot-o
+                                            extra-objs)]
                            [link-cmd (musl-link-command 
                                       output-path 
                                       all-objs
                                       static-libs)]
-                           [rc (system link-cmd)])
+                           [rc (begin
+                                 (when verbose? (printf "  ~a~n" link-cmd))
+                                 (system link-cmd))])
                       (unless (= rc 0)
                         (error 'build-musl-binary
                                "Linking failed"
@@ -331,7 +418,9 @@
                       
                       ;; Success
                       (when verbose?
-                        (display (format "Built: ~a\n" output-path)))
+                        (printf "~nBuilt: ~a~n" output-path)
+                        (system (format "ls -lh '~a'" output-path))
+                        (system (format "file '~a'" output-path)))
                       output-path)))))))
         
         ;; Cleanup
@@ -340,23 +429,18 @@
 
   ;; ========== C Code Generation ==========
   
-  (define (generate-musl-main-c output-path boot-paths app-boot-path so-path)
-    "Generate the C main() that embeds boot files and initializes Chez.
+  (define (generate-static-boot-c output-path boot-paths app-boot-path)
+    "Generate static_boot.c that provides static_boot_init().
      
-     This is similar to generate-main-c from (jerboa build) but includes
-     musl-specific adjustments:
-     - No dlopen (all code is statically linked)
-     - memfd_create for loading the program .so"
+     This function is called by Chez's own main.o (compiled with 
+     -DSTATIC_BOOT=static_boot_init) to register embedded boot files
+     before Sbuild_heap() is called.
+     
+     Boot files are embedded as C byte arrays using file->c-array
+     from (jerboa build)."
     
     (call-with-output-file output-path
       (lambda (out)
-        ;; Includes
-        (display "#define _GNU_SOURCE\n" out)
-        (display "#include <stdio.h>\n" out)
-        (display "#include <stdlib.h>\n" out)
-        (display "#include <string.h>\n" out)
-        (display "#include <unistd.h>\n" out)
-        (display "#include <sys/mman.h>\n" out)
         (display "#include \"scheme.h\"\n\n" out)
         
         ;; Embed boot files as C arrays
@@ -373,58 +457,21 @@
         (display (file->c-array app-boot-path "app_boot") out)
         (newline out)
         
-        ;; Embed program .so
-        (display (file->c-array so-path "program_so") out)
-        (newline out)
-        
-        ;; Main function
-        (display "
-int main(int argc, char *argv[]) {
-    /* Save arguments in environment (bypass Chez arg parsing) */
-    char buf[32];
-    snprintf(buf, sizeof(buf), \"%d\", argc - 1);
-    setenv(\"JERBOA_ARGC\", buf, 1);
-    for (int i = 1; i < argc; i++) {
-        snprintf(buf, sizeof(buf), \"JERBOA_ARG%d\", i - 1);
-        setenv(buf, argv[i], 1);
-    }
+        ;; The static_boot_init function
+        (display "void static_boot_init(void) {\n" out)
+        (for-each
+          (lambda (boot-path)
+            (let ([name (%musl-path-root (%musl-path-last boot-path))])
+              (fprintf out 
+                "    Sregister_boot_file_bytes(\"~a\", ~a_boot, ~a_boot_len);\n"
+                name name name)))
+          boot-paths)
+        (display 
+          "    Sregister_boot_file_bytes(\"app\", app_boot, app_boot_len);\n" 
+          out)
+        (display "}\n" out)))
     
-    /* Initialize Chez Scheme */
-    Sscheme_init(NULL);
-    
-    /* Register boot files from embedded data */
-    Sregister_boot_file_bytes(\"petite\", petite_boot, petite_boot_len);
-    Sregister_boot_file_bytes(\"scheme\", scheme_boot, scheme_boot_len);
-    Sregister_boot_file_bytes(\"app\", app_boot, app_boot_len);
-    
-    /* Build the heap */
-    Sbuild_heap(NULL, NULL);
-    
-    /* Load program via memfd (Linux-specific) */
-    int fd = memfd_create(\"jerboa-program\", MFD_CLOEXEC);
-    if (fd < 0) {
-        perror(\"memfd_create\");
-        return 1;
-    }
-    
-    if (write(fd, program_so, program_so_len) != (ssize_t)program_so_len) {
-        perror(\"write program\");
-        return 1;
-    }
-    
-    char prog_path[64];
-    snprintf(prog_path, sizeof(prog_path), \"/proc/self/fd/%d\", fd);
-    
-    /* Run the program */
-    int status = Sscheme_script(prog_path, 0, NULL);
-    
-    /* Cleanup */
-    close(fd);
-    Sscheme_deinit();
-    
-    return status;
-}
-" out))))
+    output-path)
 
   ;; ========== Cross-Compilation ==========
   
@@ -466,10 +513,23 @@ int main(int argc, char *argv[]) {
     (let ([parts (%musl-string-split path #\/)])
       (if (null? parts) path (car (reverse parts)))))
   
+  (define (%musl-path-dir path)
+    "Return the directory portion of a path"
+    (let ([idx (%musl-string-index-right path #\/)])
+      (if idx (substring path 0 idx) ".")))
+  
   (define (%musl-path-root path)
     "Return path without extension"
     (let ([dot (%musl-string-index-right path #\.)])
       (if dot (substring path 0 dot) path)))
+  
+  (define (%musl-string-trim-right s)
+    (let loop ([i (- (string-length s) 1)])
+      (if (< i 0)
+        ""
+        (if (char-whitespace? (string-ref s i))
+          (loop (- i 1))
+          (substring s 0 (+ i 1))))))
   
   (define (%musl-string-split str char)
     (let loop ([chars (string->list str)] [current '()] [result '()])

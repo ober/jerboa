@@ -14,8 +14,10 @@
 
   (import (chezscheme))
 
-  ;; Ensure libc is loaded for foreign-procedure lookups
-  (define libc (load-shared-object "libc.so.6"))
+  ;; Ensure libc is loaded for foreign-procedure lookups.
+  ;; In static builds (musl), dlopen is unavailable — libc symbols are
+  ;; already linked into the binary, so this is safely skipped.
+  (define libc (guard (e [#t #f]) (load-shared-object "libc.so.6")))
 
   ;; POSIX kill(pid, sig)
   (define kill (foreign-procedure "kill" (int int) int))
