@@ -104,28 +104,139 @@
       format
       ))
 
+  ;; ========== Dangerous Bindings to Remove ==========
+  ;; Explicitly block these — they provide FFI, file I/O, code loading,
+  ;; process execution, and other capabilities that break sandboxing.
+
+  (define dangerous-bindings
+    '(;; Code loading and evaluation
+      load load-shared-object load-program load-library
+      eval eval-when compile compile-file compile-port
+      compile-library compile-program compile-whole-program
+      compile-to-port expand include
+      library-directories library-extensions
+      source-directories
+
+      ;; FFI — must be blocked to prevent arbitrary C calls
+      foreign-procedure foreign-callable foreign-sizeof
+      foreign-alloc foreign-free foreign-ref foreign-set!
+      foreign-entry? foreign-entry
+      ftype-sizeof ftype-ref ftype-set! ftype-pointer-address
+      ftype-pointer-null? ftype-pointer-ftype make-ftype-pointer
+      define-ftype lock-object unlock-object
+      load-shared-object
+
+      ;; Process execution
+      system process
+
+      ;; File I/O
+      open-file-input-port open-file-output-port
+      open-file-input/output-port
+      open-input-file open-output-file
+      call-with-input-file call-with-output-file
+      with-input-from-file with-output-to-file
+      file-exists? delete-file rename-file
+      directory-list make-directory delete-directory
+      file-regular? file-directory? file-symbolic-link?
+      get-mode chmod
+
+      ;; Environment manipulation
+      putenv getenv
+      scheme-environment interaction-environment
+      copy-environment environment environment-symbols
+      define-top-level-value set-top-level-value!
+      top-level-value top-level-bound?
+
+      ;; Module system manipulation
+      import import-only
+
+      ;; Ports to filesystem
+      current-directory
+      standard-input-port standard-output-port standard-error-port
+      console-input-port console-output-port console-error-port
+      transcript-on transcript-off
+
+      ;; Low-level and unsafe
+      #%$top-level-value inspect inspect/object
+      sc-expand syntax->datum datum->syntax
+      pretty-print trace-define trace-lambda
+      with-profile-tracker profile-dump-html
+
+      ;; Exit
+      exit scheme-start
+
+      ;; Thread creation (could be used to escape)
+      fork-thread make-thread thread-start!))
+
   ;; ========== Restricted Environment ==========
 
   (define (make-restricted-environment . extra-bindings)
-    ;; Create an environment with only safe bindings.
-    (let ([restricted (copy-environment (scheme-environment) #t)])
-        ;; Import safe bindings from the scheme environment
+    ;; Create an environment with ONLY safe bindings.
+    ;; Strategy: copy the scheme-environment (to get syntax/macros),
+    ;; then rebind all dangerous symbols to error-raising procedures.
+    (let ([restricted (copy-environment (scheme-environment) #t)]
+          [safe-set (make-eq-hashtable)])
+      ;; Build lookup table of safe bindings
+      (for-each (lambda (name) (hashtable-set! safe-set name #t)) safe-bindings)
+      ;; Remove explicitly dangerous bindings
+      (for-each
+        (lambda (name)
+          (guard (e [#t (void)])
+            (when (top-level-bound? name restricted)
+              (define-top-level-value name
+                (lambda args
+                  (error 'restricted-eval
+                    (format "~a is not available in restricted environment" name)))
+                restricted))))
+        dangerous-bindings)
+      ;; Also scan all symbols and block anything not in safe-bindings
+      ;; that looks like a procedure (conservative: block unknown procedures)
+      (guard (e [#t (void)])
         (for-each
-          (lambda (name)
-            (guard (e [#t (void)])  ;; skip if not available
-              (when (top-level-bound? name (scheme-environment))
-                (define-top-level-value name
-                  (top-level-value name (scheme-environment))
-                  restricted))))
-          safe-bindings)
-        ;; Add any extra bindings
-        (when (pair? extra-bindings)
-          (for-each
-            (lambda (binding)
-              (when (and (pair? binding) (symbol? (car binding)))
-                (define-top-level-value (car binding) (cdr binding) restricted)))
-            (car extra-bindings)))
-        restricted))
+          (lambda (sym)
+            (unless (hashtable-ref safe-set sym #f)
+              (guard (e2 [#t (void)])
+                (when (and (top-level-bound? sym restricted)
+                           (procedure? (top-level-value sym restricted)))
+                  (define-top-level-value sym
+                    (lambda args
+                      (error 'restricted-eval
+                        (format "~a is not available in restricted environment" sym)))
+                    restricted)))))
+          (environment-symbols restricted)))
+      ;; Block syntax keywords that can't be caught by procedure scanning
+      ;; (foreign-procedure, etc. are special forms, not procedures)
+      (for-each
+        (lambda (name)
+          (guard (e [#t (void)])
+            (define-top-level-value name
+              (lambda args
+                (error 'restricted-eval
+                  (format "~a is not available in restricted environment" name)))
+              restricted)))
+        '(foreign-procedure foreign-callable foreign-entry
+          foreign-entry? ftype-sizeof ftype-ref ftype-set!
+          define-ftype make-ftype-pointer
+          load-shared-object
+          import import-only library
+          meta-cond eval-when))
+      ;; Re-add safe bindings (in case we accidentally blocked any)
+      (for-each
+        (lambda (name)
+          (guard (e [#t (void)])
+            (when (top-level-bound? name (scheme-environment))
+              (define-top-level-value name
+                (top-level-value name (scheme-environment))
+                restricted))))
+        safe-bindings)
+      ;; Add any extra bindings
+      (when (pair? extra-bindings)
+        (for-each
+          (lambda (binding)
+            (when (and (pair? binding) (symbol? (car binding)))
+              (define-top-level-value (car binding) (cdr binding) restricted)))
+          (car extra-bindings)))
+      restricted))
 
   ;; ========== Restricted Eval ==========
 

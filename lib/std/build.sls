@@ -199,21 +199,41 @@
   ;; ========== Build Cache ==========
 
   (define (build-cache-load cache-file)
-    ;; Load hash cache from fasl file
+    ;; Load hash cache from file.
+    ;; Serialized as an alist because fasl cannot round-trip hashtables
+    ;; with custom hash/equal functions.
     ;; Returns hashtable: file-path -> content-hash
     (guard (e [#t (make-hashtable string-hash string=?)])
       (if (file-exists? cache-file)
-        (call-with-port (open-file-input-port cache-file)
-          (lambda (port)
-            (fasl-read port)))
+        (let ([alist (call-with-port (open-file-input-port cache-file)
+                       (lambda (port)
+                         (fasl-read port)))])
+          (if (list? alist)
+            (let ([ht (make-hashtable string-hash string=?)])
+              (for-each
+                (lambda (pair)
+                  (when (and (pair? pair) (string? (car pair)))
+                    (hashtable-set! ht (car pair) (cdr pair))))
+                alist)
+              ht)
+            ;; Fallback for old format
+            (make-hashtable string-hash string=?)))
         (make-hashtable string-hash string=?))))
 
   (define (build-cache-save cache-file cache)
+    ;; Save as alist for reliable fasl round-trip.
     (guard (e [#t (void)])
-      (call-with-port (open-file-output-port cache-file
-                        (file-options no-fail))
-        (lambda (port)
-          (fasl-write cache port)))))
+      (let ([alist (let-values ([(keys vals) (hashtable-entries cache)])
+                     (let lp ([i 0] [acc '()])
+                       (if (= i (vector-length keys)) acc
+                         (lp (+ i 1)
+                             (cons (cons (vector-ref keys i)
+                                         (vector-ref vals i))
+                                   acc)))))])
+        (call-with-port (open-file-output-port cache-file
+                          (file-options no-fail))
+          (lambda (port)
+            (fasl-write alist port))))))
 
   (define (module-changed? file cache)
     (guard (e [#t #t])
