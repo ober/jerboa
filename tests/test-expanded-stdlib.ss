@@ -28,6 +28,7 @@
         (std srfi srfi-19)
         (std pregexp)
         (std misc thread)
+        (std sugar)
         (std test))
 
 (define pass-count 0)
@@ -215,6 +216,18 @@
 
 ;;; ---- Summary ----
 (newline)
+;;; ---- std/sugar (awhen, aif, when-let, if-let, dotimes) ----
+(chk (awhen (+ 1 2) it) => 3)
+(chk (awhen #f 42) => (void))
+(chk (aif (+ 10 20) it 0) => 30)
+(chk (aif #f 42 99) => 99)
+(chk (when-let (x (+ 1 1)) (* x 3)) => 6)
+(chk (when-let (x #f) 42) => (void))
+(chk (if-let (x 10) (* x 2) 0) => 20)
+(chk (if-let (x #f) 42 99) => 99)
+(chk (let ((acc 0)) (dotimes (i 4) (set! acc (+ acc i))) acc) => 6)
+(chk (let ((acc 0)) (dotimes (i 0) (set! acc (+ acc 1))) acc) => 0)
+
 (display "Expanded stdlib tests: ")
 (display pass-count)
 (display " passed, ")

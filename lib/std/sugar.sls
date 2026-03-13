@@ -13,7 +13,13 @@
     assert!
     with-lock
     with-catch
-    cut cute)
+    cut cute
+    ;; Anaphoric macros
+    awhen aif
+    ;; Binding macros
+    when-let if-let
+    ;; Iteration
+    dotimes)
   (import (except (chezscheme)
             make-hash-table hash-table? iota 1+ 1-)
           (jerboa core))
@@ -160,5 +166,56 @@
       ;; Normal expression — evaluate once via let
       [(_ (binds ...) (params ...) (args ...) expr . rest)
        (cute-aux (binds ... (t expr)) (params ...) (args ... t) . rest)]))
+
+  ;; awhen — anaphoric when: binds test result to `it`
+  ;; (awhen (find-thing) (use it)) → (let ((it (find-thing))) (when it (use it)))
+  (define-syntax awhen
+    (lambda (stx)
+      (syntax-case stx ()
+        [(k test body body* ...)
+         (with-syntax ([it (datum->syntax #'k 'it)])
+           #'(let ([it test])
+               (when it body body* ...)))])))
+
+  ;; aif — anaphoric if: binds test result to `it`
+  ;; (aif (lookup key) (use it) fallback)
+  (define-syntax aif
+    (lambda (stx)
+      (syntax-case stx ()
+        [(k test then else-expr)
+         (with-syntax ([it (datum->syntax #'k 'it)])
+           #'(let ([it test])
+               (if it then else-expr)))]
+        [(k test then)
+         (with-syntax ([it (datum->syntax #'k 'it)])
+           #'(let ([it test])
+               (when it then)))])))
+
+  ;; when-let — bind and test: execute body only if binding is truthy
+  ;; (when-let (x (get-thing)) (use x))
+  (define-syntax when-let
+    (syntax-rules ()
+      [(_ (var expr) body body* ...)
+       (let ([var expr])
+         (when var body body* ...))]))
+
+  ;; if-let — bind and branch: execute then if binding is truthy, else otherwise
+  ;; (if-let (x (get-thing)) (use x) fallback)
+  (define-syntax if-let
+    (syntax-rules ()
+      [(_ (var expr) then else-expr)
+       (let ([var expr])
+         (if var then else-expr))]))
+
+  ;; dotimes — iterate N times with counter variable
+  ;; (dotimes (i 10) (display i))
+  (define-syntax dotimes
+    (syntax-rules ()
+      [(_ (var count) body body* ...)
+       (let ([n count])
+         (let loop ([var 0])
+           (when (< var n)
+             body body* ...
+             (loop (+ var 1)))))]))
 
   ) ;; end library
