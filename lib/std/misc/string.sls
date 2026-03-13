@@ -1,5 +1,14 @@
 #!chezscheme
 ;;; :std/misc/string -- String utilities
+;;;
+;;; NOTE: This module exports several symbols that overlap with (std srfi srfi-13):
+;;;   string-join, string-trim, string-prefix?, string-suffix?, string-contains, string-index
+;;; If you need both modules, use (only (std misc string) string-split string-empty?)
+;;; to import only the unique symbols from this module.
+;;;
+;;; Semantic differences from srfi-13:
+;;;   - string-trim: trims BOTH sides (srfi-13 trims leading only; use string-trim-both there)
+;;;   - string-index: takes a char (srfi-13 takes a predicate or char)
 
 (library (std misc string)
   (export string-split string-join string-trim

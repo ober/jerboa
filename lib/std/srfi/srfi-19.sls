@@ -25,7 +25,11 @@
     time-difference
     add-duration
     time-utc
-    make-time)
+    make-time
+    ;; Chez built-ins re-exported for Gerbil API compatibility
+    time-second
+    time-nanosecond
+    date-week-day)
 
   (import (chezscheme))
 
