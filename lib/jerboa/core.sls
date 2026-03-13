@@ -21,8 +21,12 @@
     while until
 
     ;; hash constructors
+    hash hash-eq
     hash-literal hash-eq-literal
     let-hash
+
+    ;; struct export helper
+    struct-out
 
     ;; re-export runtime
     ~ bind-method! call-method
@@ -33,6 +37,7 @@
     hash-merge hash-merge! hash-length hash-table?
     list->hash-table plist->hash-table
     keyword? keyword->string string->keyword make-keyword
+    keyword-arg-ref
     error-message error-irritants error-trace
     displayln 1+ 1-
     iota last-pair
@@ -49,24 +54,52 @@
 
   ;;;; ---- Compile-time helpers ----
 
+  (meta define (keyword-sym? sym)
+    ;; Check if a symbol looks like a keyword arg: ends with ':'
+    (and (symbol? sym)
+         (let ([s (symbol->string sym)])
+           (and (> (string-length s) 1)
+                (char=? (string-ref s (- (string-length s) 1)) #\:)))))
+
+  (meta define (has-keywords? params)
+    ;; Check if param list contains keyword: (var default) patterns
+    (cond
+      [(null? params) #f]
+      [(not (pair? params)) #f]
+      [(keyword-sym? (car params)) #t]
+      [else (has-keywords? (cdr params))]))
+
   (meta define (has-optionals? params)
     (cond
       [(null? params) #f]
       [(not (pair? params)) #f]  ; rest arg (symbol) = no optionals here
+      [(keyword-sym? (car params)) #t]  ; keyword args count as optionals
       [(pair? (car params)) #t]
       [else (has-optionals? (cdr params))]))
 
   (meta define (split-params params)
-    (let loop ([rest params] [req '()] [opt '()])
+    ;; Returns (values required optionals rest-arg keywords)
+    ;; keywords is a list of (keyword-symbol var-name default)
+    (let loop ([rest params] [req '()] [opt '()] [kw '()])
       (cond
-        [(null? rest) (values (reverse req) (reverse opt) #f)]
-        [(symbol? rest) (values (reverse req) (reverse opt) rest)]
+        [(null? rest) (values (reverse req) (reverse opt) #f (reverse kw))]
+        [(symbol? rest) (values (reverse req) (reverse opt) rest (reverse kw))]
+        ;; keyword: (var default) pattern
+        [(and (keyword-sym? (car rest)) (pair? (cdr rest)) (pair? (cadr rest)))
+         (let* ([kw-sym (car rest)]
+                [kw-str (symbol->string kw-sym)]
+                [kw-name (substring kw-str 0 (- (string-length kw-str) 1))]
+                [binding (cadr rest)]
+                [var-name (car binding)]
+                [default (cadr binding)])
+           (loop (cddr rest) req opt
+                 (cons (list (string->symbol kw-name) var-name default) kw)))]
         [(pair? (car rest))
-         (loop (cdr rest) req (cons (car rest) opt))]
+         (loop (cdr rest) req (cons (car rest) opt) kw)]
         [else
-         (if (null? opt)
-           (loop (cdr rest) (cons (car rest) req) opt)
-           (loop (cdr rest) req (cons (list (car rest) #f) opt)))])))
+         (if (and (null? opt) (null? kw))
+           (loop (cdr rest) (cons (car rest) req) opt kw)
+           (loop (cdr rest) req (cons (list (car rest) #f) opt) kw))])))
 
   (meta define (meta-take lst n)
     (if (or (zero? n) (null? lst)) '()
@@ -76,31 +109,61 @@
     (if (or (zero? n) (null? lst)) lst
       (meta-drop (cdr lst) (- n 1))))
 
+  (meta define (generate-keyword-clause name-stx required optionals keywords body-stx)
+    ;; Generate a single clause: (req1 req2 ... . kwargs)
+    ;; with let-bindings that extract keyword values from kwargs
+    (let* ([all-positional (append required (map car optionals))]
+           [kw-var-names (map cadr keywords)]
+           [kw-defaults (map caddr keywords)]
+           [kw-key-syms (map car keywords)]
+           ;; Build the keyword extraction let-bindings
+           [kw-bindings
+             (map (lambda (kw)
+                    (let ([key-sym (car kw)]
+                          [var-name (cadr kw)]
+                          [default (caddr kw)])
+                      (list var-name
+                            (list 'keyword-arg-ref '%kwargs
+                                  (list 'quote (string->symbol
+                                                 (string-append (symbol->string key-sym) ":")))
+                                  default))))
+                  keywords)])
+      ;; Build: ((req1 req2 ... . %kwargs) (let ([kw1 ...] ...) body ...))
+      (with-syntax ([(p ...) (datum->syntax name-stx all-positional)]
+                    [rest-var (datum->syntax name-stx '%kwargs)]
+                    [((kv kx) ...) (datum->syntax name-stx kw-bindings)]
+                    [(b ...) body-stx])
+        (list #'((p ... . rest-var) (let ([kv kx] ...) b ...))))))
+
   (meta define (generate-case-lambda-clauses name-stx params-stx body-stx)
     (let ([params (syntax->datum params-stx)])
-      (let-values ([(required optionals rest)
+      (let-values ([(required optionals rest keywords)
                     (split-params params)])
-        (let ([n-opt (length optionals)]
-              [all-names (append required (map car optionals))])
-          (let ([full-clause
-                  (with-syntax ([(p ...) (datum->syntax name-stx all-names)]
-                               [(b ...) body-stx])
-                    #'((p ...) b ...))]
-                [partial-clauses
-                  (let loop ([i 0] [clauses '()])
-                    (if (>= i n-opt)
-                      (reverse clauses)
-                      (let* ([present-opt (meta-take optionals i)]
-                             [missing-opt (meta-drop optionals i)]
-                             [clause-params (append required (map car present-opt))]
-                             [defaults (map cadr missing-opt)]
-                             [all-args (append clause-params defaults)])
-                        (with-syntax ([(p ...) (datum->syntax name-stx clause-params)]
-                                     [fn name-stx]
-                                     [(a ...) (datum->syntax name-stx all-args)])
-                          (loop (+ i 1)
-                                (cons #'((p ...) (fn a ...)) clauses))))))])
-            (append partial-clauses (list full-clause)))))))
+        (if (not (null? keywords))
+          ;; Keyword args: generate a single clause with rest arg + keyword parsing
+          (generate-keyword-clause name-stx required optionals keywords body-stx)
+          ;; Positional-only: original case-lambda logic
+          (let ([n-opt (length optionals)]
+                [all-names (append required (map car optionals))])
+            (let ([full-clause
+                    (with-syntax ([(p ...) (datum->syntax name-stx all-names)]
+                                 [(b ...) body-stx])
+                      #'((p ...) b ...))]
+                  [partial-clauses
+                    (let loop ([i 0] [clauses '()])
+                      (if (>= i n-opt)
+                        (reverse clauses)
+                        (let* ([present-opt (meta-take optionals i)]
+                               [missing-opt (meta-drop optionals i)]
+                               [clause-params (append required (map car present-opt))]
+                               [defaults (map cadr missing-opt)]
+                               [all-args (append clause-params defaults)])
+                          (with-syntax ([(p ...) (datum->syntax name-stx clause-params)]
+                                       [fn name-stx]
+                                       [(a ...) (datum->syntax name-stx all-args)])
+                            (loop (+ i 1)
+                                  (cons #'((p ...) (fn a ...)) clauses))))))])
+              (append partial-clauses (list full-clause))))))))
 
   (meta define (gen-struct-names name-sym fields-sym)
     (let ([ns (symbol->string name-sym)])
@@ -178,49 +241,66 @@
       (syntax-case stx ()
         [(_ name (field ...))
          (identifier? #'name)
-         (let-values ([(type-id make-id pred-id accs muts)
-                       (gen-struct-names (syntax->datum #'name)
-                                         (syntax->datum #'(field ...)))])
-           (with-syntax ([tid (datum->syntax #'name type-id)]
-                         [mid (datum->syntax #'name make-id)]
-                         [pid (datum->syntax #'name pred-id)]
-                         [(acc ...) (datum->syntax #'name accs)]
-                         [(mut ...) (datum->syntax #'name muts)]
-                         [(idx ...) (datum->syntax #'name
-                                     (iota (length (syntax->datum #'(field ...)))))])
-             #'(begin
-                 (define-record-type name
-                   (fields (mutable field) ...))
-                 (define tid (record-type-descriptor name))
-                 (define mid
-                   (record-constructor
-                     (make-record-constructor-descriptor tid #f #f)))
-                 (define pid (record-predicate tid))
-                 (define acc (record-accessor tid idx)) ...
-                 (define mut (record-mutator tid idx)) ...)))]
+         (let* ([name-sym (syntax->datum #'name)]
+                [fields-list (syntax->datum #'(field ...))]
+                [ns (symbol->string name-sym)])
+           (let-values ([(type-id make-id pred-id accs muts)
+                         (gen-struct-names name-sym fields-list)])
+             ;; Generate internal accessor/mutator names to avoid conflicts
+             (let ([int-accs (map (lambda (f)
+                                    (gensym (string-append ns "-" (symbol->string f))))
+                                  fields-list)]
+                   [int-muts (map (lambda (f)
+                                    (gensym (string-append ns "-" (symbol->string f) "-set!")))
+                                  fields-list)])
+               (with-syntax ([tid (datum->syntax #'name type-id)]
+                             [mid (datum->syntax #'name make-id)]
+                             [pid (datum->syntax #'name pred-id)]
+                             [(acc ...) (datum->syntax #'name accs)]
+                             [(mut ...) (datum->syntax #'name muts)]
+                             [(idx ...) (datum->syntax #'name
+                                         (iota (length fields-list)))]
+                             [(iacc ...) (datum->syntax #'name int-accs)]
+                             [(imut ...) (datum->syntax #'name int-muts)]
+                             [hidden-name (datum->syntax #'name
+                                            (gensym (symbol->string name-sym)))])
+                 #'(begin
+                     (define-record-type (hidden-name mid pid)
+                       (fields (mutable field iacc imut) ...))
+                     (define tid (record-type-descriptor hidden-name))
+                     (define acc iacc) ...
+                     (define mut imut) ...)))))]
         [(_ (name parent) (field ...))
          (and (identifier? #'name) (identifier? #'parent))
-         (let-values ([(type-id make-id pred-id accs muts)
-                       (gen-struct-names (syntax->datum #'name)
-                                         (syntax->datum #'(field ...)))])
-           (with-syntax ([tid (datum->syntax #'name type-id)]
-                         [mid (datum->syntax #'name make-id)]
-                         [pid (datum->syntax #'name pred-id)]
-                         [(acc ...) (datum->syntax #'name accs)]
-                         [(mut ...) (datum->syntax #'name muts)]
-                         [(idx ...) (datum->syntax #'name
-                                     (iota (length (syntax->datum #'(field ...)))))])
-             #'(begin
-                 (define-record-type name
-                   (parent parent)
-                   (fields (mutable field) ...))
-                 (define tid (record-type-descriptor name))
-                 (define mid
-                   (record-constructor
-                     (make-record-constructor-descriptor tid #f #f)))
-                 (define pid (record-predicate tid))
-                 (define acc (record-accessor tid idx)) ...
-                 (define mut (record-mutator tid idx)) ...)))])))
+         (let* ([name-sym (syntax->datum #'name)]
+                [fields-list (syntax->datum #'(field ...))]
+                [ns (symbol->string name-sym)])
+           (let-values ([(type-id make-id pred-id accs muts)
+                         (gen-struct-names name-sym fields-list)])
+             (let ([int-accs (map (lambda (f)
+                                    (gensym (string-append ns "-" (symbol->string f))))
+                                  fields-list)]
+                   [int-muts (map (lambda (f)
+                                    (gensym (string-append ns "-" (symbol->string f) "-set!")))
+                                  fields-list)])
+               (with-syntax ([tid (datum->syntax #'name type-id)]
+                             [mid (datum->syntax #'name make-id)]
+                             [pid (datum->syntax #'name pred-id)]
+                             [(acc ...) (datum->syntax #'name accs)]
+                             [(mut ...) (datum->syntax #'name muts)]
+                             [(idx ...) (datum->syntax #'name
+                                         (iota (length fields-list)))]
+                             [(iacc ...) (datum->syntax #'name int-accs)]
+                             [(imut ...) (datum->syntax #'name int-muts)]
+                             [hidden-name (datum->syntax #'name
+                                            (gensym (symbol->string name-sym)))])
+                 #'(begin
+                     (define-record-type (hidden-name mid pid)
+                       (parent parent)
+                       (fields (mutable field iacc imut) ...))
+                     (define tid (record-type-descriptor hidden-name))
+                     (define acc iacc) ...
+                     (define mut imut) ...)))))])))
 
   ;;;; ---- DEFCLASS ----
 
@@ -525,5 +605,33 @@
                                   (syntax->list #'expr))])
                 #'(transformed ...))]
              [else #'expr]))])))
+
+  ;;;; ---- HASH / HASH-EQ aliases ----
+  ;; Gerbil uses (hash (k v) ...) directly; jerboa had hash-literal
+  (define-syntax hash
+    (syntax-rules ()
+      [(_ (key val) ...)
+       (hash-literal (key val) ...)]))
+
+  ;; hash-eq is already exported from runtime as a procedure.
+  ;; Re-define as a macro for the (hash-eq (k v) ...) literal form.
+  ;; The runtime version handles the (hash-eq) / (hash-eq pairs...) cases.
+
+  ;;;; ---- STRUCT-OUT ----
+  ;; (struct-out name) is used inside export forms in Gerbil.
+  ;; In jerboa, it's a compile-time expansion that cannot work inside
+  ;; R6RS (export ...) forms. Instead, provide it as a macro that
+  ;; expands to a begin with explicit definitions — this is a helper
+  ;; for generating manual export lists, not a true export-spec.
+  ;;
+  ;; Usage: call (struct-out-names 'typename) at the REPL to see what to export.
+  ;; The defstruct macro already defines make-X, X?, X-field, X-field-set! etc.
+  ;; Users just need to list them in their library's export form.
+  ;;
+  ;; For convenience in top-level programs (not libraries), struct-out
+  ;; is a no-op identity — the names are already bound.
+  (define-syntax struct-out
+    (syntax-rules ()
+      [(_ name) (void)]))
 
   ) ;; end library

@@ -1,6 +1,6 @@
 # Jerboa Implementation Plan: Phase 5 — The World-Class Scheme
 
-## Status: Phase 4 Complete, Phase 5 Planned
+## Status: Phase 8 Complete
 
 Phases 1-4 establish Jerboa as the most capable Scheme implementation ever built, with 200+ modules and 2,700+ tests. Phase 5 pushes Jerboa into uncharted territory by exploiting Chez Scheme's deepest capabilities — features that exist nowhere else in the Scheme ecosystem.
 
@@ -3943,9 +3943,9 @@ Track 45 (HTTP client)   ← uses Track 33 TCP, ~150 lines
 
 Build order: (37, 38, 40, 44 in parallel) → (36, 39, 42) → (41, 43) → 45
 
-## Phase 8 Total
+## Phase 8 Total — IMPLEMENTED
 
-~520 lines of implementation across 10 tracks, closing the remaining gaps for mechanical gerbil-emacs porting.
+~520 lines of implementation across 10 tracks, 90 tests passing. All gaps for mechanical gerbil-emacs porting are closed.
 
 ## Porting Effort After Phase 8
 

@@ -27,6 +27,9 @@
     error-message error-irritants error-trace
     with-exception-handler raise
 
+    ;; Keyword argument support
+    keyword-arg-ref
+
     ;; Utilities
     displayln
     1+ 1-
@@ -257,6 +260,18 @@
     (if (condition? e)
       (format "~a" e)
       ""))
+
+  ;;;; ---- Keyword argument support ----
+
+  (define (keyword-arg-ref kwargs key default)
+    ;; Search a flat list (key1: val1 key2: val2 ...) for key, return val or default.
+    ;; key is a symbol like 'setter:
+    (let loop ([rest kwargs])
+      (cond
+        [(null? rest) default]
+        [(null? (cdr rest)) default]
+        [(eq? (car rest) key) (cadr rest)]
+        [else (loop (cddr rest))])))
 
   ;;;; ---- Utilities ----
 

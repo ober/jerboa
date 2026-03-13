@@ -11,7 +11,9 @@
     defrule defrules
     chain chain-and with-id
     assert!
-    with-lock)
+    with-lock
+    with-catch
+    cut cute)
   (import (except (chezscheme)
             make-hash-table hash-table? iota 1+ 1-)
           (jerboa core))
@@ -106,5 +108,57 @@
            (lambda () (mutex-acquire m))
            (lambda () body body* ...)
            (lambda () (mutex-release m))))]))
+
+  ;; with-catch — Gerbil's 2-arg exception handler shorthand
+  ;; (with-catch handler thunk)
+  ;; handler: (lambda (exn) fallback-value)
+  ;; thunk:   (lambda () guarded-expression)
+  (define (with-catch handler thunk)
+    (guard (e [#t (handler e)])
+      (thunk)))
+
+  ;; cut / cute — SRFI-26 partial application
+  ;; (cut f <> y) → (lambda (x) (f x y))
+  ;; (cute f <> y) → (let ([t y]) (lambda (x) (f x t)))
+
+  (define-syntax cut
+    (syntax-rules ()
+      [(_ . slots-or-exprs)
+       (cut-aux () () . slots-or-exprs)]))
+
+  (define-syntax cute
+    (syntax-rules ()
+      [(_ . slots-or-exprs)
+       (cute-aux () () () . slots-or-exprs)]))
+
+  (define-syntax cut-aux
+    (syntax-rules (<> <...>)
+      ;; No more args — build lambda
+      [(_ (params ...) (args ...))
+       (lambda (params ...) (args ...))]
+      ;; Slot <> — add parameter
+      [(_ (params ...) (args ...) <> . rest)
+       (cut-aux (params ... x) (args ... x) . rest)]
+      ;; Rest slot <...> — must be last
+      [(_ (params ...) (args ...) <...>)
+       (lambda (params ... . xs) (apply args ... xs))]
+      ;; Normal expression — pass through
+      [(_ (params ...) (args ...) expr . rest)
+       (cut-aux (params ...) (args ... expr) . rest)]))
+
+  (define-syntax cute-aux
+    (syntax-rules (<> <...>)
+      ;; No more args — build let + lambda
+      [(_ (binds ...) (params ...) (args ...))
+       (let (binds ...) (lambda (params ...) (args ...)))]
+      ;; Slot <>
+      [(_ (binds ...) (params ...) (args ...) <> . rest)
+       (cute-aux (binds ...) (params ... x) (args ... x) . rest)]
+      ;; Rest slot <...>
+      [(_ (binds ...) (params ...) (args ...) <...>)
+       (let (binds ...) (lambda (params ... . xs) (apply args ... xs)))]
+      ;; Normal expression — evaluate once via let
+      [(_ (binds ...) (params ...) (args ...) expr . rest)
+       (cute-aux (binds ... (t expr)) (params ...) (args ... t) . rest)]))
 
   ) ;; end library
