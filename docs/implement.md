@@ -3602,3 +3602,356 @@ With these ~470 lines implemented, porting gerbil-emacs becomes mechanical trans
 - **100% of concurrency patterns** have direct equivalents
 - **100% of data structures** have compatible APIs
 - Remaining work is Gambit→Chez FFI translation (`begin-ffi` → `foreign-procedure`) which is module-specific, not pervasive
+
+---
+
+# Phase 8: Deep Gerbil Compatibility — Closing the Porting Gap
+
+**Goal:** Eliminate the remaining API gaps that would require manual rewriting when porting gerbil-emacs (~88K lines, 147 files). Phase 7 gave us the infrastructure; Phase 8 makes the translation mechanical.
+
+**Analysis basis:** Searched all 147 `.ss` files in gerbil-emacs for Gerbil-specific APIs and cross-referenced against jerboa's existing modules. These 10 tracks cover features used across 85+ files with 5,500+ combined occurrences.
+
+### What Already Works (no changes needed)
+
+| Feature | Jerboa Module | Status |
+|---------|--------------|--------|
+| `def` with optional positional args | `(jerboa core)` | ✅ Works |
+| `defstruct`, `defclass`, `defmethod` | `(jerboa core)` | ✅ Works |
+| `match` | `(jerboa core)` | ✅ Works |
+| `try`/`catch`/`finally` | `(std sugar)` | ✅ Works |
+| `when`/`unless`/`while`/`until` | `(std sugar)` | ✅ Works |
+| `defrule`/`defrules` | `(jerboa core)` | ✅ Works |
+| `chain`/`chain-and` | `(std sugar)` | ✅ Works |
+| `hash-get`, `hash-put!`, `hash->list`, etc. | `(jerboa runtime)` | ✅ Works |
+| `hash-copy`, `hash-merge`, `hash-fold` | `(jerboa runtime)` | ✅ Works |
+| `hash-literal` (as `hash-literal`) | `(jerboa core)` | ✅ Renamed |
+| `string-split`, `string-join`, `string-trim` | `(std misc string)` | ✅ Works |
+| `string-prefix?`, `string-suffix?` | `(std misc string)` | ✅ Works |
+| `read-file-string`, `write-file-string` | `(std misc ports)` | ✅ Works |
+| `path-expand`, `path-join`, `path-normalize` | `(std os path)` | ✅ Works |
+| `pregexp-match`, `pregexp-replace`, etc. | `(std pregexp)` | ✅ Works |
+| `read-json`, `write-json` | `(std text json)` | ✅ Works |
+| `displayln`, `format`, `printf` | `(jerboa runtime)`, `(std format)` | ✅ Works |
+| `spawn`, `thread-join!`, `thread-sleep!` | `(std misc thread)` | ✅ Works |
+| `atom`, `atom-swap!`, `atom-deref` | `(std misc atom)` | ✅ Works |
+| `with-lock` | `(std sugar)` | ✅ Works |
+| `make-mutex`, `with-mutex` | `(chezscheme)` | ✅ Native |
+| `getenv`, `setenv` | `(std os env)` | ✅ Works |
+| `current-directory` | `(chezscheme)` | ✅ Native |
+| `parameterize`, `make-parameter` | `(chezscheme)` | ✅ Native |
+| `values`, `call-with-values` | `(chezscheme)` | ✅ Native |
+| `dynamic-wind` | `(chezscheme)` | ✅ Native |
+| `define-syntax`, `syntax-rules` | `(chezscheme)` | ✅ Native |
+| `string-downcase`, `string-upcase` | `(chezscheme)` | ✅ Native |
+| `void` | `(chezscheme)` | ✅ Native |
+
+### What's Missing — The 10 Tracks
+
+## Track 36: `def` with Keyword Arguments
+
+**Used in:** 19+ files, core editor infrastructure
+**Occurrences:** ~50 keyword-arg definitions, ~200 keyword-arg call sites
+
+Gerbil's `def` supports keyword arguments with defaults:
+```scheme
+(def (defvar! name default docstring
+              setter: (setter #f)
+              type: (type 'sexp)
+              group: (group 'misc))
+  ...)
+
+;; Called as:
+(defvar! 'tab-width 8 "Tab width" type: 'integer group: 'editing)
+```
+
+**Current state:** jerboa's `def` handles optional positional args via `case-lambda` but not keyword args.
+
+**Implementation:** Extend the `def` macro to detect `keyword:` patterns in the parameter list. Generate a body that parses a rest-arg list for keyword/value pairs, falling back to defaults.
+
+```scheme
+;; Desired expansion of keyword def:
+(def (foo x y key1: (key1 default1) key2: (key2 default2)) body ...)
+;; →
+(define (foo x y . kwargs)
+  (let ([key1 (keyword-arg kwargs key1: default1)]
+        [key2 (keyword-arg kwargs key2: default2)])
+    body ...))
+```
+
+**Depends on:** `(jerboa runtime)` keyword utilities (already has `keyword?`, `keyword->string`)
+
+## Track 37: `with-catch` — Exception Handler Shorthand
+
+**Used in:** 85 files, 621 occurrences
+**The single most-used missing API in gerbil-emacs**
+
+```scheme
+;; Gerbil pattern:
+(with-catch
+  (lambda (e) #f)           ;; handler: return #f on error
+  (lambda () (dangerous-op)))  ;; thunk: the guarded code
+
+;; Also common:
+(with-catch
+  (lambda (e) (values 'error e))
+  (lambda () (parse-json input)))
+```
+
+**Current state:** jerboa has `try`/`catch`/`finally` in `(std sugar)` but not the simpler two-argument `with-catch`.
+
+**Implementation:** ~5 lines in `(std sugar)`:
+```scheme
+(define (with-catch handler thunk)
+  (guard (e [#t (handler e)])
+    (thunk)))
+```
+
+## Track 38: `hash` Constructor Macro (Rename)
+
+**Used in:** 10+ files, 168 hash table constructions
+**Critical for JSON-heavy code (AI integration, LSP client)**
+
+Gerbil uses `(hash ...)` to construct hash tables:
+```scheme
+(hash ("model" "gpt-4")
+      ("messages" [(hash ("role" "user")
+                         ("content" prompt))]))
+```
+
+**Current state:** jerboa has `hash-literal` which does the same thing, but under a different name.
+
+**Implementation:** Add `hash` as an alias for `hash-literal` and `hash-eq` for `hash-eq-literal`:
+```scheme
+(define-syntax hash
+  (syntax-rules ()
+    [(_ args ...) (hash-literal args ...)]))
+```
+
+**Also need:** Square bracket `[...]` syntax for list literals (Gerbil convention). Chez already supports `[...]` as equivalent to `(...)` in most contexts.
+
+## Track 39: `struct-out` Export Helper
+
+**Used in:** 33 files with `(export #t)`, 14 with selective exports, 8 struct-heavy modules
+
+Gerbil's `(export (struct-out typename))` automatically exports the constructor, predicate, and all field accessors/mutators:
+```scheme
+(export (struct-out buffer))
+;; Expands to: (export make-buffer buffer? buffer-name buffer-file-path ...)
+```
+
+**Current state:** Not implemented. Users must manually list every accessor.
+
+**Implementation:** A macro that expands by looking up the registered struct type info:
+```scheme
+(define-syntax struct-out
+  (lambda (stx)
+    (syntax-case stx ()
+      [(_ type-name)
+       ;; Look up type in *struct-types* at expansion time
+       ;; Generate export list: make-TYPE TYPE? TYPE-field1 TYPE-field1-set! ...
+       ...])))
+```
+
+**Depends on:** `(jerboa core)` struct type registry (`*struct-types*`, `register-struct-type!`)
+
+## Track 40: `cut` / `cute` — SRFI-26 Partial Application
+
+**Used in:** 5+ files, lightweight but idiomatic
+**Prevents verbose `lambda` wrappers**
+
+```scheme
+;; Gerbil:
+(map (cut string-append "prefix-" <>) items)
+;; Instead of:
+(map (lambda (x) (string-append "prefix-" x)) items)
+
+;; With multiple slots:
+(cut string-append <> "-" <>)
+;; → (lambda (a b) (string-append a "-" b))
+```
+
+**Current state:** Not implemented.
+
+**Implementation:** ~20 lines as a `syntax-rules` macro:
+```scheme
+(define-syntax cut
+  (syntax-rules (<> <...>)
+    [(_ expr ...)
+     (cut-helper () (expr ...))]))
+
+(define-syntax cut-helper
+  (syntax-rules (<> <...>)
+    [(_ (args ...) ())
+     (lambda (args ...) (orig ...))]
+    [(_ (args ...) (<> rest ...))
+     (cut-helper (args ... x) (rest ...))]
+    ...))
+```
+
+## Track 41: Gerbil-Style Import/Export Translation Layer
+
+**Used in:** All 147 files
+**The biggest mechanical translation burden**
+
+Every gerbil-emacs file starts with:
+```scheme
+(import :std/sugar
+        :std/iter
+        :std/sort
+        :gerbil-scintilla/constants
+        :gemacs/core)
+```
+
+Jerboa uses R6RS `(import (std sugar) (std iter) ...)`.
+
+**Implementation:** A `gerbil-import` macro that translates `:std/foo` → `(std foo)` and `:pkg/mod` → `(pkg mod)`:
+```scheme
+(define-syntax gerbil-import
+  (lambda (stx)
+    (syntax-case stx ()
+      [(_ spec ...)
+       (with-syntax ([(translated ...) (map translate-import-spec #'(spec ...))])
+         #'(import translated ...))])))
+```
+
+Also: `(export #t)` auto-export macro that re-exports all definitions.
+
+**Note:** This is a convenience layer — files can always be converted manually, but automating it makes bulk porting feasible.
+
+## Track 42: `for/fold` and `for/collect` — Iterator Macros
+
+**Used in:** While gerbil-emacs uses `map`/`fold` directly (not `for/list`), the Gerbil `:std/iter` module is imported in 15+ files.
+
+Common `:std/iter` patterns:
+```scheme
+(import :std/iter)
+
+;; for-each with index
+(for ((x items) (i (in-naturals)))
+  (display (format "~a: ~a\n" i x)))
+
+;; collect results
+(for/collect ((x items))
+  (string-upcase x))
+
+;; fold with accumulator
+(for/fold ((acc 0)) ((x items))
+  (+ acc x))
+```
+
+**Current state:** jerboa has transducers and lazy sequences, but not Gerbil's `for` macro family.
+
+**Implementation:** ~80 lines. Core `for` macro with `in-list`, `in-range`, `in-vector`, `in-hash-keys`, `in-hash-values` iterators:
+```scheme
+(define-syntax for
+  (syntax-rules ()
+    [(_ ((var iter-expr)) body ...)
+     (iter-for-each (lambda (var) body ...) iter-expr)]))
+
+(define (in-list lst) lst)
+(define (in-range n) (iota n))
+(define (in-naturals) ...)
+```
+
+## Track 43: `begin-ffi` / `begin-foreign` — FFI Block Macro
+
+**Used in:** 5 files (pty.ss, terminal.ss, subprocess.ss, signal handling)
+**Critical for porting native terminal/PTY code**
+
+Gerbil's `begin-ffi` wraps Gambit's `c-declare`/`c-lambda`:
+```scheme
+(begin-ffi (ffi-pty-spawn ffi-pty-read ffi-pty-write ffi-pty-close)
+  (c-declare "#include <pty.h>")
+  (define ffi-pty-spawn
+    (c-lambda (char-string) int "forkpty_spawn")))
+```
+
+**Current state:** jerboa has `(jerboa ffi)` with `begin-ffi` that uses `foreign-procedure`.
+
+**Implementation:** The existing `begin-ffi` needs to handle the Gerbil calling convention. Map Gambit FFI types to Chez types:
+- `char-string` → `string`
+- `int` → `int`
+- `void*` → `void*`
+- `scheme-object` → `scheme-object`
+
+## Track 44: `##` Gambit Primitives Compatibility
+
+**Used in:** 5 files, ~10 occurrences
+**Needed for:** debugging (`##object->string`), system info (`##cpu-count`)
+
+```scheme
+(gemacs-log! "async error: " (##object->string e))
+(max 1 (quotient (##cpu-count) 2))
+```
+
+**Current state:** Not implemented.
+
+**Implementation:** Provide compatibility bindings for the ~5 Gambit `##` primitives actually used:
+```scheme
+;; In (std compat gambit)
+(define (##object->string obj)
+  (call-with-string-output-port
+    (lambda (p) (write obj p))))
+
+(define (##cpu-count)
+  (let ([n (foreign-procedure "sysconf" (long) long)])
+    (n 84)))  ;; _SC_NPROCESSORS_ONLN = 84 on Linux
+```
+
+## Track 45: HTTP Client Implementation
+
+**Used in:** 4 files, ~8 call sites
+**Critical for:** AI/copilot integration, web features, LSP
+
+```scheme
+(http-get url)
+(http-post url
+  headers: [("Content-Type" . "application/json")]
+  data: (json-object->string payload))
+```
+
+**Current state:** `(std net request)` exists as a stub — exports declared but no implementation.
+
+**Implementation:** ~150 lines using the TCP module from Track 33 plus TLS via FFI:
+```scheme
+(define (http-get url . kwargs)
+  (let-values ([(scheme host port path) (parse-url url)])
+    (let-values ([(in out) (if (string=? scheme "https")
+                             (tls-connect host port)
+                             (tcp-connect host port))])
+      (put-string out (format "GET ~a HTTP/1.1\r\nHost: ~a\r\n\r\n" path host))
+      (flush-output-port out)
+      (parse-http-response in))))
+```
+
+**Depends on:** Track 33 (TCP), OpenSSL FFI for HTTPS
+
+## Dependency Order
+
+```
+Track 37 (with-catch)    ← no deps, ~5 lines
+Track 38 (hash alias)    ← no deps, ~5 lines
+Track 40 (cut/cute)      ← no deps, ~30 lines
+Track 44 (## compat)     ← no deps, ~20 lines
+Track 36 (keyword args)  ← extends (jerboa core), ~60 lines
+Track 39 (struct-out)    ← uses struct registry, ~40 lines
+Track 41 (import/export) ← translation layer, ~80 lines
+Track 42 (for/collect)   ← iterator macros, ~80 lines
+Track 43 (begin-ffi)     ← extends (jerboa ffi), ~50 lines
+Track 45 (HTTP client)   ← uses Track 33 TCP, ~150 lines
+```
+
+Build order: (37, 38, 40, 44 in parallel) → (36, 39, 42) → (41, 43) → 45
+
+## Phase 8 Total
+
+~520 lines of implementation across 10 tracks, closing the remaining gaps for mechanical gerbil-emacs porting.
+
+## Porting Effort After Phase 8
+
+With Phases 7 + 8 complete (~990 lines total), porting gerbil-emacs becomes:
+1. **Find-and-replace imports** — `:std/foo` → `(std foo)` (automated by Track 41)
+2. **`#!chezscheme` header** — add to each file
+3. **`begin-ffi` blocks** — translate `c-lambda` → `foreign-procedure` (Track 43 handles most)
+4. **`##` primitives** — 5 substitutions total (Track 44)
+5. **Everything else** — compatible as-is
