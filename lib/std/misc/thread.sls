@@ -18,6 +18,9 @@
 
 (library (std misc thread)
   (export
+    ;; Gerbil-compatible spawn (starts immediately, returns thread)
+    spawn spawn/name spawn/group
+
     ;; Thread operations
     make-thread thread-start! thread-join!
     thread-yield! thread-sleep!
@@ -294,5 +297,16 @@
           [else
            (mutex-release mx)
            #f]))))
+
+  ;;;; Gerbil-compatible spawn — create and start thread in one call
+
+  (define (spawn thunk)
+    (thread-start! (make-thread thunk)))
+
+  (define (spawn/name name thunk)
+    (thread-start! (make-thread thunk name)))
+
+  (define (spawn/group group thunk)
+    (thread-start! (make-thread thunk group)))
 
   ) ;; end library

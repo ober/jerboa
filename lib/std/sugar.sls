@@ -10,7 +10,8 @@
     let-hash
     defrule defrules
     chain chain-and with-id
-    assert!)
+    assert!
+    with-lock)
   (import (except (chezscheme)
             make-hash-table hash-table? iota 1+ 1-)
           (jerboa core))
@@ -95,5 +96,15 @@
          (lambda () (void))
          (lambda () body)
          (lambda () cleanup ...))]))
+
+  ;; with-lock — acquire Chez mutex, run body, release even on exception
+  (define-syntax with-lock
+    (syntax-rules ()
+      [(_ mutex-expr body body* ...)
+       (let ([m mutex-expr])
+         (dynamic-wind
+           (lambda () (mutex-acquire m))
+           (lambda () body body* ...)
+           (lambda () (mutex-release m))))]))
 
   ) ;; end library

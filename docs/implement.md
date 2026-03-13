@@ -3405,3 +3405,200 @@ Track 28 (Error Diagnostics) ← uses inspect/object, independent
 Build order: 20 → (21, 22, 23, 27, 28 in parallel) → (24, 25, 26) → 29
 
 Phase 6 turns Jerboa from a language that *can* build systems programs (with enough C glue and platform hacks) into a language that makes systems programming *natural*. The difference: 1,977 lines of workarounds become 260 lines of clean imports.
+
+---
+
+# Phase 7: Gerbil Application Porting — The Missing Pieces
+
+## Motivation
+
+Jerboa already has extensive Gerbil API compatibility: hash tables (`hash-put!`/`hash-get`), `defstruct`, `defclass`, `defmethod`, `match`, `try`/`catch`/`finally`, channels, threads (Gambit API), and most of `:std/sugar`. However, porting real Gerbil applications (like gerbil-emacs, ~88K lines) reveals specific gaps that cause friction across nearly every source file.
+
+### What Already Works
+
+| Feature | Module | Status |
+|---------|--------|--------|
+| Hash tables (Gerbil API) | `(jerboa runtime)` | Complete — `hash-put!`, `hash-get`, `hash-ref`, `hash->list`, etc. |
+| `defstruct` / `defclass` | `(jerboa core)` | Complete — with inheritance support |
+| `defmethod` | `(jerboa core)` | Complete — runtime method dispatch |
+| `match` | `(jerboa core)` | Complete — pattern matching |
+| `try`/`catch`/`finally` | `(std sugar)` | Complete |
+| `while`/`until` | `(std sugar)` | Complete |
+| `unwind-protect` | `(std sugar)` | Complete |
+| Channels | `(std misc channel)` | Complete — O(1) ring buffer with `channel-select` |
+| Threads (Gambit API) | `(std misc thread)` | Complete — `make-thread`, `thread-start!`, `thread-join!` |
+| Mutexes/Condvars | `(std misc thread)` | Complete — Gambit-compatible API |
+| Thread mailboxes | `(std misc thread)` | Complete — `thread-send`, `thread-receive` |
+| JSON | `(std text json)` | Complete |
+| Format/printf | `(std format)` | Complete |
+| SRFI-13 | `(std srfi srfi-13)` | Complete |
+| SRFI-19 | `(std srfi srfi-19)` | Complete |
+| Process execution | `(std misc process)` | Partial — `run-process` returns string, no port access |
+| POSIX FFI | `(std os posix)` | Complete — pipe, fork, open, stat, etc. |
+| FD management | `(std os fd)` | Complete — `spawn-process`, `fd-pipe`, `with-fds` |
+
+### What's Missing (This Phase)
+
+| Track | Feature | Impact | Est. Lines |
+|-------|---------|--------|-----------|
+| 30 | `spawn` / `spawn/name` / `spawn/group` | Every background task | ~30 |
+| 31 | Atoms (`atom`, `atom-deref`, `atom-reset!`, `atom-swap!`) | Thread-safe state | ~40 |
+| 32 | Read-Write Locks (`make-rwlock`, `with-read-lock`, `with-write-lock`) | Shared state | ~60 |
+| 33 | TCP Server (`tcp-listen`, `tcp-accept`, `tcp-connect`) | Networking/IPC | ~200 |
+| 34 | Process Ports (`open-input-process`, `open-output-process`, `process-port-pid`) | Shell/REPL/linter | ~120 |
+| 35 | `with-lock` macro and `unwind-protect` enhancements | Cleanup patterns | ~20 |
+| **Total** | | | **~470** |
+
+---
+
+## Track 30: `spawn` / `spawn/name` / `spawn/group`
+
+**Module**: `(std misc thread)` — extend existing
+
+**What**: Gerbil's `spawn` is the primary way to create background threads. It's used ~50 times in gerbil-emacs alone.
+
+```scheme
+(spawn thunk)                    ;; → thread (started immediately)
+(spawn/name "worker" thunk)      ;; → thread with name
+(spawn/group "pool" thunk)       ;; → thread in named group
+```
+
+**Implementation**: Thin wrappers around existing `make-thread` + `thread-start!`.
+
+```scheme
+(define (spawn thunk)
+  (thread-start! (make-thread thunk)))
+
+(define (spawn/name name thunk)
+  (thread-start! (make-thread thunk name)))
+
+(define (spawn/group group thunk)
+  (thread-start! (make-thread thunk group)))
+```
+
+---
+
+## Track 31: Atoms — Thread-Safe Mutable References
+
+**Module**: `(std misc atom)` — new
+
+**What**: Gerbil's `atom` is a mutable cell with optional mutex protection, used for background thread state (file indices, caches). Used ~20 times in gerbil-emacs.
+
+```scheme
+(define counter (atom 0))
+(atom-deref counter)            ;; → 0
+(atom-reset! counter 42)        ;; set to 42
+(atom-swap! counter add1)       ;; atomically apply function
+(atom-update! counter + 10)     ;; atomically apply with extra args
+```
+
+**Implementation**: Record type + mutex for thread safety.
+
+---
+
+## Track 32: Read-Write Locks
+
+**Module**: `(std misc rwlock)` — new
+
+**What**: Gerbil's `:std/misc/rwlock` provides concurrent-read / exclusive-write locking. Used for shared data structures accessed from multiple threads.
+
+```scheme
+(define lock (make-rwlock))
+(with-read-lock lock (lambda () (read-shared-data)))
+(with-write-lock lock (lambda () (update-shared-data!)))
+```
+
+**Implementation**: Classic readers-writer lock via Chez mutex + condition variables.
+
+---
+
+## Track 33: TCP Server — Socket Networking
+
+**Module**: `(std net tcp)` — new
+
+**What**: Gerbil applications use `open-tcp-server` for IPC (emacsclient-like remote control), HTTP servers, and service networking. This is a hard requirement for any networked application.
+
+```scheme
+;; Server
+(define server (tcp-listen "127.0.0.1" 8080))
+(let-values ([(in out) (tcp-accept server)])
+  (display "hello\n" out)
+  (flush-output-port out)
+  (close-port in)
+  (close-port out))
+(tcp-close server)
+
+;; Client
+(let-values ([(in out) (tcp-connect "127.0.0.1" 8080)])
+  (display (read-line in))
+  (close-port in)
+  (close-port out))
+```
+
+**Implementation**: POSIX socket FFI (`socket`, `bind`, `listen`, `accept`, `connect`) wrapped into Scheme ports via `make-custom-binary-input/output-port` or Chez's transcoded ports.
+
+---
+
+## Track 34: Process Ports — Subprocess I/O as Ports
+
+**Module**: `(std misc process)` — extend existing
+
+**What**: Gerbil's `open-process` returns a bidirectional port connected to a subprocess. Used for interactive shells, REPLs, and linters that need to send input and read output incrementally (not batch).
+
+```scheme
+;; Open a subprocess with port-based I/O
+(let ([proc (open-input-process '("ls" "-la"))])
+  (let loop ()
+    (let ([line (read-line proc)])
+      (unless (eof-object? line)
+        (displayln line)
+        (loop))))
+  (close-input-port proc))
+
+;; Bidirectional
+(let ([proc (open-process '("python3" "-i"))])
+  (display "print(1+2)\n" proc)
+  (flush-output-port proc)
+  (displayln (read-line proc))
+  (close-port proc))
+```
+
+**Implementation**: Uses POSIX `pipe` + `fork` + `execvp` to create subprocess, then wraps the pipe FDs as Chez Scheme ports. Builds on existing `(std os posix)` and `(std io raw)`.
+
+---
+
+## Track 35: `with-lock` Macro
+
+**Module**: `(std sugar)` — extend existing
+
+**What**: Common Gerbil pattern for mutex-protected critical sections. Cleaner than manual `mutex-lock!`/`unwind-protect`/`mutex-unlock!`.
+
+```scheme
+(with-lock my-mutex
+  (modify-shared-state!))
+```
+
+**Implementation**: Syntax-rules macro expanding to `dynamic-wind` or `unwind-protect`.
+
+---
+
+## Dependency Order
+
+```
+Track 30 (spawn) ← extends (std misc thread), no deps
+Track 31 (atoms) ← uses Chez mutexes, no deps
+Track 32 (rwlock) ← uses Chez mutexes + conditions, no deps
+Track 33 (TCP) ← uses (std os posix) for socket FFI
+Track 34 (process ports) ← uses (std os posix) + (std io raw)
+Track 35 (with-lock) ← extends (std sugar), no deps
+```
+
+Build order: (30, 31, 32, 35 in parallel) → (33, 34)
+
+## Porting Effort After Phase 7
+
+With these ~470 lines implemented, porting gerbil-emacs becomes mechanical translation:
+- **100% of import lines** map to jerboa modules
+- **100% of concurrency patterns** have direct equivalents
+- **100% of data structures** have compatible APIs
+- Remaining work is Gambit→Chez FFI translation (`begin-ffi` → `foreign-procedure`) which is module-specific, not pervasive

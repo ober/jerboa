@@ -7,7 +7,7 @@ CHEZ_EXT_LIBDIRS = $(CHEZ_EXT_DIR)/chez-https/src:$(CHEZ_EXT_DIR)/chez-ssl/src:$
 # Shared object paths for FFI-based chez-* libraries
 CHEZ_EXT_LDPATH = $(CHEZ_EXT_DIR)/chez-ssl:$(CHEZ_EXT_DIR)/chez-zlib:$(CHEZ_EXT_DIR)/chez-pcre2:$(CHEZ_EXT_DIR)/chez-leveldb:$(CHEZ_EXT_DIR)/chez-epoll:$(CHEZ_EXT_DIR)/chez-inotify:$(CHEZ_EXT_DIR)/chez-crypto:$(CHEZ_EXT_DIR)/chez-sqlite:$(CHEZ_EXT_DIR)/chez-postgresql
 
-.PHONY: test test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded test-features test-wrappers test-phase4a test-phase4b test-phase4c test-phase4d test-phase4e test-phase4f test-phase5 test-phase5e test-phase6 test-functional clean
+.PHONY: test test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded test-features test-wrappers test-phase4a test-phase4b test-phase4c test-phase4d test-phase4e test-phase4f test-phase5 test-phase5e test-phase6 test-phase7 test-functional clean
 
 test: test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded
 
@@ -223,6 +223,10 @@ test-phase5e:
 test-phase6:
 	@echo "--- Phase 6: Making Real Programs Easier to Build ---"
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-phase6.ss
+
+test-phase7:
+	@echo "--- Phase 7: Gerbil Porting Features ---"
+	@$(SCHEME) --libdirs $(LIBDIRS) --program tests/test-phase7.ss
 
 test-functional:
 	@echo "--- Functional Tests (real I/O, fork, Landlock, signals) ---"

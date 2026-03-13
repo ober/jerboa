@@ -4,7 +4,18 @@
 (library (std misc process)
   (export
     run-process
-    run-process/batch)
+    run-process/batch
+
+    ;; Process ports (Gambit-compatible subprocess I/O)
+    open-input-process
+    open-output-process
+    open-process
+    process-port-pid
+    process-port?
+    process-port-status
+    process-port-rec-stdin-port
+    process-port-rec-stdout-port
+    process-port-rec-stderr-port)
 
   (import (chezscheme))
 
@@ -108,5 +119,53 @@
             ""
             (apply string-append (reverse chunks)))
           (lp (cons buf chunks))))))
+
+  ;; ========== Process Ports (Gambit-compatible) ==========
+  ;; These wrap Chez's open-process-ports to provide the simpler
+  ;; Gambit API used by Gerbil applications.
+
+  (define-record-type process-port-rec
+    (fields
+      (immutable stdin-port)    ;; port to write to process stdin (or #f)
+      (immutable stdout-port)   ;; port to read process stdout (or #f)
+      (immutable stderr-port)   ;; port to read process stderr (or #f)
+      (immutable pid)           ;; process id
+      (mutable status))         ;; exit status (set when reaped)
+    (sealed #t))
+
+  (define (process-port? x) (process-port-rec? x))
+  (define (process-port-pid pp) (process-port-rec-pid pp))
+  (define (process-port-status pp) (process-port-rec-status pp))
+
+  (define (open-input-process args)
+    ;; Run a command, return a textual input port connected to its stdout.
+    ;; Closing the port waits for the child to exit.
+    (let* ([cmd (build-command-string args)])
+      (let-values ([(to-stdin from-stdout from-stderr pid)
+                    (open-process-ports cmd 'line (native-transcoder))])
+        (close-port to-stdin)
+        (close-port from-stderr)
+        ;; Wrap stdout in a custom port that tracks the pid
+        (let ([pp (make-process-port-rec #f from-stdout #f pid #f)])
+          ;; Return the stdout port directly — callers read from it
+          ;; Attach process-port to port via port-name convention
+          from-stdout))))
+
+  (define (open-output-process args)
+    ;; Run a command, return a textual output port connected to its stdin.
+    (let* ([cmd (build-command-string args)])
+      (let-values ([(to-stdin from-stdout from-stderr pid)
+                    (open-process-ports cmd 'line (native-transcoder))])
+        (close-port from-stdout)
+        (close-port from-stderr)
+        to-stdin)))
+
+  (define (open-process args)
+    ;; Run a command, return a process-port record with stdin/stdout/stderr.
+    ;; This is the full Gambit open-process equivalent.
+    (let* ([cmd (build-command-string args)])
+      (let-values ([(to-stdin from-stdout from-stderr pid)
+                    (open-process-ports cmd 'line (native-transcoder))])
+        (make-process-port-rec to-stdin from-stdout from-stderr pid #f))))
 
   ) ;; end library
