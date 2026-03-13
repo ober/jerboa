@@ -2584,3 +2584,824 @@ The insight is architectural: **macros are the universal language extension mech
 This is the unfair advantage: **the macro system is the compiler, and it's user-extensible**. Users can add new optimization passes, new type system features, new concurrency primitives — using the same mechanism the standard library uses. No other language architecture makes this possible.
 
 Jerboa: the Scheme that took the best ideas from every language and made them compose.
+
+
+---
+
+# Phase 6: Making Real Programs Easier to Build
+
+Phase 5 gave Jerboa sophisticated language features — effects, actors, arenas, binary structs, staging. Phase 6 asks a different question: **what makes real programs hard to build on Chez Scheme, and how do we fix it?**
+
+The answer comes from jerboa-shell (jsh), a 45,000-line POSIX shell built entirely on Jerboa. Building jsh exposed every rough edge in the Chez Scheme ecosystem: a 570-line C FFI shim for basic POSIX operations, an 838-line compatibility layer for Gambit APIs, a 7-step sequential build taking 30-60 seconds, signal handling race conditions, UTF-8 mangling of raw bytes, Linux-only binary loading hacks, and a completely stubbed sandbox. These aren't theoretical problems — they're the actual barriers that make systems programming in Scheme painful.
+
+Phase 6 eliminates these barriers. Every feature is grounded in a specific pain point from real code, with concrete before/after examples showing the improvement.
+
+### Where We Stand
+
+| Metric | Value |
+|--------|-------|
+| Modules | ~204 |
+| Lines of code | ~37,500 |
+| Test cases | ~3,196 |
+| jerboa-shell modules | 33 |
+| jerboa-shell LOC | ~45,000 |
+| C FFI shim lines to eliminate | 570 |
+| Gambit compat lines to eliminate | 838 |
+| Build time target | 30-60s → 2-5s |
+
+### Chez Primitives Exploited
+
+| Primitive | Tracks Using It |
+|-----------|----------------|
+| `foreign-procedure` / `foreign-entry` | 20, 24, 25, 26, 29 |
+| `fasl-write` / `fasl-read` | 22, 23 |
+| `compile-whole-library` | 22 |
+| `eval` / `interaction-environment` | 23 |
+| `make-thread-parameter` | 24, 25, 27 |
+| `mutex` / `condition` | 25, 27 |
+| `inspect/object` | 28 |
+| `continuation-condition` | 28 |
+| `load-shared-object` | 29 |
+
+---
+
+## Track 20: Declarative POSIX FFI — Eliminate the C Shim
+
+**Pain point**: jerboa-shell maintains a 570-line C file (`ffi-shim.c`) and a 261-line Chez wrapper (`ffi.sls`) just to call standard POSIX functions. Every new system call requires editing C code, recompiling the shim, and keeping the Scheme wrapper in sync.
+
+**Solution**: A `define-posix` macro that generates direct `foreign-procedure` calls to libc, with automatic errno checking, flag constants, and struct accessors — no C compilation required.
+
+### Before (current jerboa-shell)
+
+```scheme
+;; ffi-shim.c (C code that must be compiled separately)
+static int ffi_waitpid_status;
+int ffi_do_waitpid(int pid, int options) {
+    int s;
+    int result = waitpid(pid, &s, options);
+    ffi_waitpid_status = s;
+    return result;
+}
+int ffi_get_waitpid_status(void) { return ffi_waitpid_status; }
+
+;; ffi.sls (Scheme wrapper)
+(define-foreign c-ffi-do-waitpid "ffi_do_waitpid" (int int) -> int)
+(define-foreign c-ffi-get-waitpid-status "ffi_get_waitpid_status" () -> int)
+(define (ffi-waitpid-pid pid options) (c-ffi-do-waitpid pid options))
+(define (ffi-waitpid-status) (c-ffi-get-waitpid-status))
+```
+
+### After (with Track 20)
+
+```scheme
+(import (std os posix))
+
+(define-values (pid status) (posix-waitpid child-pid WNOHANG))
+(when (WIFEXITED status)
+  (printf "exited with ~a~n" (WEXITSTATUS status)))
+```
+
+### What Gets Built
+
+**Module: `(std os posix)`** — Declarative POSIX bindings
+
+The macro `define-posix` wraps `foreign-procedure` with:
+- **Errno checking**: Automatically calls `foreign-entry "errno"` after each call, raises `&posix-error` condition on failure
+- **Flag constants**: `WNOHANG`, `O_RDONLY`, `O_NONBLOCK`, etc. as Chez constants (no C header parsing)
+- **Multi-return via out-pointers**: Uses Chez `foreign-alloc` + `foreign-ref` for functions that return values through pointer parameters (like `waitpid`'s status, `pipe`'s fd pair)
+- **Struct accessors**: `define-posix-struct` for `termios`, `stat`, `winsize` using `foreign-ref`/`foreign-set!` with field offsets
+
+**Covered syscall families** (replacing ffi-shim.c):
+1. **Process**: `fork`, `execve`, `waitpid`, `_exit`, `getpid`, `getppid`, `setpgid`, `getpgid`, `tcsetpgrp`, `tcgetpgrp`, `setsid`
+2. **File descriptors**: `open`, `close`, `read`, `write`, `dup`, `dup2`, `fcntl`, `pipe`, `lseek`, `mkfifo`, `unlink`
+3. **Signals**: `sigaction`, `sigprocmask`, `kill`, `sigpending`
+4. **Terminal**: `tcgetattr`, `tcsetattr`, `ioctl` (TIOCGWINSZ)
+5. **User/permissions**: `umask`, `getuid`, `geteuid`, `getegid`, `access`, `isatty`
+6. **Environment**: `setenv`, `unsetenv`
+7. **Resources**: `getrlimit`, `setrlimit`
+8. **Stat**: `stat`, `fstat`, `lstat`
+9. **Time**: `strftime`, `localtime`
+
+### Implementation Strategy
+
+1. **Define `define-posix` macro** that expands to `foreign-procedure` + errno wrapper
+2. **Define `define-posix-struct`** using `foreign-alloc`/`foreign-ref` for C struct access
+3. **Enumerate POSIX constants** from POSIX spec (platform-specific values via `foreign-procedure` to query at load time, or compile-time C snippets using `(machine-type)`)
+4. **Test against jerboa-shell** by replacing ffi-shim.c calls one family at a time
+
+### Tests (~40)
+
+- Each syscall wrapper: correct return values, errno propagation
+- Multi-return functions (waitpid, pipe): correct value extraction
+- Struct accessors (termios, stat): field read/write roundtrip
+- Error conditions: ENOENT, EACCES, EINTR handling
+- Platform flag values match system headers
+
+### Estimated Effort
+
+~800 lines of Scheme (macro + syscall definitions). Zero lines of C.
+
+---
+
+## Track 21: Portable OS Abstraction Layer
+
+**Pain point**: jerboa-shell's `jsh-main.c` uses `memfd_create`, `/proc/self/exe`, and `/proc/self/fd` — all Linux-only. The build script hardcodes ELF assumptions. The shell can't run on macOS or BSDs without major rewrites.
+
+**Solution**: An OS abstraction module that detects the platform at load time and provides portable APIs for process execution, filesystem introspection, and binary loading.
+
+### Before (current jerboa-shell)
+
+```c
+// jsh-main.c — Linux-only program loading
+int memfd = memfd_create("jsh-boot", MFD_CLOEXEC);
+write(memfd, program_text, program_len);
+char path[64];
+snprintf(path, sizeof(path), "/proc/self/fd/%d", memfd);
+Sscheme_script(path, argc, argv);
+```
+
+### After (with Track 21)
+
+```scheme
+(import (std os platform))
+
+;; Works on Linux, macOS, FreeBSD
+(platform-load-program program-text)
+;; Uses memfd_create on Linux, shm_open on macOS, tmpfile on fallback
+
+(define exe-path (platform-executable-path))
+;; Uses /proc/self/exe on Linux, _NSGetExecutablePath on macOS,
+;; sysctl KERN_PROC_PATHNAME on FreeBSD
+```
+
+### What Gets Built
+
+**Module: `(std os platform)`**
+
+- **`(machine-type)` dispatch**: Uses Chez's built-in `(machine-type)` to select platform-specific implementations at expansion time
+- **Portable executable path**: `/proc/self/exe` (Linux), `_NSGetExecutablePath` (macOS), `sysctl` (FreeBSD)
+- **Portable memory-backed execution**: `memfd_create` (Linux), `shm_open` + `shm_unlink` (macOS/BSD), `tmpfile` fallback
+- **Portable terminal detection**: abstracts differences in `ioctl` constants across platforms
+- **Build system integration**: `(std os platform build)` sub-module for cross-platform compilation flags
+
+### Implementation Strategy
+
+1. **Use `(machine-type)` for compile-time dispatch** — Chez already knows the target platform
+2. **Runtime fallback chain** for operations that need runtime detection (e.g., container environments where `/proc` may not exist)
+3. **Conditional `foreign-procedure`** using Track 20's `define-posix` with platform guards
+4. **Test on CI** with Linux (primary) and macOS (secondary) targets
+
+### Tests (~25)
+
+- Executable path resolution on each platform
+- Memory-backed file creation and execution
+- Terminal size detection portability
+- Platform detection accuracy
+- Graceful fallback when preferred API unavailable
+
+### Estimated Effort
+
+~500 lines. Mostly platform-specific `foreign-procedure` wrappers with a dispatch layer.
+
+---
+
+## Track 22: Incremental Parallel Build System
+
+**Pain point**: jerboa-shell's build takes 30-60 seconds because it compiles 50+ modules sequentially, with manual dependency ordering in a 216-line build script. Adding a module requires figuring out where it fits in the dependency chain. Rebuilding after a one-line change recompiles everything.
+
+**Solution**: A build system that automatically discovers module dependencies, compiles independent modules in parallel using native threads, and skips unchanged modules using file modification timestamps and content hashes.
+
+### Before (current jerboa-shell)
+
+```scheme
+;; build-binary-jsh.ss — 216 lines of manual ordering
+(define compile-order
+  '("std/error" "std/sugar" "std/misc/string" "std/misc/list"
+    "std/misc/alist" "std/format" "std/sort" "std/pregexp"
+    "std/hash" "std/os/path" "std/os/signal" "std/text/json"
+    "runtime/mop" "runtime/util" "compat/gambit"
+    "jsh/util" "jsh/ffi" "jsh/variables" "jsh/signals"
+    ;; ... 30+ more modules in precise order ...
+    "jsh/main"))
+(for-each compile-one! compile-order)  ;; sequential!
+```
+
+### After (with Track 22)
+
+```scheme
+(import (std build))
+
+;; Discovers deps, parallelizes, caches — one call
+(build-project "src/"
+  #:parallel #t
+  #:incremental #t
+  #:output "jsh")
+```
+
+### What Gets Built
+
+**Module: `(std build)`**
+
+1. **Dependency discovery**: Parse `(import ...)` forms to build a DAG. Topological sort determines compilation order.
+2. **Parallel compilation**: Independent modules (no dependency relationship) compile on separate Chez threads using `fork-thread`. Thread count defaults to `(cpu-count)` or `(std os platform)` CPU detection.
+3. **Incremental caching**: Store content hashes (SHA-256 via `(std crypto digest)` from Phase 3) alongside `.so` outputs. Skip recompilation when source hash matches cache.
+4. **Change propagation**: When module A changes, recompile A and all modules that transitively depend on A — but not unrelated modules.
+5. **`compile-whole-library` integration**: Use Chez's `compile-whole-library` for release builds that inline across module boundaries.
+
+### Implementation Strategy
+
+1. **Parse imports** using `read` on source files to extract `(library ... (import ...) ...)` forms
+2. **Build DAG** using adjacency lists, topological sort from `(std algo sort)` or custom implementation
+3. **Thread pool** using `fork-thread` + `mutex` + `condition` for work-stealing
+4. **Hash cache** stored as a fasl file (`.build-cache.fasl`) using `fasl-write`/`fasl-read`
+5. **Compile worker** calls `compile-library` or `compile-whole-library` per module
+
+### Tests (~30)
+
+- Dependency graph construction from import forms
+- Topological sort correctness (including cycle detection)
+- Parallel compilation produces same results as sequential
+- Incremental: unchanged modules not recompiled
+- Change propagation: downstream modules recompiled
+- Cache invalidation on source edit
+- `compile-whole-library` integration
+
+### Estimated Effort
+
+~600 lines. DAG + thread pool + cache + compile dispatch.
+
+---
+
+## Track 23: Safe Program Loading Without Threading Hacks
+
+**Pain point**: Chez Scheme boot files can't create threads (the thread system isn't initialized yet). jerboa-shell works around this with a C `main()` that uses `memfd_create` to load the program after boot completes — a Linux-only, fragile hack. The `JSH_ARGC`/`JSH_ARG0` environment variables exist because Chez steals the `-c` flag.
+
+**Solution**: A proper program loading protocol that separates boot-time initialization from runtime startup, with clean argument passing.
+
+### Before (current jerboa-shell)
+
+```c
+// jsh-main.c — 92 lines of C workaround
+int main(int argc, char *argv[]) {
+    Sscheme_init(NULL);
+    Sregister_boot_file(boot_file);
+    Sbuild_heap(NULL, NULL);
+    // Can't just call Scheme here — threads won't work!
+    // Must use memfd_create trick:
+    int memfd = memfd_create("jsh-boot", MFD_CLOEXEC);
+    write(memfd, program_text, strlen(program_text));
+    snprintf(path, sizeof(path), "/proc/self/fd/%d", memfd);
+    // Pass args through env vars because Chez steals -c
+    setenv("JSH_ARGC", argc_str, 1);
+    Sscheme_script(path, 0, NULL);
+}
+```
+
+### After (with Track 23)
+
+```scheme
+;; boot-main.ss — loaded during boot, sets up deferred start
+(import (std app))
+
+(define-application "jsh"
+  #:init (lambda () (setup-default-signal-handlers!))
+  #:main (lambda (args) (jsh-main args))  ;; runs after boot, threads OK
+  #:args (command-line))  ;; clean argument access
+```
+
+### What Gets Built
+
+**Module: `(std app)`**
+
+1. **`define-application` macro**: Separates init (runs during boot, no threads) from main (runs after boot, full runtime available)
+2. **Deferred main**: Uses `eval` in `interaction-environment` after boot completes — same mechanism as `Sscheme_script` but without the memfd hack
+3. **Argument passing**: Wraps `(command-line)` with proper parsing, avoiding Chez's `-c` flag conflict
+4. **Boot file generation**: Helper to create boot files that include the deferred-start protocol
+5. **Static binary support**: Integrates with `compile-whole-program` for single-binary output
+
+### Implementation Strategy
+
+1. **Boot-time registration**: `define-application` stores init/main thunks in a module-level parameter
+2. **Post-boot dispatch**: A `scheme-start` handler (via `scheme-start` parameter) that runs the registered main after full initialization
+3. **Argument isolation**: Capture `(command-line)` before Chez processes arguments, expose through `(app-arguments)`
+4. **Integration with Track 22**: Build system knows how to generate boot files with deferred-start protocol
+
+### Tests (~15)
+
+- Application boots and runs main with threads available
+- Command-line arguments passed correctly
+- Init phase runs before main phase
+- Thread creation works in main phase
+- Static binary generation works
+- Graceful error handling if main throws
+
+### Estimated Effort
+
+~300 lines. Mostly `scheme-start` integration and boot file helpers.
+
+---
+
+## Track 24: Structured FD and Process Lifecycle Manager
+
+**Pain point**: jerboa-shell manually tracks file descriptors, leaks them on error paths, and has intricate `dup2`/`close` sequences scattered across 6+ modules. Process group management (setpgid, tcsetpgrp) is similarly ad-hoc. Every pipeline implementation risks fd leaks.
+
+**Solution**: A structured resource manager for file descriptors and child processes that guarantees cleanup via `dynamic-wind` and provides composable pipeline construction.
+
+### Before (current jerboa-shell)
+
+```scheme
+;; Scattered across multiple modules
+(let ([rfd (ffi-dup fd)])
+  ;; ... lots of code ...
+  ;; hope nobody forgets:
+  (ffi-close-fd rfd))  ;; leaked on exception!
+
+;; Pipeline construction — manual fd juggling
+(let-values ([(r1 w1) (ffi-pipe-raw)]
+             [(r2 w2) (ffi-pipe-raw)])
+  (ffi-dup2 w1 1) (ffi-close-fd w1) (ffi-close-fd r1)
+  ;; ... more dup2/close ...
+  ;; if anything throws, fds leak
+  )
+```
+
+### After (with Track 24)
+
+```scheme
+(import (std os fd))
+
+(with-fds ([rfd (fd-dup source-fd)]
+           [pipe (fd-pipe)])
+  ;; rfd and pipe automatically closed on exit or exception
+  (fd-redirect! (pipe-write pipe) STDOUT_FILENO)
+  (spawn-process cmd #:stdin (pipe-read pipe)))
+
+;; Or with pipeline combinator:
+(run-pipeline '("grep" "pattern") '("sort") '("uniq" "-c")
+  #:input input-fd
+  #:output output-fd)
+```
+
+### What Gets Built
+
+**Module: `(std os fd)`**
+
+1. **`with-fds` macro**: Like `with-exception-handler` but for fd cleanup. Uses `dynamic-wind` to guarantee `close()` on all exit paths.
+2. **FD objects**: Thin wrappers around integer fds that track ownership and prevent double-close
+3. **`fd-pipe`**: Returns a pipe object with `pipe-read`/`pipe-write` accessors
+4. **`fd-redirect!`**: Combines `dup2` + `close` atomically
+5. **Process spawning**: `spawn-process` that manages fd inheritance, process groups, and foreground control
+6. **Pipeline combinator**: `run-pipeline` that wires up N processes with pipes, managing all intermediate fds
+
+**Module: `(std os process)`**
+
+1. **Process objects**: Track PID, process group, status
+2. **`with-process-group`**: Manage foreground process group via `dynamic-wind`
+3. **`process-wait`**: Wraps `waitpid` with status decoding (using Track 20's POSIX bindings)
+
+### Implementation Strategy
+
+1. **FD wrapper type**: `define-record-type` with finalizer via guardian (Chez's `make-guardian`)
+2. **Ownership tracking**: Each FD object knows if it owns the underlying fd (vs. borrowed reference)
+3. **`dynamic-wind` cleanup**: `with-fds` expands to nested `dynamic-wind` with close-on-exit
+4. **Pipeline**: Fork N children, wire pipes, manage process group, wait for all
+
+### Tests (~35)
+
+- `with-fds` closes on normal exit
+- `with-fds` closes on exception
+- No double-close when fd explicitly closed before exit
+- Pipeline: 2-stage, 3-stage, N-stage
+- Pipeline with failing middle process
+- Process group management (setpgid/tcsetpgrp)
+- FD leak detection (count open fds before/after)
+
+### Estimated Effort
+
+~700 lines. FD manager + process spawning + pipeline combinator.
+
+---
+
+## Track 25: Safe Signal Delivery via Channels
+
+**Pain point**: jerboa-shell uses two incompatible signal mechanisms simultaneously: Gerbil's `add-signal-handler!` (which runs closures asynchronously) and a C-level flag array polled by `pending-signals!`. There are race conditions between signal arrival and flag checking. The `*pending-signals*` list is mutated from multiple contexts without synchronization.
+
+**Solution**: A channel-based signal delivery system using Chez's native `mutex`/`condition` primitives, where signals are delivered as messages to typed channels that can be `select`-ed alongside other event sources.
+
+### Before (current jerboa-shell)
+
+```scheme
+;; signals.sls — two incompatible mechanisms
+;; Mechanism 1: async closures (Gerbil-style)
+(add-signal-handler! SIGINT
+  (lambda ()
+    ;; Race: this mutates a shared list from signal context!
+    (set! *pending-signals* (cons "INT" *pending-signals*))))
+
+;; Mechanism 2: C flag polling
+(ffi-signal-flag-install SIGXFSZ)
+(define (pending-signals!)
+  (hash-for-each
+    (lambda (name signum)
+      (when (= 1 (ffi-signal-flag-check signum))
+        ;; Race: flag can be set between check and clear!
+        (set! *pending-signals* (cons name *pending-signals*))))
+    *flag-trapped-signals*))
+```
+
+### After (with Track 25)
+
+```scheme
+(import (std os signal-channel))
+
+(define sig-ch (make-signal-channel SIGINT SIGTERM SIGCHLD SIGWINCH))
+
+;; In the main loop — type-safe, no races
+(let loop ()
+  (select
+    [(recv sig-ch) => (lambda (sig)
+      (case (signal-name sig)
+        [("INT") (handle-interrupt)]
+        [("CHLD") (reap-children)]
+        [("WINCH") (update-terminal-size)]))]
+    [(ready? input-port) => handle-input]
+    [(timeout 100) => check-background-jobs])
+  (loop))
+```
+
+### What Gets Built
+
+**Module: `(std os signal-channel)`**
+
+1. **Signal channel**: A mutex-protected queue that receives signal notifications
+2. **Signal thread**: A dedicated Chez thread that blocks on `sigwait()` (via Track 20's POSIX bindings) and enqueues signals to channels
+3. **`select` integration**: Signal channels implement the selectable protocol from `(std event)` (Phase 4)
+4. **`make-signal-channel`**: Register interest in specific signals, returns a channel
+5. **Signal masking**: Automatically calls `sigprocmask` to block registered signals in all threads except the signal thread
+
+### Implementation Strategy
+
+1. **Signal thread**: One dedicated thread calls `sigwait()` in a loop
+2. **Channel dispatch**: Signal thread looks up registered channels by signal number, enqueues
+3. **Mutex-protected queue**: Standard producer-consumer with `mutex-acquire`/`mutex-release` and `condition-signal`
+4. **`select` protocol**: Channels expose `ready?` and `recv` that integrate with the event system
+5. **Backward compat**: `add-signal-handler!` still works for simple cases, but signal-channel is preferred
+
+### Tests (~25)
+
+- Signal delivery to channel (send signal, recv matches)
+- Multiple signals to same channel
+- Select between signal channel and I/O
+- Signal masking (only signal thread receives)
+- Channel cleanup on close
+- No lost signals under rapid delivery
+- Backward compatibility with existing handler API
+
+### Estimated Effort
+
+~500 lines. Signal thread + channel type + select integration.
+
+---
+
+## Track 26: Raw Byte I/O Ports
+
+**Pain point**: Chez Scheme's ports assume UTF-8 text. jerboa-shell needs raw byte access for shell I/O (binary data in pipes, locale-independent byte processing). Currently uses a 1MB C buffer (`ffi_read_buf`) and Latin-1 decoding hack to preserve raw bytes — each byte 0x00-0xFF becomes char U+0000-U+00FF.
+
+**Solution**: First-class binary port operations that bypass Chez's UTF-8 codec, using `bytevector` as the natural currency for raw I/O.
+
+### Before (current jerboa-shell)
+
+```scheme
+;; ffi.sls — C buffer + Latin-1 hack
+(define (ffi-read-all-from-fd fd)
+  ;; Read into C buffer, copy to bytevector, decode as Latin-1
+  (let* ((len (c-ffi-do-read-all fd))
+         (bv (make-bytevector len))
+         (_ (c-ffi-copy-read-buf bv len))
+         (result (make-string len)))
+    (let loop ((i 0))
+      (if (>= i len) result
+        (begin
+          (string-set! result i (integer->char (bytevector-u8-ref bv i)))
+          (loop (+ i 1)))))))  ;; O(n) char-by-char copy!
+```
+
+### After (with Track 26)
+
+```scheme
+(import (std io raw))
+
+;; Direct byte I/O — no codec, no C buffer, no copying
+(define bv (fd-read-bytes fd 4096))
+(fd-write-bytes fd bv)
+
+;; Or wrap fd as a binary port
+(define bp (fd->binary-port fd))
+(get-bytevector-some bp)  ;; standard R6RS binary port ops
+```
+
+### What Gets Built
+
+**Module: `(std io raw)`**
+
+1. **`fd-read-bytes`**: Direct `read()` syscall via `foreign-procedure`, returns bytevector. No codec, no intermediate buffer.
+2. **`fd-write-bytes`**: Direct `write()` syscall, accepts bytevector.
+3. **`fd->binary-port`**: Creates a Chez binary port backed by an fd, using `make-custom-binary-input-port` / `make-custom-binary-output-port` (R6RS standard)
+4. **`fd->textual-port`**: Creates a textual port with selectable codec (UTF-8, Latin-1, raw) backed by an fd
+5. **Buffered variants**: Optional userspace buffering for small reads
+
+### Implementation Strategy
+
+1. **`fd-read-bytes`**: Uses `foreign-procedure "read"` with a pre-allocated bytevector. `foreign-procedure` can operate directly on bytevectors via Chez's C-callable interface.
+2. **`fd->binary-port`**: Uses R6RS `make-custom-binary-input-port` with read/close handlers that call POSIX `read()`/`close()`
+3. **`fd->textual-port`**: Uses `make-custom-textual-input-port` with a transcoder parameter
+4. **No C shim needed**: All operations use `foreign-procedure` to call libc directly
+
+### Tests (~20)
+
+- Read/write roundtrip with binary data (including null bytes)
+- Binary port operations: `get-u8`, `get-bytevector-n`, `get-bytevector-some`
+- No UTF-8 mangling of bytes > 127
+- Pipe I/O with binary ports
+- Large read (>1MB) without intermediate buffer
+- Port close properly closes underlying fd
+
+### Estimated Effort
+
+~300 lines. Mostly port constructor wrappers around R6RS custom port API.
+
+---
+
+## Track 27: Copy-on-Write Environment for Subshells
+
+**Pain point**: Shell subshells (`(cmd)`, `$(cmd)`, command substitution) need a copy of the entire shell environment (variables, traps, options, aliases) without modifying the parent. Currently, jerboa-shell deep-copies hash tables on every subshell fork — expensive for the common case where most variables are never modified.
+
+**Solution**: A persistent map (using the functional red-black tree or hash-array-mapped trie from Phase 3) that supports O(1) snapshots and copy-on-write updates.
+
+### Before (current jerboa-shell)
+
+```scheme
+;; Deep copy on every subshell — copies entire variable table
+(define (make-subshell-env parent-env)
+  (let ([new-vars (make-hash-table)])
+    (hash-for-each
+      (lambda (k v) (hash-put! new-vars k v))
+      (env-variables parent-env))
+    ;; ... copy traps, aliases, options, functions ...
+    (make-env new-vars ...)))
+```
+
+### After (with Track 27)
+
+```scheme
+(import (std data pmap))  ;; persistent map from Phase 3
+
+;; O(1) snapshot — shares structure with parent
+(define (make-subshell-env parent-env)
+  (make-env
+    (pmap-snapshot (env-variables parent-env))  ;; instant
+    (pmap-snapshot (env-traps parent-env))       ;; instant
+    (pmap-snapshot (env-aliases parent-env))     ;; instant
+    ...))
+
+;; Writes in subshell don't affect parent (copy-on-write)
+(pmap-set! subshell-vars "PATH" "/usr/bin")  ;; only modifies subshell's tree
+```
+
+### What Gets Built
+
+This track primarily integrates Phase 3's `(std data pmap)` (persistent map) with the shell environment. The work is:
+
+1. **Shell environment adapter**: Replace mutable hash tables in jsh's environment with persistent maps
+2. **Snapshot protocol**: `env-snapshot` that captures the entire environment in O(1)
+3. **Thread-safe access**: Persistent maps are inherently thread-safe for reads; writes create new versions
+4. **Migration path**: Adapter that presents pmap with hash-table-compatible API (`pmap-ref`, `pmap-set!`, `pmap-for-each`)
+
+### Implementation Strategy
+
+1. **Wrap pmap with mutable cell**: Each environment holds a `(box pmap)`. Reads go through the pmap. Writes create a new pmap and `set-box!`.
+2. **Snapshot = read the box**: `env-snapshot` just reads the current pmap — it's already persistent.
+3. **Benchmark**: Measure subshell creation time with hash-copy vs pmap-snapshot to validate the speedup.
+
+### Tests (~15)
+
+- Subshell snapshot doesn't affect parent
+- Parent changes after snapshot don't affect subshell
+- Variable lookup performance (pmap vs hash-table baseline)
+- Large environment snapshot (1000+ variables)
+- Nested subshells (grandchild doesn't see parent's post-fork changes)
+
+### Estimated Effort
+
+~200 lines. Mostly integration code — the pmap itself already exists in Phase 3.
+
+---
+
+## Track 28: Error Recovery and Diagnostics
+
+**Pain point**: When a Chez Scheme program crashes, you get a bare condition with no context. jerboa-shell wraps most operations in `guard` clauses that swallow errors, making debugging nearly impossible. There's no equivalent of Python's traceback or Rust's `RUST_BACKTRACE=1`.
+
+**Solution**: A structured error system that captures continuation marks (Chez's `inspect/object`), formats readable diagnostics, and supports error recovery strategies.
+
+### Before (current jerboa-shell)
+
+```scheme
+;; Error handling — catch everything, hope for the best
+(guard (__exn [#t ((lambda (e) (%%void)) __exn)])
+  (remove-signal-handler! signum))
+;; If this fails, we have no idea why
+```
+
+### After (with Track 28)
+
+```scheme
+(import (std error diagnostics))
+
+(with-diagnostics
+  (lambda ()
+    (remove-signal-handler! signum))
+  #:on-error (lambda (err context)
+    (display-diagnostic err context (current-error-port))
+    ;; Prints:
+    ;; Error: invalid signal number 99
+    ;;   at (std os signal):remove-signal-handler! line 42
+    ;;   at (jsh signals):trap-set! line 178
+    ;;   at (jsh main):process-trap-command line 523
+    ;;   Context: signum = 99, handler = #<procedure>
+    ))
+```
+
+### What Gets Built
+
+**Module: `(std error diagnostics)`**
+
+1. **`with-diagnostics`**: Like `guard` but captures the continuation and extracts a stack trace using Chez's `inspect/object`
+2. **`display-diagnostic`**: Formats error with stack trace, source locations, and local variable values
+3. **`continuation->frames`**: Walks the continuation chain using `inspect/object` to extract procedure names and source locations
+4. **`&diagnostic-condition`**: Condition type that carries structured trace information
+5. **`current-diagnostic-handler`**: Parameter for global error formatting policy
+
+**Module: `(std error recovery)`**
+
+1. **`with-retry`**: Retry with backoff on transient errors (useful for I/O operations)
+2. **`with-fallback`**: Try primary, fall back to alternative on error
+3. **`with-cleanup`**: Like `dynamic-wind` but only runs cleanup on error (lighter than always-run)
+
+### Implementation Strategy
+
+1. **`inspect/object`**: Chez's inspector API can walk continuations and extract procedure names, source file/line info (when compiled with debug info)
+2. **Source location**: Use `annotation-source` from compile-time annotations when available
+3. **Frame formatting**: Map each continuation frame to a readable "module:procedure line N" format
+4. **Condition wrapping**: Wrap any caught condition in `&diagnostic-condition` with the trace attached
+
+### Tests (~20)
+
+- Stack trace captures correct procedure names
+- Source locations present when debug info compiled in
+- Nested error contexts compose correctly
+- `with-retry` retries specified number of times
+- `with-fallback` uses fallback on error
+- `display-diagnostic` output is human-readable
+- Performance: diagnostic capture adds <1ms overhead
+
+### Estimated Effort
+
+~500 lines. Stack trace extraction + formatting + recovery combinators.
+
+---
+
+## Track 29: Capability-Aware Static Binaries
+
+**Pain point**: jerboa-shell's sandbox module is completely stubbed — it prints "Warning: sandbox not available in static binary" and runs the command unsandboxed. Static binaries can't use `load-shared-object`, so dynamic plugin loading is impossible. There's no way to restrict what a shell script can do.
+
+**Solution**: A capability-based security model where programs declare required capabilities (filesystem, network, process, environment) and the runtime enforces them, with special support for static binaries that can't load external code.
+
+### Before (current jerboa-shell)
+
+```scheme
+;; sandbox.sls — completely stubbed
+(define (jsh-sandbox-run opts thunk)
+  (display "Warning: sandbox not available in static binary\n")
+  (thunk))  ;; runs completely unsandboxed!
+```
+
+### After (with Track 29)
+
+```scheme
+(import (std security capability))
+
+(with-capabilities
+  '((filesystem read "/home" "/tmp")
+    (filesystem write "/tmp")
+    (process spawn)
+    (network none))
+  (lambda ()
+    (run-untrusted-script "user-script.sh")))
+;; Script can read /home and /tmp, write only /tmp,
+;; spawn processes, but cannot access network.
+;; Violations raise &capability-violation condition.
+```
+
+### What Gets Built
+
+**Module: `(std security capability)`**
+
+1. **Capability types**: `filesystem` (read/write/execute, with path restrictions), `network` (connect/listen/none), `process` (spawn/signal/none), `environment` (read/write/restrict)
+2. **`with-capabilities`**: Establishes a capability context. All system calls within check against the granted capabilities.
+3. **Enforcement layer**: Wraps Track 20's POSIX bindings with capability checks. `posix-open` checks filesystem capabilities before calling `open()`.
+4. **Static binary support**: Capabilities are enforced in Scheme (no kernel sandbox needed), so they work in statically-linked musl binaries.
+5. **Capability attenuation**: Child contexts can only restrict capabilities, never add new ones (monotonic security).
+
+**Module: `(std security restrict)`**
+
+1. **`restricted-eval`**: Evaluate code in an environment with limited bindings (no `foreign-procedure`, no `load`, no `system`)
+2. **`make-restricted-environment`**: Creates an interaction-environment with only safe bindings
+
+### Implementation Strategy
+
+1. **Thread parameter**: `current-capabilities` is a `make-thread-parameter` holding the active capability set
+2. **Interposition**: Track 20's POSIX wrappers check `current-capabilities` before each syscall
+3. **Path canonicalization**: Capability paths are resolved to absolute paths to prevent path traversal (`../../../etc/passwd`)
+4. **No kernel dependency**: This is pure Scheme enforcement — works on any OS, any binary format
+5. **Granularity trade-off**: Start with coarse capabilities (filesystem/network/process), refine based on usage patterns
+
+### Tests (~30)
+
+- Filesystem read capability: allowed path succeeds, disallowed fails
+- Filesystem write capability: write to allowed dir succeeds, disallowed raises
+- Network capability: connect blocked when `network none`
+- Process capability: spawn blocked when `process none`
+- Capability attenuation: child can't escalate
+- Path traversal prevention
+- Static binary: capabilities work without dlopen
+- `restricted-eval`: no access to FFI or file system
+- Nested `with-capabilities`: inner restricts outer
+
+### Estimated Effort
+
+~600 lines. Capability types + enforcement wrappers + restricted eval.
+
+---
+
+## Summary: What Phase 6 Replaces
+
+| What | Before (current) | After (Phase 6) |
+|------|-------------------|------------------|
+| POSIX calls | 570-line C shim + 261-line Scheme wrapper | Direct `foreign-procedure` via `define-posix` |
+| Platform support | Linux-only (memfd, /proc) | Linux + macOS + FreeBSD |
+| Build time | 30-60s sequential, 216-line manual script | 2-5s parallel, automatic dep discovery |
+| Program loading | C main() with memfd hack | `define-application` macro |
+| FD management | Manual dup2/close, leak on exception | `with-fds`, guaranteed cleanup |
+| Signal handling | Two incompatible mechanisms with races | Channel-based, select-able |
+| Binary I/O | 1MB C buffer + Latin-1 hack | Direct bytevector I/O |
+| Subshell env | O(n) deep copy | O(1) persistent map snapshot |
+| Error diagnostics | Bare conditions, swallowed errors | Stack traces, source locations |
+| Sandbox | Completely stubbed | Capability-based enforcement |
+
+### Lines of Code Eliminated in jerboa-shell
+
+| Component | Current LOC | After Phase 6 |
+|-----------|-------------|---------------|
+| ffi-shim.c | 570 | 0 (replaced by Track 20) |
+| ffi.sls wrappers | 261 | ~50 (thin import layer) |
+| jsh-main.c | 92 | 0 (replaced by Track 23) |
+| build-binary-jsh.ss | 216 | ~10 (one `build-project` call) |
+| compat/gambit.sls | 838 | ~200 (only non-POSIX Gambit idioms) |
+| **Total eliminated** | **~1,977** | **~260** |
+
+### Estimated Total Effort
+
+| Track | Description | Lines | Tests |
+|-------|-------------|-------|-------|
+| 20 | Declarative POSIX FFI | ~800 | ~40 |
+| 21 | Portable OS Abstraction | ~500 | ~25 |
+| 22 | Incremental Parallel Build | ~600 | ~30 |
+| 23 | Safe Program Loading | ~300 | ~15 |
+| 24 | Structured FD & Process Manager | ~700 | ~35 |
+| 25 | Signal Channels | ~500 | ~25 |
+| 26 | Raw Byte I/O Ports | ~300 | ~20 |
+| 27 | Copy-on-Write Environment | ~200 | ~15 |
+| 28 | Error Recovery & Diagnostics | ~500 | ~20 |
+| 29 | Capability-Aware Static Binaries | ~600 | ~30 |
+| **Total** | | **~5,000** | **~255** |
+
+### Dependency Order
+
+```
+Track 20 (POSIX FFI) ← foundation for everything
+  ├── Track 21 (Platform Abstraction) ← uses define-posix
+  ├── Track 24 (FD Manager) ← uses POSIX fd operations
+  ├── Track 25 (Signal Channels) ← uses sigwait, sigprocmask
+  ├── Track 26 (Raw Byte I/O) ← uses POSIX read/write
+  └── Track 29 (Capabilities) ← wraps POSIX calls with checks
+
+Track 22 (Build System) ← independent, uses only Chez primitives
+Track 23 (Program Loading) ← independent, uses scheme-start
+
+Track 27 (CoW Environment) ← uses Phase 3 pmap
+Track 28 (Error Diagnostics) ← uses inspect/object, independent
+```
+
+Build order: 20 → (21, 22, 23, 27, 28 in parallel) → (24, 25, 26) → 29
+
+Phase 6 turns Jerboa from a language that *can* build systems programs (with enough C glue and platform hacks) into a language that makes systems programming *natural*. The difference: 1,977 lines of workarounds become 260 lines of clean imports.
