@@ -375,10 +375,72 @@
              (string->symbol (string-append ns "-" (symbol->string f) "-set!")))
            fields))))
 
-(define (expand-exports export-specs struct-table)
+(define (collect-all-definitions body-forms struct-table)
+  ;; Collect all top-level definition names from body forms.
+  ;; Used for (export #t). Skips private names starting with %.
+  (let loop ([forms body-forms] [names '()])
+    (cond
+      [(null? forms) (reverse names)]
+
+      ;; def / define
+      [(and (pair? (car forms))
+            (memq (caar forms) '(def define)))
+       (let ([second (cadar forms)])
+         (cond
+           [(pair? second)   (loop (cdr forms) (cons (car second) names))]
+           [(symbol? second) (loop (cdr forms) (cons second names))]
+           [else             (loop (cdr forms) names)]))]
+
+      ;; def*
+      [(and (pair? (car forms)) (eq? (caar forms) 'def*))
+       (loop (cdr forms) (cons (cadar forms) names))]
+
+      ;; define-syntax
+      [(and (pair? (car forms)) (eq? (caar forms) 'define-syntax))
+       (loop (cdr forms) (cons (cadar forms) names))]
+
+      ;; defrule: (defrule (name . pattern) template)
+      [(and (pair? (car forms)) (eq? (caar forms) 'defrule))
+       (let ([pat (cadar forms)])
+         (if (pair? pat)
+           (loop (cdr forms) (cons (car pat) names))
+           (loop (cdr forms) names)))]
+
+      ;; defrules: (defrules name ...)
+      [(and (pair? (car forms)) (eq? (caar forms) 'defrules))
+       (loop (cdr forms) (cons (cadar forms) names))]
+
+      ;; defstruct / defclass — expand to all generated names
+      [(and (pair? (car forms))
+            (memq (caar forms) '(defstruct defclass)))
+       (let* ([name-part (cadar forms)]
+              [name (if (pair? name-part) (car name-part) name-part)]
+              [entry (assq name struct-table)])
+         (if entry
+           (let ([expanded (expand-struct-out name (cdr entry))])
+             (loop (cdr forms) (append (reverse expanded) names)))
+           (loop (cdr forms) names)))]
+
+      ;; begin — descend into body
+      [(and (pair? (car forms)) (eq? (caar forms) 'begin))
+       (let ([inner (collect-all-definitions (cdar (car forms)) struct-table)])
+         (loop (cdr forms) (append (reverse inner) names)))]
+
+      ;; defmethod — skip (dispatched via bind-method!, not a top-level binding)
+      [(and (pair? (car forms)) (eq? (caar forms) 'defmethod))
+       (loop (cdr forms) names)]
+
+      [else (loop (cdr forms) names)])))
+
+(define (private-name? sym)
+  ;; Skip names starting with % (Gerbil private convention)
+  (let ([s (symbol->string sym)])
+    (and (> (string-length s) 0)
+         (char=? (string-ref s 0) #\%))))
+
+(define (expand-exports export-specs struct-table body-forms)
   ;; Process export spec list → flat list of symbols.
-  ;; Handles: plain symbols, (struct-out name), (rename (old new)).
-  ;; Does NOT support (export #t) — use explicit exports.
+  ;; Handles: plain symbols, (struct-out name), (rename (old new)), #t.
   (let loop ([specs export-specs] [result '()])
     (cond
       [(null? specs) (reverse result)]
@@ -395,9 +457,11 @@
            (error 'jerbuild
                   (format "struct-out: no defstruct found for ~a in this file" struct-name))))]
 
-      ;; #t — not supported
+      ;; #t — export all top-level definitions, skipping private names
       [(eq? (car specs) #t)
-       (error 'jerbuild "(export #t) is not supported — list exports explicitly")]
+       (let ([all-names (filter (lambda (n) (not (private-name? n)))
+                                (collect-all-definitions body-forms struct-table))])
+         (loop (cdr specs) (append (reverse all-names) result)))]
 
       ;; Plain symbol
       [(symbol? (car specs))
@@ -497,7 +561,7 @@
       (let* ([struct-table (collect-defstructs body-forms)]
 
              ;; Expand exports
-             [expanded-exports (expand-exports export-specs struct-table)]
+             [expanded-exports (expand-exports export-specs struct-table body-forms)]
 
              ;; Translate imports
              [translated-imports (map translate-import import-specs)]
