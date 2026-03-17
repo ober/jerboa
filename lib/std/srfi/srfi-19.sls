@@ -29,11 +29,15 @@
     ;; Chez built-ins re-exported for Gerbil API compatibility
     time-second
     time-nanosecond
+    time-type
+    time-duration time-monotonic
     date-week-day)
 
   (import (chezscheme))
 
   (define time-utc 'time-utc)
+  (define time-duration 'time-duration)
+  (define time-monotonic 'time-monotonic)
 
   ;; All these are already provided by Chez:
   ;; current-date, current-time, time?, date?, make-date,

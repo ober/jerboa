@@ -3,17 +3,19 @@
 
 (library (std os path)
   (export path-expand path-normalize path-directory path-strip-directory
-          path-extension path-strip-extension
+          path-extension path-strip-extension path-strip-trailing-directory-separator
           path-join path-absolute?)
   (import (except (chezscheme) path-extension path-absolute?))
 
-  (define (path-expand path)
-    (if (path-absolute? path)
-      path
-      (string-append (current-directory) "/" path)))
+  (define (path-expand path . args)
+    ;; Gerbil: (path-expand path) or (path-expand path dir)
+    (let ([base (if (pair? args) (car args) (current-directory))])
+      (if (path-absolute? path)
+        path
+        (string-append base "/" path))))
 
-  (define (path-normalize path)
-    (path-expand path))
+  (define (path-normalize path . args)
+    (apply path-expand path args))
 
   (define (path-directory path)
     (let ([idx (string-last-index path #\/)])
@@ -60,5 +62,11 @@
         [(< i 0) #f]
         [(char=? (string-ref str i) ch) i]
         [else (loop (- i 1))])))
+
+  (define (path-strip-trailing-directory-separator path)
+    (let ((len (string-length path)))
+      (if (and (> len 1) (char=? (string-ref path (- len 1)) #\/))
+        (substring path 0 (- len 1))
+        path)))
 
   ) ;; end library

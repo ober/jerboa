@@ -28,6 +28,39 @@
     ;; struct export helper
     struct-out
 
+    ;; Gerbil compat I/O and filesystem
+    read-line
+    read-string
+    getenv
+
+    ;; I/O compat
+    force-output
+
+    ;; Thread + mutex (re-exported from :std/misc/thread)
+    spawn spawn/name spawn/group
+    make-thread thread-start! thread-join!
+    thread-yield! thread-sleep! current-thread thread-name
+    thread? thread-specific thread-specific-set!
+    thread-interrupt! thread-terminate!
+    make-mutex make-mutex-gambit mutex? mutex-name
+    mutex-lock! mutex-unlock! mutex-specific mutex-specific-set!
+    make-condition-variable condition-variable?
+    condition-variable-signal! condition-variable-broadcast!
+    condition-variable-specific condition-variable-specific-set!
+    thread-send thread-receive thread-mailbox-next
+
+    ;; Path utilities (re-exported from :std/os/path)
+    path-expand path-normalize path-directory
+    path-strip-directory path-extension path-strip-extension
+    path-strip-trailing-directory-separator
+    path-join path-absolute?
+    with-exception-catcher
+    create-directory create-directory*
+    file-info file-info-type file-info-size file-info-mode
+    file-info-last-modification-time file-info-last-access-time
+    file-info-device file-info-inode file-info-owner file-info-group
+    directory-files
+
     ;; re-export runtime
     ~ bind-method! call-method
     make-hash-table make-hash-table-eq
@@ -39,7 +72,23 @@
     keyword? keyword->string string->keyword make-keyword
     keyword-arg-ref
     error-message error-irritants error-trace
+    display-exception display-continuation-backtrace
+    string-split string-empty? string-subst random-integer copy-file setenv
+    user-info user-info-home user-name
+    read-u8 write-u8
+    f64vector-ref f64vector-set! f64vector-length make-f64vector
+    input-port-timeout-set! output-port-timeout-set!
+    u8vector u8vector-ref u8vector-set! u8vector-length u8vector->list list->u8vector
+    subu8vector string->bytes bytes->string
+    getpid random-bytes object->string
+    filter-map
     displayln 1+ 1-
+    arithmetic-shift
+    any every
+    time->seconds
+    open-process open-input-process process-status
+    string-map take drop delete last
+    call-with-input-string call-with-output-string
     iota last-pair
     *method-tables*
     register-struct-type! *struct-types*
@@ -48,9 +97,17 @@
 
   (import (except (chezscheme)
             make-hash-table hash-table?
-            iota
-            1+ 1-)
-          (jerboa runtime))
+            iota 1+ 1-
+            getenv           ;; shadowed by our variadic wrapper
+            path-extension path-absolute?  ;; provided by (std os path)
+            thread?          ;; shadowed by (std misc thread)
+            make-mutex mutex? mutex-name)  ;; wrapped by (std misc thread)
+          (rename (only (chezscheme) getenv) (getenv %chez-getenv))
+          (jerboa runtime)
+          (std os path)
+          (std misc thread)
+          (only (std misc string) string-split string-empty?)
+          (only (std misc list) filter-map))
 
   ;;;; ---- Compile-time helpers ----
 
@@ -300,16 +357,21 @@
                        (fields (mutable field iacc imut) ...))
                      (define tid (record-type-descriptor hidden-name))
                      (define acc iacc) ...
-                     (define mut imut) ...)))))])))
+                     (define mut imut) ...)))))]
+        ;; Accept and ignore trailing keyword-value options (transparent:, opaque:, etc.)
+        [(_ name (field ...) kw val rest ...)
+         #'(defstruct name (field ...))]
+        [(_ (name parent) (field ...) kw val rest ...)
+         #'(defstruct (name parent) (field ...))])))
 
   ;;;; ---- DEFCLASS ----
 
   (define-syntax defclass
     (lambda (stx)
       (syntax-case stx ()
-        [(_ (name parent) (field ...))
+        [(_ (name parent) (field ...) rest ...)
          #'(defstruct (name parent) (field ...))]
-        [(_ name (field ...))
+        [(_ name (field ...) rest ...)
          #'(defstruct name (field ...))])))
 
   ;;;; ---- DEFMETHOD ----
@@ -634,4 +696,330 @@
     (syntax-rules ()
       [(_ name) (void)]))
 
-  ) ;; end library
+  ;;;; ---- Gerbil compat: I/O ----
+  ;; read-line: Gerbil-style (port is optional)
+  (define (read-line . args)
+    (let ([port (if (pair? args) (car args) (current-input-port))])
+      (get-line port)))
+
+  ;; getenv: Gerbil-style with optional default
+  ;; Wraps Chez's built-in getenv (aliased as %chez-getenv) to add optional default.
+  (define (getenv name . rest)
+    (or (%chez-getenv name) (if (pair? rest) (car rest) #f)))
+
+  ;; with-exception-catcher: Gerbil alias for Chez with-exception-handler
+  (define with-exception-catcher with-exception-handler)
+
+  ;;;; ---- Gerbil compat: Filesystem ----
+  ;; create-directory: Gerbil alias for Chez mkdir
+  (define create-directory mkdir)
+
+  ;; create-directory*: recursive mkdir -p
+  (define (create-directory* path)
+    (system (string-append "mkdir -p '" path "'")))
+
+  ;; file-info record type (using Chez fields syntax)
+  (define-record-type (file-info-rec make-file-info-rec file-info-rec?)
+    (fields
+      (immutable type file-info-type)
+      (immutable size file-info-size)
+      (immutable mode file-info-mode)
+      (immutable mtime file-info-last-modification-time)))
+
+  (define (file-info-last-access-time fi) (file-info-last-modification-time fi))
+  (define (file-info-device fi) 0)
+  (define (file-info-inode fi) 0)
+  (define (file-info-owner fi) 0)
+  (define (file-info-group fi) 0)
+
+  ;; file-info: return a file-info-rec for the given path
+  (define (file-info path . rest)
+    (make-file-info-rec
+      (cond
+        [(file-directory? path) 'directory]
+        [(file-regular? path)   'regular]
+        [(file-symbolic-link? path) 'symbolic-link]
+        [else 'unknown])
+      0   ;; size placeholder
+      0   ;; mode placeholder
+      0)) ;; mtime placeholder
+
+  ;; directory-files: list files in a directory (like Gambit's)
+  (define (directory-files path)
+    (directory-list path))
+
+  ;; read-string: Gerbil-style (n port) → read up to n chars from port
+  (define (read-string n . args)
+    (let ([port (if (pair? args) (car args) (current-input-port))])
+      (get-string-n port n)))
+
+  ;; force-output: Gerbil/Gambit alias for Chez flush-output-port
+  (define (force-output . args)
+    (let ([port (if (pair? args) (car args) (current-output-port))])
+      (flush-output-port port)))
+
+  ;; mutex-lock!/mutex-unlock! and thread functions are provided by (std misc thread)
+
+  ;; display-exception: Gerbil/Gambit compat — display an exception to a port
+  ;; In Gerbil: (display-exception e [port]) — uses Chez display-condition equivalent
+  (define (display-exception e . args)
+    (let ([port (if (pair? args) (car args) (current-output-port))])
+      (cond
+        [(condition? e) (display-condition e port)]
+        [else (display e port)])
+      (newline port)))
+
+  ;; display-continuation-backtrace: Gerbil/Gambit compat — no-op stub
+  ;; Gambit can display a continuation as a stack trace; Chez has no equivalent.
+  (define (display-continuation-backtrace k port)
+    (void))
+
+  ;; arithmetic-shift: Gerbil/Gambit compat — alias for Chez's ash
+  (define (arithmetic-shift n count) (ash n count))
+
+  ;; any/every: Gerbil/Gambit compat — SRFI-1 aliases for Chez's exists/for-all
+  (define (any pred lst) (exists pred lst))
+  (define (every pred lst) (for-all pred lst))
+
+  ;; thread-interrupt!: Gerbil/Gambit compat — no-op stub.
+  ;; Gambit: (thread-interrupt! thread thunk) runs thunk in thread's context.
+  ;; Chez has no equivalent API for interrupting another thread.
+  (define (thread-interrupt! thread thunk)
+    (void))
+
+  ;; thread-terminate!: Gerbil/Gambit compat — no-op stub.
+  ;; Gambit: (thread-terminate! thread) terminates the thread.
+  ;; Chez uses thread-kill (via (std misc thread)) but not exposed here.
+  (define (thread-terminate! thread)
+    (void))
+
+  ;; take/drop: Gerbil/SRFI-1 compat — take/drop first n elements of a list.
+  (define (take lst n)
+    (if (or (= n 0) (null? lst))
+      '()
+      (cons (car lst) (take (cdr lst) (- n 1)))))
+
+  (define (drop lst n)
+    (if (or (= n 0) (null? lst))
+      lst
+      (drop (cdr lst) (- n 1))))
+
+  ;; call-with-input-string: R7RS/Gambit compat — open string as input port and call proc.
+  (define (call-with-input-string str proc)
+    (proc (open-input-string str)))
+
+  ;; call-with-output-string: R7RS/Gambit compat — call proc with output port, return string.
+  (define (call-with-output-string proc)
+    (let ((port (open-output-string)))
+      (proc port)
+      (get-output-string port)))
+
+  ;; random-integer: Gambit compat — alias for Chez random.
+  (define (random-integer n) (random n))
+
+  ;; setenv: Gerbil/Gambit compat — set environment variable.
+  (define (setenv name val) (putenv name val))
+
+  ;; u8vector: Gambit byte vector compat — map to Chez bytevectors
+  (define (u8vector . args) (apply bytevector args))
+  (define (u8vector-ref bv i) (bytevector-u8-ref bv i))
+  (define (u8vector-set! bv i v) (bytevector-u8-set! bv i v))
+  (define (u8vector-length bv) (bytevector-length bv))
+  (define (u8vector->list bv)
+    (let loop ((i 0) (acc '()))
+      (if (>= i (bytevector-length bv))
+        (reverse acc)
+        (loop (+ i 1) (cons (bytevector-u8-ref bv i) acc)))))
+  (define (list->u8vector lst)
+    (let* ((n (length lst)) (bv (make-bytevector n)))
+      (let loop ((i 0) (l lst))
+        (if (null? l) bv
+          (begin (bytevector-u8-set! bv i (car l))
+                 (loop (+ i 1) (cdr l)))))))
+  (define (subu8vector bv start end)
+    (let* ((len (- end start)) (result (make-bytevector len)))
+      (bytevector-copy! result 0 bv start len)
+      result))
+
+  ;; object->string: convert any object to its write representation
+  (define (object->string obj)
+    (call-with-string-output-port
+      (lambda (p) (write obj p))))
+
+  ;; random-bytes: generate n random bytes as a bytevector
+  (define (random-bytes n)
+    (let ((bv (make-bytevector n)))
+      (let loop ((i 0))
+        (if (>= i n) bv
+          (begin (bytevector-u8-set! bv i (random 256))
+                 (loop (+ i 1)))))))
+
+  ;; getpid: POSIX process ID — read from /proc/self (Linux)
+  (define (getpid)
+    (guard (exn [#t 0])
+      (let* ((line (call-with-port (open-input-file "/proc/self/stat")
+                     (lambda (p) (get-line p))))
+             (end (let lp ((i 0))
+                    (if (or (>= i (string-length line))
+                            (char=? (string-ref line i) #\space))
+                      i (lp (+ i 1))))))
+        (or (string->number (substring line 0 end)) 0))))
+
+  ;; string<->bytes: Gerbil/Gambit UTF-8 string conversion
+  (define (string->bytes str)
+    (string->utf8 str))
+  (define (bytes->string bv)
+    (utf8->string bv))
+
+  ;; Port timeout stubs — Gambit-specific, no-op in Chez
+  (define (input-port-timeout-set! port timeout) (void))
+  (define (output-port-timeout-set! port timeout) (void))
+
+  ;; f64vector: Gambit float64 vector compat — map to Chez flvectors
+  (define (make-f64vector n . rest)
+    (let ((init (if (pair? rest) (car rest) 0.0)))
+      (make-flvector n (inexact init))))
+  (define (f64vector-ref v i) (flvector-ref v i))
+  (define (f64vector-set! v i x) (flvector-set! v i (inexact x)))
+  (define (f64vector-length v) (flvector-length v))
+
+  ;; SRFI-1 last: return the last element of a list
+  (define (last lst)
+    (if (null? (cdr lst)) (car lst) (last (cdr lst))))
+
+  ;; SRFI-1 delete: remove all elements equal? to x from lst
+  (define (delete x lst . rest)
+    (let ((= (if (pair? rest) (car rest) equal?)))
+      (filter (lambda (e) (not (= x e))) lst)))
+
+  ;; R7RS I/O compat
+  (define (read-u8 . rest)
+    (let ((port (if (pair? rest) (car rest) (current-input-port))))
+      (get-u8 port)))
+  (define (write-u8 byte . rest)
+    (let ((port (if (pair? rest) (car rest) (current-output-port))))
+      (put-u8 port byte)))
+
+  ;; user-info: Gerbil/Gambit compat — returns a user-info record.
+  ;; Simplified: reads from environment; only supports current user.
+  (define-record-type user-info-record
+    (fields name home uid gid shell)
+    (sealed #t))
+  (define (user-name)
+    (or (getenv "USER") (getenv "LOGNAME") "user"))
+  (define (user-info name-or-uid)
+    (make-user-info-record
+      (user-name)
+      (or (getenv "HOME") "/")
+      0 0 (or (getenv "SHELL") "/bin/sh")))
+  (define (user-info-home ui) (user-info-record-home ui))
+
+  ;; copy-file: Gerbil compat — copy file at src to dst.
+  (define (copy-file src dst)
+    (call-with-port (open-file-input-port src)
+      (lambda (in)
+        (call-with-port (open-file-output-port dst (file-options no-fail) (buffer-mode block))
+          (lambda (out)
+            (let loop ()
+              (let ((chunk (get-bytevector-n in 65536)))
+                (unless (eof-object? chunk)
+                  (put-bytevector out chunk)
+                  (loop)))))))))
+
+  ;; string-subst: Gerbil compat — replace all occurrences of old in str with new.
+  (define (string-subst str old new)
+    (let* ((old-len (string-length old))
+           (new-len (string-length new))
+           (str-len (string-length str)))
+      (if (= old-len 0)
+        str
+        (let loop ((i 0) (result '()))
+          (cond
+            ((> (+ i old-len) str-len)
+             (list->string (reverse (append (reverse (string->list (substring str i str-len))) result))))
+            ((string=? (substring str i (+ i old-len)) old)
+             (loop (+ i old-len) (append (reverse (string->list new)) result)))
+            (else
+             (loop (+ i 1) (cons (string-ref str i) result))))))))
+
+  ;; string-map: R7RS compat — apply proc to each character and collect results.
+  (define (string-map proc str . rest)
+    (if (null? rest)
+      (list->string (map proc (string->list str)))
+      (list->string (apply map proc (map string->list (cons str rest))))))
+
+  ;; time->seconds: Gerbil/SRFI-19 compat — converts a Chez time record to float seconds.
+  (define (time->seconds t)
+    (if (time? t)
+      (+ (time-second t) (/ (time-nanosecond t) 1000000000.0))
+      t))
+
+  ;; open-process: Gambit compat — run a subprocess and return a bidirectional port.
+  ;; plist is a list with keyword args: path: arguments: directory:
+  ;; stdin-redirection: stdout-redirection: stderr-redirection:
+  ;; Returns a custom textual port backed by open-process-ports.
+  (define *process-pids* (make-hashtable equal-hash equal?))
+
+  (define (open-process plist)
+    (define (find-key key lst)
+      (let loop ((l lst))
+        (cond ((null? l) #f)
+              ((equal? (car l) key) (cadr l))
+              ((null? (cdr l)) #f)
+              (else (loop (cddr l))))))
+    (let* ((path (or (find-key 'path: plist) "sh"))
+           (args (or (find-key 'arguments: plist) '()))
+           (dir  (find-key 'directory: plist))
+           (cmd  (apply string-append
+                        (cons path (map (lambda (a) (string-append " " a)) args))))
+           (full-cmd (if dir
+                       (string-append "cd " dir " && " cmd)
+                       cmd)))
+      (let-values (((in-port out-port err-port pid)
+                    (open-process-ports full-cmd
+                                        (buffer-mode block)
+                                        (native-transcoder))))
+        ;; Create a custom port that reads from in-port and writes to out-port
+        (let* ((closed #f)
+               (read-proc (lambda (str start count)
+                 (let loop ((i 0))
+                   (if (>= i count)
+                     i
+                     (let ((ch (read-char in-port)))
+                       (if (eof-object? ch)
+                         i
+                         (begin
+                           (string-set! str (+ start i) ch)
+                           (loop (+ i 1)))))))))
+               (write-proc (lambda (str start count)
+                 (display (substring str start (+ start count)) out-port)
+                 count))
+               (close-proc (lambda ()
+                 (unless closed
+                   (set! closed #t)
+                   (close-port in-port)
+                   (close-port out-port)
+                   (close-port err-port))))
+               (port (make-custom-textual-input/output-port
+                       (string-append "process:" path)
+                       read-proc write-proc #f #f close-proc)))
+          (hashtable-set! *process-pids* port pid)
+          port))))
+
+  ;; open-input-process: Gambit compat — read-only subprocess.
+  ;; Like open-process but returns a read-only port (stdout-redirection only).
+  (define (open-input-process plist)
+    (open-process plist))
+
+  ;; process-status: Gambit compat — wait for process and return exit code.
+  ;; Drains the port to allow the subprocess to finish, then returns 0.
+  (define (process-status proc)
+    ;; Close port to signal we're done; process will exit
+    (when (input-port? proc)
+      (let drain ()
+        (let ((ch (read-char proc)))
+          (unless (eof-object? ch)
+            (drain)))))
+    0)
+
+) ;; end (library jerboa core)

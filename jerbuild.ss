@@ -219,6 +219,9 @@
          (and (> (string-length s) 1)
               (char=? (string-ref s 0) #\:)))))
 
+;; Set before translating each file's imports to resolve ./module relative paths.
+(define *current-library-prefix* '())
+
 (define (translate-colon-path sym)
   ;; :std/sugar        → (std sugar)
   ;; :std/srfi/13      → (std srfi srfi-13)
@@ -239,9 +242,34 @@
         (append (list 'std 'srfi) (list (string->symbol srfi-name))))
       symbols)))
 
+(define (translate-relative-import sym)
+  ;; ./module → (current-prefix module)
+  ;; The current library prefix is set from the file being compiled.
+  (let* ([s (symbol->string sym)]
+         [module-name (substring s 2 (string-length s))]  ; strip "./"
+         [module-sym (string->symbol module-name)])
+    ;; Append module name to all but the last element of current prefix
+    ;; e.g., prefix=(jerboa-emacs editor), ./pregexp-compat → (jerboa-emacs pregexp-compat)
+    (let ([prefix-parts (if (null? *current-library-prefix*)
+                          '()
+                          (reverse (cdr (reverse *current-library-prefix*))))])
+      (append prefix-parts (list module-sym)))))
+
+(define (relative-import-symbol? spec)
+  ;; Returns #t if spec is a symbol starting with "./"
+  (and (symbol? spec)
+       (let ([s (symbol->string spec)])
+         (and (>= (string-length s) 2)
+              (char=? (string-ref s 0) #\.)
+              (char=? (string-ref s 1) #\/)))))
+
 (define (translate-import spec)
   ;; Translate a single Gerbil import spec to R6RS.
   (cond
+    ;; ./module — relative import (same package)
+    [(relative-import-symbol? spec)
+     (translate-relative-import spec)]
+
     ;; :pkg/module symbol
     [(colon-symbol? spec)
      (translate-colon-path spec)]
@@ -281,29 +309,190 @@
     spec))
 
 ;;;; ============================================================
+;;;; Inter-library conflict resolution
+;;;; ============================================================
+
+;; When library A and library B are both imported, the symbols listed
+;; should be excluded from library A to avoid "multiple definitions" errors.
+;; Format: (lib-A lib-B . (symbol ...))
+(define *inter-library-conflicts*
+  '(;; std/misc/string re-exports several SRFI-13 identifiers; when both are
+    ;; imported, exclude the overlapping ones from SRFI-13.
+    ;; SRFI-13 and std/misc/string overlap on these identifiers.
+    ;; (string-split and string-empty? are only in misc/string, not SRFI-13)
+    ((std srfi srfi-13) (std misc string)
+     string-join string-trim
+     string-prefix? string-suffix?
+     string-contains string-index)
+    ;; (std misc process) provides open-process, open-input-process.
+    ;; (jerboa core) has compat wrappers for files that don't import misc/process.
+    ;; When both are present, exclude the compat from (jerboa core).
+    ;; Note: process-status is NOT in (std misc process), so don't exclude it.
+    ((jerboa core) (std misc process)
+     open-process open-input-process)
+    ;; (std srfi srfi-19) provides time->seconds.
+    ;; (jerboa core) has a compat wrapper. Prefer srfi-19 when both present.
+    ((jerboa core) (std srfi srfi-19)
+     time->seconds)
+    ;; (std srfi srfi-1) provides iota, any, every, filter-map, take, drop, delete, etc.
+    ;; (jerboa core) has compat versions. Prefer srfi-1 when both present.
+    ((jerboa core) (std srfi srfi-1)
+     iota any every filter-map take drop delete)
+    ;; (jerboa runtime) provides iota. Prefer srfi-1 when both imported.
+    ((jerboa runtime) (std srfi srfi-1)
+     iota)
+    ;; jerboa-emacs/persist defines fill-column as a getter function.
+    ;; jerboa-emacs/editor-text also defines fill-column as a local constant.
+    ;; When both are imported, prefer persist's version (exclude from editor-text).
+    ((jerboa-emacs editor-text) (jerboa-emacs persist)
+     fill-column)))
+
+(define (import-actual-symbols imp)
+  ;; Return the symbols actually imported by an import spec, or #f if "all".
+  ;; (only lib sym ...) → (sym ...)
+  ;; anything else → #f  (meaning: all exports of the library)
+  (and (pair? imp) (eq? (car imp) 'only)
+       (cddr imp)))
+
+(define (resolve-inter-library-conflicts imports)
+  ;; For each entry in *inter-library-conflicts*, if both lib-A and lib-B
+  ;; are in imports, wrap lib-A with (except lib-A symbol ...) to drop duplicates.
+  ;; When lib-B is imported via (only ...), only the actually imported symbols are
+  ;; considered as potential conflicts.
+  (let ([base-libs (map unwrap-import-lib imports)])
+    (let loop ([rules *inter-library-conflicts*] [result imports])
+      (if (null? rules)
+        result
+        (let* ([rule   (car rules)]
+               [lib-a  (car rule)]
+               [lib-b  (cadr rule)]
+               [syms   (cddr rule)])
+          (if (and (member lib-a base-libs)
+                   (member lib-b base-libs))
+            ;; Find what lib-a and lib-b actually import
+            (let* ([lib-a-import (find (lambda (imp)
+                                         (equal? (unwrap-import-lib imp) lib-a))
+                                       result)]
+                   [lib-b-import (find (lambda (imp)
+                                         (equal? (unwrap-import-lib imp) lib-b))
+                                       result)]
+                   [a-syms (import-actual-symbols lib-a-import)]
+                   [b-syms (import-actual-symbols lib-b-import)]
+                   ;; Effective conflicts: symbols in both lib-a (if only) and lib-b (if only)
+                   [effective-syms
+                    (filter (lambda (s)
+                              (and (or (not a-syms) (memq s a-syms))
+                                   (or (not b-syms) (memq s b-syms))))
+                            syms)])
+              (if (null? effective-syms)
+                (loop (cdr rules) result)
+                (loop (cdr rules)
+                      (map (lambda (imp)
+                             (if (equal? (unwrap-import-lib imp) lib-a)
+                               ;; Already wrapped? Add more exclusions.
+                               (if (and (pair? imp) (eq? (car imp) 'except))
+                                 (append imp effective-syms)
+                                 `(except ,imp ,@effective-syms))
+                               imp))
+                           result))))
+            (loop (cdr rules) result)))))))
+
+;;;; ============================================================
 ;;;; Chez exclusion triggers (conditional approach)
 ;;;; ============================================================
 
 (define *exclusion-triggers*
   ;; Maps import library names to the Chez names they shadow.
   ;; Used to compute (except (chezscheme) ...) per-file.
-  '(((jerboa core)    . (make-hash-table hash-table? iota 1+ 1-))
+  '(((jerboa core)    . (make-hash-table hash-table? iota 1+ 1- getenv
+                         path-extension path-absolute?
+                         thread? make-mutex mutex? mutex-name))
     ((jerboa runtime) . (make-hash-table hash-table? iota 1+ 1-))
     ((std sort)       . (sort sort!))
     ((std format)     . (printf fprintf))
-    ((std misc ports) . (with-input-from-string with-output-to-string))
-    ((std os path)    . (path-extension path-absolute?))))
+    ((std os path)    . (path-extension path-absolute?))
+    ((std misc atom)  . (atom?))
+    ;; srfi-1 redefines iota with SRFI-1 semantics (count [start [step]])
+    ((std srfi srfi-1) . (iota))
+    ;; std/misc/ports redefines with-input-from-string and with-output-to-string
+    ((std misc ports) . (with-input-from-string with-output-to-string))))
+
+;; Chez Scheme built-in names that may be redefined in user code.
+;; Only these will be auto-excluded when a local definition shadows them.
+;; Covers the most commonly redefined standard names.
+(define *chez-shadowing-candidates*
+  '(list-head list-tail error void warning format
+    sort sort! find filter map for-each
+    assoc assq assv member memq memv
+    read write display newline
+    open-input-file open-output-file close-port
+    with-exception-handler raise
+    error? condition? condition-message
+    string-copy string-append substring
+    string-upcase string-downcase string-titlecase
+    number->string string->number
+    symbol->string string->symbol
+    char->integer integer->char
+    make-vector vector-ref vector-set! vector-length
+    make-string string-ref string-set! string-length
+    make-bytevector bytevector-u8-ref bytevector-u8-set!
+    call-with-current-continuation call/cc
+    values call-with-values
+    dynamic-wind
+    gensym))
+
+(define (chez-export? sym)
+  (memq sym *chez-shadowing-candidates*))
+
+(define (collect-local-defs body-forms)
+  ;; Collect top-level symbol names defined in body-forms that shadow chezscheme.
+  ;; Only returns symbols actually exported by chezscheme (to avoid invalid except clauses).
+  ;; Handles: (def name ...), (def (name ...) ...), (define name ...),
+  ;;          (define (name ...) ...), (defstruct name ...)
+  (let loop ([forms body-forms] [names '()])
+    (if (null? forms)
+      names
+      (let ([form (car forms)])
+        (loop (cdr forms)
+              (if (and (pair? form) (pair? (cdr form)))
+                (let ([head (car form)]
+                      [second (cadr form)])
+                  (let ([sym
+                         (cond
+                           ;; (def name ...) or (define name ...)
+                           [(and (memq head '(def define)) (symbol? second))
+                            second]
+                           ;; (def (name args...) ...) or (define (name args...) ...)
+                           [(and (memq head '(def define)) (pair? second) (symbol? (car second)))
+                            (car second)]
+                           ;; (defstruct name ...) or (defstruct (name parent) ...)
+                           [(eq? head 'defstruct)
+                            (if (pair? second) (car second) second)]
+                           [else #f])])
+                    (if (and sym (chez-export? sym))
+                      (cons sym names)
+                      names)))
+                names))))))
 
 (define (compute-exclusions translated-imports)
   ;; Union of all Chez names shadowed by the given imports.
+  ;; When an import is (only lib sym ...), only add exclusions for the
+  ;; symbols actually imported (not all trigger symbols for that library).
   (let loop ([imports translated-imports] [excls '()])
     (if (null? imports)
       (delete-duplicates excls eq?)
-      (let* ([lib-name (unwrap-import-lib (car imports))]
-             [match (assoc lib-name *exclusion-triggers*)])
+      (let* ([imp     (car imports)]
+             [lib-name (unwrap-import-lib imp)]
+             [match   (assoc lib-name *exclusion-triggers*)])
         (loop (cdr imports)
               (if match
-                (append (cdr match) excls)
+                ;; If it's an (only lib ...) form, filter to only the imported syms.
+                (let ([only-syms (import-actual-symbols imp)]
+                      [trigger-syms (cdr match)])
+                  (append (if only-syms
+                            (filter (lambda (s) (memq s only-syms)) trigger-syms)
+                            trigger-syms)
+                          excls))
                 excls))))))
 
 (define (delete-duplicates lst pred)
@@ -478,12 +667,268 @@
 ;;;; Output generation
 ;;;; ============================================================
 
+(define (definition-form? form)
+  ;; Returns #t if this form is a definition (vs expression).
+  ;; In R6RS library bodies, all definitions must precede expressions.
+  (and (pair? form)
+       (memq (car form) '(define define-syntax define-values define-record-type
+                          def def* defrule defrules
+                          defstruct defclass defmethod))))
+
+(define (reorder-body-forms forms)
+  ;; Partition into definitions and expressions, emitting defs first.
+  ;; This ensures R6RS library body compliance.
+  (let loop ([forms forms] [defs '()] [exprs '()])
+    (if (null? forms)
+      (append (reverse defs) (reverse exprs))
+      (if (definition-form? (car forms))
+        (loop (cdr forms) (cons (car forms) defs) exprs)
+        (loop (cdr forms) defs (cons (car forms) exprs))))))
+
+(define (transform-set!-fields form)
+  ;; Recursively transform (set! (f obj) val) → (f-set! obj val)
+  ;; This handles Gerbil's struct field mutation idiom.
+  (cond
+    [(not (pair? form)) form]
+    [(and (eq? (car form) 'set!)
+          (pair? (cdr form))
+          (pair? (cadr form))
+          (symbol? (caadr form)))
+     ;; (set! (f arg ...) val) → (f-set! arg ... val)
+     ;; Special case: car/cdr use Chez's set-car!/set-cdr! names.
+     (let* ([accessor (caadr form)]
+            [args     (cdadr form)]
+            [val      (caddr form)]
+            [setter   (case accessor
+                        [(car)  'set-car!]
+                        [(cdr)  'set-cdr!]
+                        [else   (string->symbol (string-append (symbol->string accessor) "-set!"))])])
+       `(,setter ,@(map transform-set!-fields args)
+                 ,(transform-set!-fields val)))]
+    [else
+     ;; Recursively walk the list, preserving improper list tails (dotted pairs)
+     (let loop ([lst form])
+       (cond
+         [(null? lst) '()]
+         [(pair? lst) (cons (transform-set!-fields (car lst)) (loop (cdr lst)))]
+         [else lst]))]))
+
+(define (transform-set!-fields-in-body forms)
+  (map transform-set!-fields forms))
+
+(define (quote-bare-vectors form)
+  ;; In Gerbil, #(a b c) is a self-evaluating vector literal.
+  ;; In Chez R6RS, vectors must be quoted: '#(a b c).
+  ;; This transform wraps any bare vector values in (quote ...).
+  (cond
+    [(vector? form) `(quote ,form)]
+    [(not (pair? form)) form]
+    ;; Don't recurse into (quote ...) — already quoted
+    [(eq? (car form) 'quote) form]
+    [else
+     ;; Recurse, preserving improper list tails
+     (let loop ([lst form])
+       (cond
+         [(null? lst) '()]
+         [(pair? lst) (cons (quote-bare-vectors (car lst)) (loop (cdr lst)))]
+         [else lst]))]))
+
+(define (quote-bare-vectors-in-body forms)
+  (map quote-bare-vectors forms))
+
+;; Keyword symbols (symbols ending in ':') in Gerbil call sites are passed as
+;; literal keyword markers. In Chez R6RS they must be quoted.
+(define (keyword-sym? sym)
+  (and (symbol? sym)
+       (let ([s (symbol->string sym)])
+         (and (> (string-length s) 0)
+              (char=? (string-ref s (- (string-length s) 1)) #\:)))))
+
+;; Special forms where keyword-like symbols appear as syntax (not call-site args)
+(define *non-call-heads*
+  '(quote quasiquote unquote unquote-splicing
+    let let* letrec letrec* let-values let*-values
+    lambda case-lambda define define-syntax define-values define-record-type
+    begin cond case and or when unless do
+    if set! syntax-rules syntax-case with-syntax
+    def def* defrule defrules defstruct defclass defmethod
+    defmacro match try catch finally while until
+    let-hash hash hash-eq import export library meta))
+
+(define (quote-keyword-args form)
+  ;; In a call (f a1 a2 kw: v ...), quote any kw: symbols in argument positions.
+  ;; Does not quote keyword-like symbols in car position (function name).
+  ;; Does not recurse into quote forms.
+  ;; Special handling for def/lambda: the parameter list is NOT a call.
+  (cond
+    [(not (pair? form)) form]
+    [(eq? (car form) 'quote) form]
+    ;; (def (name params...) body...) — skip the parameter list (cadr), recurse into body
+    [(and (memq (car form) '(def def*))
+          (pair? (cdr form))
+          (pair? (cadr form)))
+     (cons (car form)
+           (cons (cadr form)  ; parameter list — don't quote keywords here
+                 (map quote-keyword-args (cddr form))))]
+    ;; (lambda (params...) body...) — skip parameter list
+    [(and (memq (car form) '(lambda case-lambda))
+          (pair? (cdr form)))
+     (cons (car form)
+           (cons (cadr form)
+                 (map quote-keyword-args (cddr form))))]
+    [(and (symbol? (car form))
+          (memq (car form) *non-call-heads*))
+     ;; Other special form — recurse into subforms but don't quote keyword args directly
+     (let loop ([lst form])
+       (cond
+         [(null? lst) '()]
+         [(pair? lst) (cons (quote-keyword-args (car lst)) (loop (cdr lst)))]
+         [else lst]))]
+    [(and (pair? form) (keyword-sym? (car form)))
+     ;; Gerbil keyword plist used as data: (path: "git" arguments: ...) →
+     ;; (list 'path: "git" 'arguments: ...) so it evaluates to a proper alist.
+     (cons 'list
+           (let loop ([kv form])
+             (cond
+               [(null? kv) '()]
+               [(keyword-sym? (car kv))
+                (cons `(quote ,(car kv))
+                      (if (pair? (cdr kv))
+                        (cons (quote-keyword-args (cadr kv))
+                              (loop (cddr kv)))
+                        '()))]
+               [else (cons (quote-keyword-args (car kv)) (loop (cdr kv)))])))]
+    [else
+     ;; Regular call or list traversal: quote keyword symbols in all positions.
+     ;; If the head is itself a pair (e.g. a binding in a let* binding list),
+     ;; recurse into it too so keywords inside bindings are also quoted.
+     (cons (if (pair? (car form))
+             (quote-keyword-args (car form))
+             (car form))
+           (let loop ([args (cdr form)])
+             (cond
+               [(null? args) '()]
+               [(pair? args)
+                (let ([arg (car args)])
+                  (cons (if (keyword-sym? arg)
+                          `(quote ,arg)
+                          (quote-keyword-args arg))
+                        (loop (cdr args))))]
+               [else args])))]))
+
+(define (quote-keyword-args-in-body forms)
+  (map quote-keyword-args forms))
+
+(define (find-set!-vars forms)
+  ;; Collect all variable names that appear as (set! var ...) anywhere in forms.
+  (let loop ([forms forms] [acc '()])
+    (cond
+      [(null? forms) acc]
+      [(not (pair? forms)) acc]
+      [(pair? (car forms))
+       (let ([form (car forms)])
+         (let ([inner
+                (cond
+                  ;; (set! var expr)
+                  [(and (eq? (car form) 'set!)
+                        (pair? (cdr form))
+                        (symbol? (cadr form)))
+                   (cons (cadr form) (find-set!-vars (cddr form)))]
+                  ;; Recurse into any nested pair
+                  [else (find-set!-vars form)])])
+           (loop (cdr forms) (append inner acc))))]
+      [else (loop (cdr forms) acc)])))
+
+(define (make-mutable-cell-name var)
+  (string->symbol (string-append (symbol->string var) "--cell")))
+
+(define (earmuff-variable? sym)
+  ;; Gerbil convention: *name* signals a mutable global variable
+  (let ([s (symbol->string sym)])
+    (and (> (string-length s) 2)
+         (char=? (string-ref s 0) #\*)
+         (char=? (string-ref s (- (string-length s) 1)) #\*))))
+
+(define (locally-defined-vars body-forms)
+  ;; Collect all variable names that are locally defined (via def/define)
+  ;; in the body, regardless of whether they shadow chezscheme exports.
+  (let loop ([forms body-forms] [names '()])
+    (if (null? forms)
+      names
+      (let ([form (car forms)])
+        (loop (cdr forms)
+              (if (and (pair? form) (pair? (cdr form)))
+                (let ([head (car form)]
+                      [second (cadr form)])
+                  (let ([sym
+                         (cond
+                           [(and (memq head '(def define)) (symbol? second)) second]
+                           [(and (memq head '(def define)) (pair? second) (symbol? (car second)))
+                            (car second)]
+                           [else #f])])
+                    (if sym (cons sym names) names)))
+                names))))))
+
+(define (wrap-mutable-exports exports body-forms)
+  ;; For exported variables that are set! in the body OR follow the earmuff
+  ;; naming convention (*name*) AND are locally defined in the body, replace
+  ;; the plain define with a vector cell + identifier-syntax wrapper.
+  ;; The identifier-syntax form allows cross-library set! to work (Chez
+  ;; identifier-syntax captures the cell in the defining library's scope).
+  ;; Returns (values new-exports new-body-forms).
+  (let* ([assigned    (find-set!-vars body-forms)]
+         [local-defs  (locally-defined-vars body-forms)]
+         [var-exports (filter symbol? exports)]
+         [mutable    (filter (lambda (v)
+                               (or (memq v assigned)
+                                   (and (earmuff-variable? v)
+                                        (memq v local-defs))))
+                             var-exports)])
+    (if (null? mutable)
+      (values exports body-forms)
+      (let* ([new-body
+              (let loop ([forms body-forms] [acc '()])
+                (if (null? forms)
+                  (let* ([cell-defs
+                          (map (lambda (v)
+                                 (let ([cell (make-mutable-cell-name v)])
+                                   `(define-syntax ,v
+                                      (identifier-syntax
+                                        [id (vector-ref ,cell 0)]
+                                        [(set! id val) (vector-set! ,cell 0 val)]))))
+                               mutable)])
+                    (append (reverse acc) cell-defs))
+                  (let ([form (car forms)])
+                    ;; Replace (define var init) or (def var init) for mutable vars
+                    (let ([new-form
+                           (if (and (pair? form)
+                                    (memq (car form) '(define def))
+                                    (pair? (cdr form))
+                                    (symbol? (cadr form))
+                                    (memq (cadr form) mutable))
+                             ;; Convert: (define *x* init) → (define *x*--cell (vector init))
+                             (let* ([var (cadr form)]
+                                    [cell (make-mutable-cell-name var)]
+                                    [init (if (pair? (cddr form)) (caddr form) '(void))])
+                               `(define ,cell (vector ,init)))
+                             form)])
+                      (loop (cdr forms) (cons new-form acc))))))])
+        (values exports new-body)))))
+
 (define (generate-library library-name exports imports body-forms)
   ;; Produce the complete R6RS library S-expression.
-  `(library ,library-name
-     (export ,@exports)
-     (import ,@imports)
-     ,@body-forms))
+  ;; 1. Transform (set! (f obj) val) → (f-set! obj val)
+  ;; 2. Wrap exported+assigned variables in identifier-syntax cells.
+  ;; 3. Reorder body so all definitions precede expressions (R6RS requirement).
+  (let* ([transformed-body (quote-bare-vectors-in-body
+                              (quote-keyword-args-in-body
+                                (transform-set!-fields-in-body body-forms)))])
+    (let-values ([(new-exports new-body) (wrap-mutable-exports exports transformed-body)])
+      (let ([ordered (reorder-body-forms new-body)])
+        `(library ,library-name
+           (export ,@new-exports)
+           (import ,@imports)
+           ,@ordered)))))
 
 (define (write-library-file output-path library-form src-path)
   (ensure-directory-exists
@@ -563,6 +1008,9 @@
              ;; Expand exports
              [expanded-exports (expand-exports export-specs struct-table body-forms)]
 
+             ;; Set current library prefix for relative import resolution
+             [_ (set! *current-library-prefix* library-name)]
+
              ;; Translate imports
              [translated-imports (map translate-import import-specs)]
 
@@ -570,14 +1018,23 @@
              [with-autos (add-auto-imports translated-imports)]
 
              ;; Compute Chez exclusions based on what's imported
-             [exclusions (compute-exclusions with-autos)]
+             [import-exclusions (compute-exclusions with-autos)]
+
+             ;; Also exclude locally-defined names that shadow chezscheme
+             [local-defs (collect-local-defs body-forms)]
+             [exclusions (delete-duplicates
+                           (append import-exclusions local-defs)
+                           eq?)]
 
              ;; Build final import list: (except (chezscheme) ...) first
-             [final-imports
+             [pre-final
               (cons (if (null? exclusions)
                       '(chezscheme)
                       `(except (chezscheme) ,@exclusions))
                     with-autos)]
+
+             ;; Resolve inter-library conflicts (e.g. srfi-13 vs misc/string)
+             [final-imports (resolve-inter-library-conflicts pre-final)]
 
              ;; Assemble library form
              [library-form (generate-library library-name

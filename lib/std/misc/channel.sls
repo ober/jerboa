@@ -7,7 +7,7 @@
 ;;; - Backward compatible: (make-channel) still creates unbounded channel
 
 (library (std misc channel)
-  (export make-channel channel-put channel-get channel-try-get
+  (export make-channel channel-put channel-try-put channel-get channel-try-get
           channel-close channel-closed? channel?
           channel-length channel-empty?
           channel-select)
@@ -84,6 +84,27 @@
           (channel-tail-set! ch (fxmod (fx+ tail 1) (vector-length buf)))
           (channel-count-set! ch (fx+ (channel-count ch) 1)))
         (condition-signal (channel-not-empty ch)))))
+
+  (define (channel-try-put ch val)
+    ;; Non-blocking put: return #t on success, #f if channel is full or closed.
+    (with-mutex (channel-mutex ch)
+      (if (channel-closed? ch)
+        #f
+        (let ([cap (channel-capacity ch)])
+          (if (and cap (fx= (channel-count ch) cap))
+            #f  ;; bounded and full
+            (begin
+              ;; Unbounded: grow if needed
+              (unless cap
+                (when (fx= (channel-count ch) (vector-length (channel-buf ch)))
+                  (grow-buffer! ch)))
+              (let ([buf (channel-buf ch)]
+                    [tail (channel-tail ch)])
+                (vector-set! buf tail val)
+                (channel-tail-set! ch (fxmod (fx+ tail 1) (vector-length buf)))
+                (channel-count-set! ch (fx+ (channel-count ch) 1)))
+              (condition-signal (channel-not-empty ch))
+              #t))))))
 
   (define (channel-get ch)
     (with-mutex (channel-mutex ch)

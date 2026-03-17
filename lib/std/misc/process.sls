@@ -5,6 +5,7 @@
   (export
     run-process
     run-process/batch
+    filter-with-process
 
     ;; Process ports (Gambit-compatible subprocess I/O)
     open-input-process
@@ -137,35 +138,79 @@
   (define (process-port-pid pp) (process-port-rec-pid pp))
   (define (process-port-status pp) (process-port-rec-status pp))
 
+  (define (keyword-sym? x)
+    (and (symbol? x)
+         (let ([s (symbol->string x)])
+           (and (> (string-length s) 0)
+                (char=? (string-ref s (- (string-length s) 1)) #\:)))))
+
+  (define (parse-process-settings args)
+    ;; Parse Gambit-style open-process settings.
+    ;; args can be:
+    ;;   - a string: the shell command
+    ;;   - a list of strings: command + arguments
+    ;;   - a keyword plist: (path: "prog" arguments: '(...) directory: d ...)
+    ;; Returns (values cmd-string dir)
+    (cond
+      ((string? args) (values args #f))
+      ((and (pair? args) (keyword-sym? (car args)))
+       ;; Keyword plist: extract path, arguments, directory
+       (let* ((path (extract-keyword args 'path: #f))
+              (arguments (extract-keyword args 'arguments: '()))
+              (directory (extract-keyword args 'directory: #f))
+              (all-args (if path (cons path arguments) arguments))
+              (cmd (build-command-string all-args)))
+         (values cmd directory)))
+      (else
+       ;; List of strings
+       (values (build-command-string args) #f))))
+
   (define (open-input-process args)
     ;; Run a command, return a textual input port connected to its stdout.
-    ;; Closing the port waits for the child to exit.
-    (let* ([cmd (build-command-string args)])
-      (let-values ([(to-stdin from-stdout from-stderr pid)
-                    (open-process-ports cmd 'line (native-transcoder))])
-        (close-port to-stdin)
-        (close-port from-stderr)
-        ;; Wrap stdout in a custom port that tracks the pid
-        (let ([pp (make-process-port-rec #f from-stdout #f pid #f)])
-          ;; Return the stdout port directly — callers read from it
-          ;; Attach process-port to port via port-name convention
+    (let-values ([(cmd dir) (parse-process-settings args)])
+      (let* ([full-cmd (if dir (string-append "cd " (shell-quote dir) " && " cmd) cmd)])
+        (let-values ([(to-stdin from-stdout from-stderr pid)
+                      (open-process-ports full-cmd 'line (native-transcoder))])
+          (close-port to-stdin)
+          (close-port from-stderr)
           from-stdout))))
 
   (define (open-output-process args)
     ;; Run a command, return a textual output port connected to its stdin.
-    (let* ([cmd (build-command-string args)])
-      (let-values ([(to-stdin from-stdout from-stderr pid)
-                    (open-process-ports cmd 'line (native-transcoder))])
-        (close-port from-stdout)
-        (close-port from-stderr)
-        to-stdin)))
+    (let-values ([(cmd dir) (parse-process-settings args)])
+      (let* ([full-cmd (if dir (string-append "cd " (shell-quote dir) " && " cmd) cmd)])
+        (let-values ([(to-stdin from-stdout from-stderr pid)
+                      (open-process-ports full-cmd 'line (native-transcoder))])
+          (close-port from-stdout)
+          (close-port from-stderr)
+          to-stdin))))
 
   (define (open-process args)
     ;; Run a command, return a process-port record with stdin/stdout/stderr.
-    ;; This is the full Gambit open-process equivalent.
-    (let* ([cmd (build-command-string args)])
-      (let-values ([(to-stdin from-stdout from-stderr pid)
-                    (open-process-ports cmd 'line (native-transcoder))])
-        (make-process-port-rec to-stdin from-stdout from-stderr pid #f))))
+    ;; Accepts string, list-of-strings, or Gambit keyword plist.
+    (let-values ([(cmd dir) (parse-process-settings args)])
+      (let* ([full-cmd (if dir (string-append "cd " (shell-quote dir) " && " cmd) cmd)])
+        (let-values ([(to-stdin from-stdout from-stderr pid)
+                      (open-process-ports full-cmd 'line (native-transcoder))])
+          (make-process-port-rec to-stdin from-stdout from-stderr pid #f)))))
+
+  (define (filter-with-process command writer reader . rest)
+    ;; Run COMMAND (list of strings or string), pipe input via WRITER,
+    ;; and return the result of calling READER on the process stdout.
+    ;; Keyword: directory: dir
+    (let* ((dir (extract-keyword rest 'directory: #f))
+           (cmd (build-command-string command))
+           (full-cmd (if dir
+                       (string-append "cd " (shell-quote dir) " && " cmd)
+                       cmd)))
+      (let-values (((to-stdin from-stdout from-stderr pid)
+                    (open-process-ports full-cmd 'block (native-transcoder))))
+        (writer to-stdin)
+        (flush-output-port to-stdin)
+        (close-port to-stdin)
+        (let ((result (reader from-stdout)))
+          (close-port from-stdout)
+          (close-port from-stderr)
+          result))))
 
   ) ;; end library

@@ -5,7 +5,7 @@
   (export
     string-index
     string-index-right
-    string-contains
+    string-contains string-contains-ci
     string-prefix?
     string-suffix?
     string-trim
@@ -54,6 +54,12 @@
           ((< i start) #f)
           ((pred (string-ref str i)) i)
           (else (lp (- i 1)))))))
+
+  (define (string-contains-ci s1 s2 . rest)
+    (apply string-contains
+           (string-downcase s1)
+           (string-downcase s2)
+           rest))
 
   (define (string-contains s1 s2 . rest)
     (let* ((start1 (if (pair? rest) (car rest) 0))
