@@ -176,16 +176,132 @@
 ;;;; Reading and classifying source forms
 ;;;; ============================================================
 
+(define (preprocess-brackets str)
+  ;; Convert Gerbil bracket list syntax [x y z] → (list x y z)
+  ;; in source text, while correctly skipping strings, comments,
+  ;; and character literals (#\[).
+  ;; In Gerbil, [...] is always (list ...), never syntactic grouping.
+  (let* ([len (string-length str)]
+         [out (open-output-string)])
+    (let loop ([i 0]
+               [in-string #f]
+               [in-line-comment #f])
+      (if (>= i len)
+        (get-output-string out)
+        (let ([ch (string-ref str i)])
+          (cond
+            ;; Inside a line comment — copy until newline
+            [in-line-comment
+             (write-char ch out)
+             (loop (+ i 1) in-string (not (char=? ch #\newline)))]
+            ;; Inside a string — copy, handle escapes
+            [in-string
+             (write-char ch out)
+             (cond
+               ;; Escaped character inside string — copy next char verbatim
+               [(char=? ch #\\)
+                (when (< (+ i 1) len)
+                  (write-char (string-ref str (+ i 1)) out))
+                (loop (+ i 2) in-string #f)]
+               ;; End of string
+               [(char=? ch #\")
+                (loop (+ i 1) #f #f)]
+               [else
+                (loop (+ i 1) in-string #f)])]
+            ;; Character literal: #\x — copy # \ and the character name verbatim
+            ;; Must not convert #\[ or #\] — those are char literals, not list brackets
+            [(and (char=? ch #\#)
+                  (< (+ i 1) len)
+                  (char=? (string-ref str (+ i 1)) #\\))
+             (write-char ch out)
+             (write-char (string-ref str (+ i 1)) out)
+             (if (>= (+ i 2) len)
+               (loop (+ i 2) #f #f)
+               (let ([nc (string-ref str (+ i 2))])
+                 ;; If single non-alphabetic char (like #\[ #\] #\( #\space etc.):
+                 ;; write it verbatim and continue WITHOUT going through the bracket handler
+                 (if (not (char-alphabetic? nc))
+                   (begin
+                     (write-char nc out)
+                     (loop (+ i 3) #f #f))
+                   ;; Alphabetic: read the whole name (e.g. newline, space, nul)
+                   (let char-loop ([j (+ i 2)])
+                     (if (>= j len)
+                       (loop j #f #f)
+                       (let ([ac (string-ref str j)])
+                         (if (or (char-whitespace? ac)
+                                 (memv ac '(#\( #\) #\[ #\] #\; #\")))
+                           (loop j #f #f)
+                           (begin
+                             (write-char ac out)
+                             (char-loop (+ j 1))))))))))]
+            ;; Block comment #| ... |#
+            [(and (char=? ch #\#)
+                  (< (+ i 1) len)
+                  (char=? (string-ref str (+ i 1)) #\|))
+             (write-char ch out)
+             (write-char (string-ref str (+ i 1)) out)
+             (let block-loop ([j (+ i 2)] [depth 1])
+               (if (or (>= j len) (= depth 0))
+                 (loop j #f #f)
+                 (let ([bc (string-ref str j)])
+                   (cond
+                     [(and (char=? bc #\|)
+                           (< (+ j 1) len)
+                           (char=? (string-ref str (+ j 1)) #\#))
+                      (write-char bc out)
+                      (write-char (string-ref str (+ j 1)) out)
+                      (block-loop (+ j 2) (- depth 1))]
+                     [(and (char=? bc #\#)
+                           (< (+ j 1) len)
+                           (char=? (string-ref str (+ j 1)) #\|))
+                      (write-char bc out)
+                      (write-char (string-ref str (+ j 1)) out)
+                      (block-loop (+ j 2) (+ depth 1))]
+                     [else
+                      (write-char bc out)
+                      (block-loop (+ j 1) depth)]))))]
+            ;; Start of line comment
+            [(char=? ch #\;)
+             (write-char ch out)
+             (loop (+ i 1) #f #t)]
+            ;; Start of string
+            [(char=? ch #\")
+             (write-char ch out)
+             (loop (+ i 1) #t #f)]
+            ;; Bracket open → (list
+            [(char=? ch #\[)
+             (display "(list " out)
+             (loop (+ i 1) #f #f)]
+            ;; Bracket close → )
+            [(char=? ch #\])
+             (write-char #\) out)
+             (loop (+ i 1) #f #f)]
+            ;; Everything else — copy verbatim
+            [else
+             (write-char ch out)
+             (loop (+ i 1) #f #f)]))))))
+
 (define (read-source-file path)
   ;; Read all top-level S-expressions from a .ss file.
+  ;; Preprocesses Gerbil bracket syntax [x y z] → (list x y z).
   ;; Returns a list of forms.
-  (call-with-input-file path
-    (lambda (port)
-      (let loop ([forms '()])
-        (let ([form (read port)])
-          (if (eof-object? form)
-            (reverse forms)
-            (loop (cons form forms))))))))
+  (let* ([raw (call-with-input-file path
+                (lambda (port)
+                  (let ([p (open-output-string)])
+                    (let loop ()
+                      (let ([ch (read-char port)])
+                        (unless (eof-object? ch)
+                          (write-char ch p)
+                          (loop))))
+                    (get-output-string p))))]
+         [processed (preprocess-brackets raw)]
+         [port (open-input-string processed)])
+    (let loop ([forms '()])
+      (let ([form (read port)])
+        (if (eof-object? form)
+          (reverse forms)
+          (loop (cons form forms)))))))
 
 (define (classify-forms forms)
   ;; Separate forms into export-specs, import-specs, body-forms.
