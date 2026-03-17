@@ -37,6 +37,11 @@
   (define c-inet-pton (foreign-procedure "inet_pton" (int string void*) int))
   (define c-getsockname (foreign-procedure "getsockname" (int void* void*) int))
 
+  ;; errno access for EINTR retry
+  (define c-errno-location (foreign-procedure "__errno_location" () void*))
+  (define (get-errno) (foreign-ref 'int (c-errno-location) 0))
+  (define EINTR 4)
+
   ;; Constants
   (define AF_INET 2)
   (define SOCK_STREAM 1)
@@ -121,10 +126,13 @@
 
   (define (tcp-accept srv)
     ;; Accept a connection. Returns (values input-port output-port).
-    (let ([client-fd (c-accept (tcp-server-fd srv) 0 0)])
-      (when (< client-fd 0)
-        (error 'tcp-accept "accept() failed"))
-      (fd->ports client-fd "tcp-client")))
+    ;; Retries on EINTR (caused by GC stop-the-world interrupting accept()).
+    (let loop ()
+      (let ([client-fd (c-accept (tcp-server-fd srv) 0 0)])
+        (cond
+          [(>= client-fd 0) (fd->ports client-fd "tcp-client")]
+          [(= (get-errno) EINTR) (loop)]
+          [else (error 'tcp-accept "accept() failed")]))))
 
   (define (tcp-close srv)
     (c-close (tcp-server-fd srv)))
@@ -133,16 +141,22 @@
 
   (define (tcp-connect address port)
     ;; Connect to a TCP server. Returns (values input-port output-port).
+    ;; Retries on EINTR (caused by GC stop-the-world interrupting connect()).
     (let ([fd (c-socket AF_INET SOCK_STREAM 0)])
       (when (< fd 0)
         (error 'tcp-connect "socket() failed"))
       (let ([addr (make-sockaddr-in address port)])
-        (let ([rc (c-connect fd addr SOCKADDR_IN_SIZE)])
-          (foreign-free addr)
-          (when (< rc 0)
-            (c-close fd)
-            (error 'tcp-connect "connect() failed" address port))))
-      (fd->ports fd "tcp-connection")))
+        (let loop ()
+          (let ([rc (c-connect fd addr SOCKADDR_IN_SIZE)])
+            (cond
+              [(>= rc 0)
+               (foreign-free addr)
+               (fd->ports fd "tcp-connection")]
+              [(= (get-errno) EINTR) (loop)]
+              [else
+               (foreign-free addr)
+               (c-close fd)
+               (error 'tcp-connect "connect() failed" address port)]))))))
 
   ;; ========== Convenience ==========
 
@@ -159,46 +173,56 @@
 
   (define (fd->ports fd name)
     ;; Wrap a socket FD as a pair of transcoded text ports.
-    (let ([in (make-custom-binary-input-port
-                (string-append name "-in")
-                (lambda (bv start count)
-                  ;; read callback
-                  (let ([buf (make-bytevector count)])
-                    (let ([n (c-read fd buf count)])
-                      (if (<= n 0)
-                        0  ;; EOF
-                        (begin
-                          (bytevector-copy! buf 0 bv start n)
-                          n)))))
-                #f  ;; get-position
-                #f  ;; set-position!
-                (lambda () (c-close fd)))]
-          [out (make-custom-binary-output-port
-                 (string-append name "-out")
-                 (lambda (bv start count)
-                   ;; write callback
-                   (let ([buf (make-bytevector count)])
-                     (bytevector-copy! bv start buf 0 count)
-                     (let lp ([written 0])
-                       (if (= written count)
-                         count
-                         (let ([n (c-write fd
-                                    (let ([tmp (make-bytevector (- count written))])
-                                      (bytevector-copy! buf written tmp 0 (- count written))
-                                      tmp)
-                                    (- count written))])
-                           (if (<= n 0)
-                             written
-                             (lp (+ written n))))))))
-                 #f  ;; get-position
-                 #f  ;; set-position!
-                 #f)])  ;; don't double-close
-      (values
-        (transcoded-port in (make-transcoder (utf-8-codec)
-                              (eol-style none)
-                              (error-handling-mode replace)))
-        (transcoded-port out (make-transcoder (utf-8-codec)
-                               (eol-style none)
-                               (error-handling-mode replace))))))
+    ;; IMPORTANT: Both ports share the same fd. A closed? flag prevents:
+    ;; 1. Double-close: Chez calls close handler on both close-port AND GC finalization
+    ;; 2. Read/write after close: returns EOF/0 instead of operating on reused fd
+    (let ([closed? #f])
+      (let ([in (make-custom-binary-input-port
+                  (string-append name "-in")
+                  (lambda (bv start count)
+                    (if closed? 0
+                      (let ([buf (make-bytevector count)])
+                        (let retry ()
+                          (let ([n (c-read fd buf count)])
+                            (cond
+                              [(> n 0)
+                               (bytevector-copy! buf 0 bv start n)
+                               n]
+                              [(and (< n 0) (= (get-errno) EINTR)) (retry)]
+                              [else 0]))))))
+                  #f  ;; get-position
+                  #f  ;; set-position!
+                  (lambda ()
+                    (unless closed?
+                      (set! closed? #t)
+                      (c-close fd))))]
+            [out (make-custom-binary-output-port
+                   (string-append name "-out")
+                   (lambda (bv start count)
+                     (if closed? 0
+                       (let ([buf (make-bytevector count)])
+                         (bytevector-copy! bv start buf 0 count)
+                         (let lp ([written 0])
+                           (if (= written count)
+                             count
+                             (let ([n (c-write fd
+                                        (let ([tmp (make-bytevector (- count written))])
+                                          (bytevector-copy! buf written tmp 0 (- count written))
+                                          tmp)
+                                        (- count written))])
+                               (cond
+                                 [(> n 0) (lp (+ written n))]
+                                 [(and (< n 0) (= (get-errno) EINTR)) (lp written)]
+                                 [else written])))))))
+                   #f  ;; get-position
+                   #f  ;; set-position!
+                   #f)])  ;; no close handler — fd closed via input port only
+        (values
+          (transcoded-port in (make-transcoder (utf-8-codec)
+                                (eol-style none)
+                                (error-handling-mode replace)))
+          (transcoded-port out (make-transcoder (utf-8-codec)
+                                 (eol-style none)
+                                 (error-handling-mode replace)))))))
 
   ) ;; end library
