@@ -5,7 +5,8 @@
   (export
     error? error-message error-irritants error-trace
     Error ContractViolation
-    raise-error with-exception-handler)
+    raise-error with-exception-handler
+    Error? Error-message Error-irritants)
   (import (chezscheme))
 
   ;; In Chez, errors are conditions. Provide Gerbil-compatible access.
@@ -44,5 +45,10 @@
              (make-who-condition where)
              (make-message-condition message)
              (make-irritants-condition irritants))))
+
+  ;; Gerbil class-style aliases (match gherkin's runtime/error.sls)
+  (define Error? error?)
+  (define Error-message error-message)
+  (define Error-irritants error-irritants)
 
   ) ;; end library

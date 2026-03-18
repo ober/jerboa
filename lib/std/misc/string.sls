@@ -88,13 +88,22 @@
           [(string=? (substring str i (+ i slen)) sub) i]
           [else (loop (+ i 1))]))))
 
-  (define (string-index str ch)
-    (let ([len (string-length str)])
-      (let loop ([i 0])
-        (cond
-          [(= i len) #f]
-          [(char=? (string-ref str i) ch) i]
-          [else (loop (+ i 1))]))))
+  (define string-index
+    (case-lambda
+      [(str ch)
+       (let ([len (string-length str)])
+         (let loop ([i 0])
+           (cond
+             [(= i len) #f]
+             [(char=? (string-ref str i) ch) i]
+             [else (loop (+ i 1))])))]
+      [(str ch start)
+       (let ([len (string-length str)])
+         (let loop ([i start])
+           (cond
+             [(= i len) #f]
+             [(char=? (string-ref str i) ch) i]
+             [else (loop (+ i 1))])))]))
 
   (define (string-empty? str)
     (zero? (string-length str)))
