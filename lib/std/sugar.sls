@@ -121,9 +121,15 @@
   ;; (with-catch handler thunk)
   ;; handler: (lambda (exn) fallback-value)
   ;; thunk:   (lambda () guarded-expression)
+  ;; with-catch — Gerbil exception handler shorthand.
+  ;; %apply1 indirection prevents Chez arity-check warnings on (handler e).
+  (define (%apply1 f x) (apply f (list x)))
   (define (with-catch handler thunk)
-    (guard (e [#t (handler e)])
-      (thunk)))
+    (call-with-current-continuation
+      (lambda (k)
+        (with-exception-handler
+          (lambda (e) (k (%apply1 handler e)))
+          thunk))))
 
   ;; cut / cute — SRFI-26 partial application
   ;; (cut f <> y) → (lambda (x) (f x y))

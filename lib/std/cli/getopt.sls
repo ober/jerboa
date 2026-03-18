@@ -168,6 +168,26 @@
                           (lp (cddr args)
                               (cons (cons (opt-name o) (cadr args)) result)
                               positionals pos-idx))))))
+               ;; Combined short options: -la -> -l -a, -n3 -> -n with value "3"
+               ((and (> (string-length arg) 2)
+                     (char=? (string-ref arg 0) #\-)
+                     (not (char=? (string-ref arg 1) #\-)))
+                (let* ((short-key (substring arg 0 2))
+                       (rest-str (substring arg 2 (string-length arg)))
+                       (matched (find-opt opts short-key)))
+                  (if matched
+                    (case (opt-kind matched)
+                      ((option)
+                       (lp (cdr args)
+                           (cons (cons (opt-name matched) rest-str) result)
+                           positionals pos-idx))
+                      ((flag)
+                       (lp (cons (string-append "-" rest-str) (cdr args))
+                           (cons (cons (opt-name matched) #t) result)
+                           positionals pos-idx))
+                      (else
+                       (error 'getopt-parse (string-append "unknown option: " arg))))
+                    (error 'getopt-parse (string-append "unknown option: " arg)))))
                (else
                 (error 'getopt-parse (string-append "unknown option: " arg))))))
           ;; Check for command
@@ -248,6 +268,11 @@
     ;; Gerbil convention: (proc cmd opt-hash)
     ;; cmd = command name symbol, opt-hash = hash table of options
     (let ((gopt (apply getopt specs)))
+      ;; Handle --help before parsing (exit 0)
+      ;; Only intercept --help, not -h (which many utilities use for their own options)
+      (when (member "--help" args)
+        (getopt-display-help gopt (current-output-port))
+        (exit 0))
       (guard (exn (#t (fprintf (current-error-port) "Error: ~a~n" exn)
                       (getopt-display-help gopt (current-error-port))
                       (exit 1)))

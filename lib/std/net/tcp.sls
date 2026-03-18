@@ -22,7 +22,11 @@
   ;; ========== FFI ==========
 
   ;; Load libc for POSIX socket functions
-  (define load-libc (load-shared-object #f))
+  (define _libc-loaded
+    (let ((v (getenv "JEMACS_STATIC")))
+      (if (and v (not (string=? v "")) (not (string=? v "0")))
+          #f  ; symbols already in static binary
+          (load-shared-object #f))))
 
   (define c-socket    (foreign-procedure "socket" (int int int) int))
   (define c-bind      (foreign-procedure "bind" (int void* int) int))

@@ -3,7 +3,7 @@
 
 (library (std crypto digest)
   (export
-    md5 sha1 sha256 sha384 sha512
+    md5 sha1 sha224 sha256 sha384 sha512
     digest->hex-string digest->u8vector)
 
   (import (chezscheme))
@@ -14,6 +14,7 @@
            (algo-name (case algo
                         ((md5) "md5")
                         ((sha1) "sha1")
+                        ((sha224) "sha224")
                         ((sha256) "sha256")
                         ((sha384) "sha384")
                         ((sha512) "sha512")
@@ -77,6 +78,7 @@
   ;; Public API: returns hex string
   (define (md5 data) (compute-digest 'md5 data))
   (define (sha1 data) (compute-digest 'sha1 data))
+  (define (sha224 data) (compute-digest 'sha224 data))
   (define (sha256 data) (compute-digest 'sha256 data))
   (define (sha384 data) (compute-digest 'sha384 data))
   (define (sha512 data) (compute-digest 'sha512 data))

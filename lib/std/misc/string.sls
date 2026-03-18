@@ -14,7 +14,7 @@
   (export string-split string-join string-trim
           string-prefix? string-suffix?
           string-contains string-index
-          string-empty?)
+          string-empty? string-trim-eol)
   (import (chezscheme))
 
   (define string-split
@@ -107,5 +107,20 @@
 
   (define (string-empty? str)
     (zero? (string-length str)))
+
+  (define (string-trim-eol str)
+    ;; Trim trailing CR, LF, or CRLF from string.
+    ;; Tries CRLF first (longer suffix), then LF, then CR.
+    (let* ([len (string-length str)]
+           [try-suffix
+            (lambda (suffix)
+              (let ([slen (string-length suffix)])
+                (and (<= slen len)
+                     (string=? suffix (substring str (- len slen) len))
+                     (substring str 0 (- len slen)))))])
+      (or (try-suffix "\r\n")
+          (try-suffix "\n")
+          (try-suffix "\r")
+          str)))
 
   ) ;; end library

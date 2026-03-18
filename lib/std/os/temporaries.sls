@@ -6,7 +6,11 @@
 
   (import (chezscheme))
 
-  (define libc (load-shared-object "libc.so.6"))
+  (define _libc-loaded
+    (let ((v (getenv "JEMACS_STATIC")))
+      (if (and v (not (string=? v "")) (not (string=? v "0")))
+          #f  ; symbols already in static binary
+          (load-shared-object "libc.so.6"))))
   (define getpid (foreign-procedure "getpid" () int))
 
   (define *temp-counter* 0)
