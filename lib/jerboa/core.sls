@@ -707,8 +707,15 @@
   (define (getenv name . rest)
     (or (%chez-getenv name) (if (pair? rest) (car rest) #f)))
 
-  ;; with-exception-catcher: Gerbil alias for Chez with-exception-handler
-  (define with-exception-catcher with-exception-handler)
+  ;; with-exception-catcher: Gambit-style handler that catches and escapes.
+  ;; Uses call/cc so the handler's return value becomes the overall result,
+  ;; instead of re-raising (which with-exception-handler does).
+  (define (with-exception-catcher handler thunk)
+    (call-with-current-continuation
+      (lambda (k)
+        (with-exception-handler
+          (lambda (e) (k (handler e)))
+          thunk))))
 
   ;;;; ---- Gerbil compat: Filesystem ----
   ;; create-directory: Gerbil alias for Chez mkdir
@@ -838,7 +845,7 @@
                  (loop (+ i 1) (cdr l)))))))
   (define (subu8vector bv start end)
     (let* ((len (- end start)) (result (make-bytevector len)))
-      (bytevector-copy! result 0 bv start len)
+      (bytevector-copy! bv start result 0 len)
       result))
 
   ;; object->string: convert any object to its write representation

@@ -13,7 +13,7 @@
     assert!
     with-lock
     with-catch
-    cut cute
+    cut cute <> <...>
     ;; Anaphoric macros
     awhen aif
     ;; Binding macros
@@ -130,6 +130,10 @@
         (with-exception-handler
           (lambda (e) (k (%apply1 handler e)))
           thunk))))
+
+  ;; Auxiliary syntax for cut/cute slot markers (must be exported for cross-module use)
+  (define-syntax <> (lambda (x) (syntax-violation '<> "misuse of auxiliary syntax" x)))
+  (define-syntax <...> (lambda (x) (syntax-violation '<...> "misuse of auxiliary syntax" x)))
 
   ;; cut / cute — SRFI-26 partial application
   ;; (cut f <> y) → (lambda (x) (f x y))
