@@ -2,7 +2,7 @@
 ;;; (std actor transport) — Distributed actor transport
 ;;;
 ;;; Extends send to work across network nodes via TCP.
-;;; Uses (std net ssl) for TCP: fd-based API from chez-ssl.
+;;; Uses (std net tcp-raw) for TCP: fd-based POSIX sockets, no SSL dependency.
 ;;;
 ;;; Message framing: [4 bytes big-endian length][N bytes fasl-encoded body]
 ;;; Authentication: cookie-based FNV-1a hash handshake on connect.
@@ -37,7 +37,7 @@
     message->bytes
     bytes->message
   )
-  (import (chezscheme) (std actor core) (std net ssl))
+  (import (chezscheme) (std actor core) (std net tcp-raw))
 
   ;; -------- 7A: Serialization --------
 
