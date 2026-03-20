@@ -16,7 +16,11 @@
     process-port-status
     process-port-rec-stdin-port
     process-port-rec-stdout-port
-    process-port-rec-stderr-port)
+    process-port-rec-stderr-port
+
+    ;; Process control
+    process-kill
+    tty?)
 
   (import (chezscheme))
 
@@ -212,5 +216,31 @@
           (close-port from-stdout)
           (close-port from-stderr)
           result))))
+
+  ;; ========== Process Control ==========
+
+  (define _libc-loaded
+    (let ((v (getenv "JEMACS_STATIC")))
+      (if (and v (not (string=? v "")) (not (string=? v "0")))
+          #f
+          (load-shared-object "libc.so.6"))))
+
+  (define c-kill (foreign-procedure "kill" (int int) int))
+  (define c-isatty (foreign-procedure "isatty" (int) int))
+
+  ;; Send a signal to a process. Default signal is SIGTERM (15).
+  (define process-kill
+    (case-lambda
+      [(pid) (process-kill pid 15)]
+      [(pid sig) (c-kill pid sig)]))
+
+  ;; Check if a port (or fd number) is connected to a terminal
+  (define (tty? x)
+    (cond
+      [(fixnum? x) (= (c-isatty x) 1)]
+      [(eq? x (current-input-port)) (= (c-isatty 0) 1)]
+      [(eq? x (current-output-port)) (= (c-isatty 1) 1)]
+      [(eq? x (current-error-port)) (= (c-isatty 2) 1)]
+      [else #f]))
 
   ) ;; end library

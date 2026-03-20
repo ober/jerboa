@@ -11,7 +11,9 @@
     request-headers request-header request-close
     parse-url url-parts-scheme url-parts-host url-parts-port url-parts-path
     url-encode build-query-string
-    flatten-request-headers)
+    flatten-request-headers
+    headers->alist
+    alist->headers)
 
   (import (chezscheme)
           (std net tcp))
@@ -249,6 +251,22 @@
           [(>= i len) ""]
           [(char-whitespace? (string-ref str i)) (loop (+ i 1))]
           [else (substring str i len)]))))
+
+  ;; Convert "Name: Value" strings to alist
+  (define (headers->alist header-strings)
+    (map (lambda (s)
+           (let ([colon-pos (string-find s #\:)])
+             (if colon-pos
+               (cons (substring s 0 colon-pos)
+                     (string-trim-left (substring s (+ colon-pos 1) (string-length s))))
+               (cons s ""))))
+         header-strings))
+
+  ;; Convert alist to "Name: Value" strings
+  (define (alist->headers alist)
+    (map (lambda (p)
+           (string-append (car p) ": " (cdr p)))
+         alist))
 
   (define (string-join lst sep)
     (cond
