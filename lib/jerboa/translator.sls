@@ -156,15 +156,19 @@
   ;; translate-brackets: [x y z] → (list x y z) when NOT in binding position.
   ;;
   ;; Strategy: scan the string maintaining a context stack.  Each open-paren
-  ;; pushes the keyword that started the form (or 'other).  When we see `[`,
-  ;; if the innermost paren context is a binding-form, the bracket is in
-  ;; binding position — keep as-is.  Otherwise convert to (list ...).
+  ;; pushes a context tag: 'binding (opened by a let/lambda/do etc. keyword),
+  ;; 'binding-list (the first ( directly inside a 'binding context — this is
+  ;; the clause list), or 'other.  Brackets inside 'binding or 'binding-list
+  ;; contexts are treated as binders and left as-is; all others become (list ..).
   ;;
-  ;; This correctly handles multi-clause let: (let ([x 1] [y 2]) ...)
-  ;; because both brackets share the same parent paren context "let".
+  ;; This correctly handles multi-clause let: (let ([x 1] [y 2]) ...) and
+  ;; lambda formal lists: (lambda [x y] body).
   ;;
-  ;; This is necessarily heuristic at the string level.  For perfectly correct
-  ;; output, use translate-file which processes s-expressions directly.
+  ;; Known limitation (inherent to string-level heuristics):
+  ;;   - Brackets in a let *body* that follow the binding list may be misclassified
+  ;;     when the outer form is still in 'binding context.
+  ;;   - Brackets nested inside binding-clause values are not converted.
+  ;; For fully correct output use translate-file which processes s-expressions.
   (define (translate-brackets str)
     (define binding-forms
       '("let" "let*" "letrec" "letrec*" "letrec-values"
@@ -192,8 +196,21 @@
     (define (binding-form? token)
       (member token binding-forms))
 
-    ;; pctx-stack: list of 'binding | 'other pushed per open-paren
-    ;; bracket-stack: list of 'binder | 'list pushed per open-bracket
+    ;; Context stack entry meanings:
+    ;;   'binding      — opened by (let ...) / (lambda ...) etc.; the NEXT
+    ;;                   positional ( or [ is the binding-list
+    ;;   'binding-list — the ( or [ directly containing binding clauses;
+    ;;                   brackets inside here are binders
+    ;;   'other        — all other paren contexts; brackets inside are lists
+    ;;
+    ;; Transition rules:
+    ;;   see ( and parent ctx is 'binding → push 'binding-list, parent stays
+    ;;   see ( and parent ctx is 'binding-list → push 'other (individual clause)
+    ;;   see ( with binding keyword inside → push 'binding
+    ;;   see ( otherwise → push 'other
+    ;;
+    ;; pctx: list of context tags (top = current innermost)
+    ;; bstk: list of 'binder|'list per open bracket
     (let ([len (string-length str)])
       (let loop ([i 0] [acc '()] [pctx '()] [bstk '()])
         (cond
@@ -201,12 +218,19 @@
            (apply string-append (reverse acc))]
           [(in-string-at? str i)
            (loop (+ i 1) (cons (string (string-ref str i)) acc) pctx bstk)]
-          ;; Open paren: push context
+          ;; Open paren: determine context to push
           [(char=? (string-ref str i) #\()
-           (let ([tok (token-after-open str i)])
-             (loop (+ i 1) (cons "(" acc)
-                   (cons (if (binding-form? tok) 'binding 'other) pctx)
-                   bstk))]
+           (let* ([parent (if (null? pctx) 'other (car pctx))]
+                  [tok    (token-after-open str i)]
+                  [ctx    (cond
+                            ;; Inside a binding-form's argument list: next ( is
+                            ;; the binding-list
+                            [(eq? parent 'binding) 'binding-list]
+                            ;; This paren opens a new binding form
+                            [(binding-form? tok) 'binding]
+                            ;; Otherwise
+                            [else 'other])])
+             (loop (+ i 1) (cons "(" acc) (cons ctx pctx) bstk))]
           ;; Close paren: pop context
           [(char=? (string-ref str i) #\))
            (loop (+ i 1) (cons ")" acc)
@@ -214,8 +238,11 @@
                  bstk)]
           ;; Open bracket
           [(char=? (string-ref str i) #\[)
-           (let ([in-binding? (and (not (null? pctx))
-                                   (eq? (car pctx) 'binding))])
+           (let* ([parent (if (null? pctx) 'other (car pctx))]
+                  ;; Bracket directly inside binding-form (lambda [args])
+                  ;; or inside binding-list (let ([x 1])) → binder
+                  [in-binding? (or (eq? parent 'binding)
+                                   (eq? parent 'binding-list))])
              (loop (+ i 1)
                    (cons (if in-binding? "[" "(list ") acc)
                    pctx

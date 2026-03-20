@@ -9,6 +9,11 @@
 ;;;
 ;;; Ports are standard Chez Scheme binary ports transcoded to UTF-8.
 ;;; Use with-tcp-server for automatic cleanup.
+;;;
+;;; GC SAFETY: All blocking I/O uses non-blocking sockets with Chez-native
+;;; sleep for retry delays. This ensures threads can participate in Chez's
+;;; stop-the-world GC rendezvous (foreign calls like accept/read/poll block
+;;; the thread from responding to GC signals).
 
 (library (std net tcp)
   (export
@@ -41,10 +46,19 @@
   (define c-inet-pton (foreign-procedure "inet_pton" (int string void*) int))
   (define c-getsockname (foreign-procedure "getsockname" (int void* void*) int))
 
+  ;; fcntl for non-blocking mode
+  (define c-fcntl     (foreign-procedure "fcntl" (int int int) int))
+
   ;; errno access for EINTR retry
   (define c-errno-location (foreign-procedure "__errno_location" () void*))
   (define (get-errno) (foreign-ref 'int (c-errno-location) 0))
   (define EINTR 4)
+  (define EAGAIN 11)
+
+  ;; fcntl constants
+  (define F_GETFL 3)
+  (define F_SETFL 4)
+  (define O_NONBLOCK #x800)
 
   ;; Constants
   (define AF_INET 2)
@@ -52,6 +66,14 @@
   (define SOL_SOCKET 1)
   (define SO_REUSEADDR 2)
   (define SOCKADDR_IN_SIZE 16)  ;; sizeof(struct sockaddr_in) on Linux
+
+  ;; GC-safe retry delay: 10ms via Chez's sleep (not a foreign call).
+  ;; Chez's sleep uses condition variables that respond to GC signals.
+  (define *retry-delay* (make-time 'time-duration 10000000 0))
+
+  (define (set-nonblocking! fd)
+    (let ([flags (c-fcntl fd F_GETFL 0)])
+      (c-fcntl fd F_SETFL (bitwise-ior flags O_NONBLOCK))))
 
   ;; ========== sockaddr_in helpers ==========
 
@@ -113,6 +135,8 @@
          (when (< (c-listen fd backlog) 0)
            (c-close fd)
            (error 'tcp-listen "listen() failed"))
+         ;; Set non-blocking for GC-safe accept loop
+         (set-nonblocking! fd)
          ;; Get actual port (important when port=0)
          (let ([actual-port
                 (let ([buf (foreign-alloc SOCKADDR_IN_SIZE)]
@@ -130,13 +154,18 @@
 
   (define (tcp-accept srv)
     ;; Accept a connection. Returns (values input-port output-port).
-    ;; Retries on EINTR (caused by GC stop-the-world interrupting accept()).
-    (let loop ()
-      (let ([client-fd (c-accept (tcp-server-fd srv) 0 0)])
-        (cond
-          [(>= client-fd 0) (fd->ports client-fd "tcp-client")]
-          [(= (get-errno) EINTR) (loop)]
-          [else (error 'tcp-accept "accept() failed")]))))
+    ;; Uses non-blocking accept + Chez sleep for GC safety.
+    ;; The listen socket is set non-blocking in tcp-listen.
+    (let ([fd (tcp-server-fd srv)])
+      (let loop ()
+        (let ([client-fd (c-accept fd 0 0)])
+          (cond
+            [(>= client-fd 0) (fd->ports client-fd "tcp-client")]
+            [(let ([e (get-errno)]) (or (= e EINTR) (= e EAGAIN)))
+             ;; No connection pending — sleep via Chez (GC-safe), then retry
+             (sleep *retry-delay*)
+             (loop)]
+            [else (error 'tcp-accept "accept() failed")])))))
 
   (define (tcp-close srv)
     (c-close (tcp-server-fd srv)))
@@ -180,6 +209,9 @@
     ;; IMPORTANT: Both ports share the same fd. A closed? flag prevents:
     ;; 1. Double-close: Chez calls close handler on both close-port AND GC finalization
     ;; 2. Read/write after close: returns EOF/0 instead of operating on reused fd
+    ;;
+    ;; Client sockets use non-blocking I/O with Chez-native sleep for GC safety.
+    (set-nonblocking! fd)
     (let ([closed? #f])
       (let ([in (make-custom-binary-input-port
                   (string-append name "-in")
@@ -192,7 +224,12 @@
                               [(> n 0)
                                (bytevector-copy! buf 0 bv start n)
                                n]
-                              [(and (< n 0) (= (get-errno) EINTR)) (retry)]
+                              [(and (< n 0)
+                                    (let ([e (get-errno)])
+                                      (or (= e EINTR) (= e EAGAIN))))
+                               ;; No data yet — sleep via Chez (GC-safe), then retry
+                               (sleep *retry-delay*)
+                               (retry)]
                               [else 0]))))))
                   #f  ;; get-position
                   #f  ;; set-position!
@@ -216,7 +253,12 @@
                                         (- count written))])
                                (cond
                                  [(> n 0) (lp (+ written n))]
-                                 [(and (< n 0) (= (get-errno) EINTR)) (lp written)]
+                                 [(and (< n 0)
+                                       (let ([e (get-errno)])
+                                         (or (= e EINTR) (= e EAGAIN))))
+                                  ;; Socket buffer full — sleep briefly, retry
+                                  (sleep *retry-delay*)
+                                  (lp written)]
                                  [else written])))))))
                    #f  ;; get-position
                    #f  ;; set-position!
