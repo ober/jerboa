@@ -186,6 +186,82 @@
              (lambda () (repl-pp '(a b c (d e f)))))])
   (check-true (> (string-length out) 0)))
 
+;; ========== Middleware ==========
+(printf "  Middleware...~n")
+(import (std repl middleware))
+
+;; Custom command registration
+(register-repl-command! "test-cmd" "A test command"
+  (lambda (args env cfg)
+    (display (string-append "test:" args))))
+
+(check-true (repl-command-registered? "test-cmd"))
+(check-false (repl-command-registered? "nonexistent"))
+
+;; Dispatch
+(let ([out (with-output-to-string
+             (lambda () (dispatch-custom-command "test-cmd" "hello" #f #f)))])
+  (check out => "test:hello"))
+
+;; List commands
+(let ([cmds (list-repl-commands)])
+  (check-true (> (length cmds) 0)))
+
+;; Input transformer
+(register-input-transformer!
+  (lambda (s)
+    (if (string=? s "MAGIC") "(+ 40 2)" s)))
+
+(check (apply-input-transformers "MAGIC") => "(+ 40 2)")
+(check (apply-input-transformers "normal") => "normal")
+
+;; Eval hooks
+(define *hook-log* '())
+(register-eval-hook! 'pre
+  (lambda (expr env)
+    (set! *hook-log* (cons (list 'pre expr) *hook-log*))))
+
+(run-pre-eval-hooks "test" #f)
+(check-true (= (length *hook-log*) 1))
+
+;; ========== Notebook ==========
+(printf "  Notebook...~n")
+(import (std repl notebook))
+
+;; Create and save
+(define test-nb (make-notebook "Test NB"))
+(notebook-add-cell! test-nb (make-cell 'markdown "Hello world" #f))
+(notebook-add-cell! test-nb (make-cell 'code "(+ 1 2)" "3"))
+
+(check (notebook-title test-nb) => "Test NB")
+(check (length (notebook-cells test-nb)) => 2)
+(check (cell-type (car (notebook-cells test-nb))) => 'markdown)
+(check (cell-type (cadr (notebook-cells test-nb))) => 'code)
+(check (cell-output (cadr (notebook-cells test-nb))) => "3")
+
+;; Save and reload
+(notebook-save "/tmp/test-jerboa-nb.ss.nb" test-nb)
+(define loaded-nb (notebook-load "/tmp/test-jerboa-nb.ss.nb"))
+(check (notebook-title loaded-nb) => "Test NB")
+(check (length (notebook-cells loaded-nb)) => 2)
+
+;; Export markdown
+(let ([md (notebook-export-markdown test-nb)])
+  (check-true (string-contains* md "Test NB"))
+  (check-true (string-contains* md "```scheme")))
+
+;; Export HTML
+(let ([html (notebook-export-html test-nb)])
+  (check-true (string-contains* html "<html>"))
+  (check-true (string-contains* html "Test NB")))
+
+;; Recording
+(notebook-start! "Recording")
+(check-true (notebook-recording?))
+(let ([nb (notebook-stop!)])
+  (check (notebook-title nb) => "Recording"))
+(check-false (notebook-recording?))
+
 ;; ========== Summary ==========
 (printf "~n--- Results: ~a passed, ~a failed ---~n" pass-count fail-count)
 (when (> fail-count 0) (exit 1))

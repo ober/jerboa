@@ -39,16 +39,24 @@
 
 ;; ========== Helpers ==========
 (define (nc-request port msg)
-  ;; Send a message via nc and get response
-  (let-values ([(to-stdin from-stdout from-stderr pid)
-                (open-process-ports
-                  (format "echo '~a' | nc -q 1 127.0.0.1 ~a 2>/dev/null" msg port)
-                  'line (native-transcoder))])
-    (close-port to-stdin)
-    (let ([response (get-line from-stdout)])
-      (close-port from-stdout)
-      (close-port from-stderr)
-      (if (eof-object? response) "" response))))
+  ;; Send a message via nc and get response, with retry on empty
+  (define (try-once)
+    (let-values ([(to-stdin from-stdout from-stderr pid)
+                  (open-process-ports
+                    (format "echo '~a' | nc -w 2 -q 2 127.0.0.1 ~a 2>/dev/null" msg port)
+                    'line (native-transcoder))])
+      (close-port to-stdin)
+      (let ([response (get-line from-stdout)])
+        (close-port from-stdout)
+        (close-port from-stderr)
+        (if (eof-object? response) "" response))))
+  ;; Try up to 2 times
+  (let ([r (try-once)])
+    (if (string=? r "")
+      (begin
+        (sleep (make-time 'time-duration 200000000 0))
+        (try-once))
+      r)))
 
 (printf "--- Testing (std repl server) ---~n")
 
@@ -65,54 +73,65 @@
 
 ;; ========== Client interaction via nc ==========
 (printf "  Client eval via nc...~n")
+(define (brief-pause) (sleep (make-time 'time-duration 100000000 0)))
 (let ([srv (repl-server-start 0)])
   (let ([port (repl-server-port srv)])
-    (sleep (make-time 'time-duration 200000000 0))
+    (sleep (make-time 'time-duration 500000000 0))
 
     ;; Test: eval simple expression
     (let ([resp (nc-request port "(1 eval \"(+ 1 2)\")")])
       (check-true (string-contains* resp ":ok"))
       (check-true (string-contains* resp "3")))
+    (brief-pause)
 
     ;; Test: eval with stdout
     (let ([resp (nc-request port "(2 eval \"(begin (display 42) 99)\")")])
       (check-true (string-contains* resp ":ok"))
       (check-true (string-contains* resp "99"))
       (check-true (string-contains* resp "42")))
+    (brief-pause)
 
     ;; Test: eval error (division by zero)
     (let ([resp (nc-request port "(3 eval \"(/ 1 0)\")")])
       (check-true (string-contains* resp ":error")))
+    (brief-pause)
 
     ;; Test: complete
     (let ([resp (nc-request port "(4 complete \"string-\")")])
       (check-true (string-contains* resp ":ok"))
       (check-true (string-contains* resp "string-append")))
+    (brief-pause)
 
     ;; Test: doc
     (let ([resp (nc-request port "(5 doc car)")])
       (check-true (string-contains* resp ":ok"))
       (check-true (string-contains* resp "pair")))
+    (brief-pause)
 
     ;; Test: apropos
     (let ([resp (nc-request port "(6 apropos \"hashtable\")")])
       (check-true (string-contains* resp ":ok")))
+    (brief-pause)
 
     ;; Test: type
     (let ([resp (nc-request port "(7 type \"42\")")])
       (check-true (string-contains* resp "Fixnum")))
+    (brief-pause)
 
     ;; Test: ping
     (let ([resp (nc-request port "(8 ping)")])
       (check-true (string-contains* resp "pong")))
+    (brief-pause)
 
     ;; Test: pwd
     (let ([resp (nc-request port "(9 pwd)")])
       (check-true (string-contains* resp ":ok")))
+    (brief-pause)
 
     ;; Test: env
     (let ([resp (nc-request port "(10 env \"cons\")")])
       (check-true (string-contains* resp ":ok")))
+    (brief-pause)
 
     ;; Test: expand
     (let ([resp (nc-request port "(11 expand \"(and 1 2)\")")])

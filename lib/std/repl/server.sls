@@ -284,6 +284,63 @@
           [(shutdown)
            `(,id :ok "shutting down")]
 
+          ;; ---- IDE Integration Methods ----
+
+          [(threads)
+           ;; List active threads (Chez doesn't expose thread-list easily)
+           `(,id :ok (:note "thread listing not available in stock Chez"))]
+
+          [(memory)
+           ;; GC and memory stats
+           (let* ([before (bytes-allocated)]
+                  [_ (collect (collect-maximum-generation))]
+                  [after (bytes-allocated)])
+             `(,id :ok (:bytes-before ,before
+                        :bytes-after ,after
+                        :freed ,(- before after)
+                        :max-generation ,(collect-maximum-generation))))]
+
+          [(modules)
+           ;; List available libraries
+           (let ([libs (map (lambda (l) (format "~s" l))
+                           (library-list))])
+             `(,id :ok ,libs))]
+
+          [(find-source)
+           ;; Try to find info for a symbol
+           (let* ([sym (if (symbol? (car args)) (car args)
+                          (string->symbol (car args)))]
+                  [val (guard (e [#t #f]) (eval sym *server-env*))])
+             (if (and val (procedure? val))
+               (let ([name (guard (e [#t #f])
+                             (#%$code-name (#%$closure-code val)))])
+                 `(,id :ok (:name ,(if name (format "~a" name) (format "~a" sym))
+                            :type "Procedure")))
+               `(,id :ok (:name ,(format "~a" sym)
+                          :type ,(if val (value->type-string val) "unbound")))))]
+
+          [(set-directory)
+           (current-directory (car args))
+           `(,id :ok ,(current-directory))]
+
+          [(list-directory)
+           (let* ([path (if (null? args) (current-directory) (car args))]
+                  [entries (sort string<? (directory-list path))]
+                  [result (map (lambda (e)
+                                (let ([full (string-append path "/" e)])
+                                  (list e (if (file-directory? full) "dir" "file"))))
+                              entries)])
+             `(,id :ok ,result))]
+
+          [(interrupt)
+           ;; Placeholder for interrupt support
+           `(,id :ok "interrupt not yet implemented")]
+
+          [(version)
+           `(,id :ok (:scheme ,(scheme-version)
+                      :jerboa "1.0"
+                      :protocol "1.0"))]
+
           [else
            `(,id :error ,(format "unknown method: ~a" method))]))))
 
