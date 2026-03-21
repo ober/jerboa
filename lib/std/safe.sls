@@ -58,7 +58,11 @@
 
     ;; Error conditions (re-export)
     db-error? network-error? timeout-error? parse-error?
-    resource-error?)
+    resource-error?
+
+    ;; Finalizer safety net
+    *resource-finalizer-log*
+    poll-resource-finalizers!)
 
   (import (chezscheme)
           (std error conditions)
@@ -77,6 +81,62 @@
       [(_ body ...)
        (when (eq? (*safe-mode*) 'check)
          body ...)]))
+
+  ;; =========================================================================
+  ;; Finalizer safety net — guardian-based resource leak detection
+  ;; =========================================================================
+  ;;
+  ;; When a resource handle is GC'd without being explicitly closed, the
+  ;; guardian fires and we log a warning. This catches the common pattern:
+  ;;   (let ([db (sqlite-open "x.db")]) ...)  ; forgot to close!
+  ;;
+  ;; Warnings are logged to *resource-finalizer-log* (a parameter holding
+  ;; a procedure). Default: display to current-error-port.
+  ;; Call poll-resource-finalizers! periodically or at shutdown.
+
+  (define *resource-guardian* (make-guardian))
+
+  ;; Each entry in the guardian is (cons type-symbol info-string)
+  ;; so we know what leaked when the guardian fires.
+  (define *resource-finalizer-log*
+    (make-parameter
+     (lambda (type info)
+       (fprintf (current-error-port)
+                "WARNING: ~a handle GC'd without close! (~a)~%"
+                type info))))
+
+  (define (register-guarded-resource! handle type info cleanup-proc)
+    ;; Track the resource. When GC'd without explicit close, we warn + clean.
+    (let ([entry (vector type info cleanup-proc #f)])  ;; #f = not-yet-closed
+      (*resource-guardian* entry)
+      entry))
+
+  (define (mark-resource-closed! entry)
+    ;; Mark as closed so the guardian callback won't warn.
+    (when entry
+      (vector-set! entry 3 #t)))
+
+  (define (poll-resource-finalizers!)
+    ;; Call this periodically (or at shutdown) to process GC'd resources.
+    ;; Returns the number of leaked resources found.
+    (let loop ([count 0])
+      (let ([entry (*resource-guardian*)])
+        (if (not entry)
+            count
+            (begin
+              (unless (vector-ref entry 3)  ;; not already closed?
+                (let ([type (vector-ref entry 0)]
+                      [info (vector-ref entry 1)]
+                      [cleanup (vector-ref entry 2)])
+                  ((*resource-finalizer-log*) type info)
+                  ;; Best-effort cleanup
+                  (guard (exn [#t (void)])
+                    (when cleanup (cleanup)))))
+              (loop (+ count 1)))))))
+
+  ;; =========================================================================
+  ;; Argument checking
+  ;; =========================================================================
 
   (define (check-arg! who pred val type-name)
     (when (eq? (*safe-mode*) 'check)
@@ -119,11 +179,11 @@
   (define raw-sqlite-bind-null #f)
   (define raw-sqlite-errmsg #f)
 
-  ;; Try to load sqlite bindings at library init time
+  ;; Try to load sqlite bindings at library init time.
+  ;; Set sqlite-available? LAST so partial failure leaves it #f.
   (define _init-sqlite
-    (guard (exn [#t (void)])
+    (guard (exn [#t (set! sqlite-available? #f) (void)])
       (let ([env (environment '(std db sqlite-native))])
-        (set! sqlite-available? #t)
         (set! raw-sqlite-open (eval 'sqlite-open env))
         (set! raw-sqlite-close (eval 'sqlite-close env))
         (set! raw-sqlite-exec (eval 'sqlite-exec env))
@@ -136,7 +196,9 @@
         (set! raw-sqlite-bind-double (eval 'sqlite-bind-double env))
         (set! raw-sqlite-bind-text (eval 'sqlite-bind-text env))
         (set! raw-sqlite-bind-null (eval 'sqlite-bind-null env))
-        (set! raw-sqlite-errmsg (eval 'sqlite-errmsg env)))))
+        (set! raw-sqlite-errmsg (eval 'sqlite-errmsg env))
+        ;; Only mark available after ALL evals succeed
+        (set! sqlite-available? #t))))
 
   (define (ensure-sqlite! who)
     (unless sqlite-available?
@@ -145,9 +207,59 @@
               (make-message-condition
                (format #f "~a: SQLite not available — libjerboa_native.so not loaded" who))))))
 
+  ;; ---- SQL injection heuristic detection ----
+  ;; Reject SQL strings that look like they were built by concatenation.
+  ;; Heuristic: flag strings containing common injection markers that
+  ;; suggest runtime string building rather than parameterized queries.
+
+  (define (check-sql-safety! who sql)
+    (when (eq? (*safe-mode*) 'check)
+      ;; Check for obviously unsafe patterns:
+      ;; 1. Unbalanced quotes (sign of string injection)
+      ;; 2. Multiple semicolons (multi-statement injection)
+      ;; 3. Comment markers that could hide injected SQL
+      (let ([len (string-length sql)])
+        ;; Multiple statements via semicolons (allowing trailing ;)
+        (let ([semis (let count ([i 0] [n 0])
+                       (if (>= i len) n
+                           (count (+ i 1)
+                                  (if (char=? (string-ref sql i) #\;) (+ n 1) n))))])
+          (when (> semis 1)
+            (raise (condition
+                    (make-db-query-error 'db 'sqlite sql)
+                    (make-message-condition
+                     (format #f "~a: SQL contains ~a semicolons — use separate queries or parameterized statements"
+                             who semis))))))
+        ;; SQL comment injection: -- or /* outside of string literals
+        (when (or (string-contains-outside-quotes? sql "--")
+                  (string-contains-outside-quotes? sql "/*"))
+          (raise (condition
+                  (make-db-query-error 'db 'sqlite sql)
+                  (make-message-condition
+                   (format #f "~a: SQL contains comment markers — possible injection"
+                           who))))))))
+
+  (define (string-contains-outside-quotes? str pattern)
+    ;; Simple scan: check if pattern appears outside single-quoted SQL strings.
+    (let ([slen (string-length str)]
+          [plen (string-length pattern)])
+      (let loop ([i 0] [in-quote? #f])
+        (cond
+          [(> (+ i plen) slen) #f]
+          [(char=? (string-ref str i) #\')
+           (loop (+ i 1) (not in-quote?))]
+          [(and (not in-quote?)
+                (string=? (substring str i (+ i plen)) pattern))
+           #t]
+          [else (loop (+ i 1) in-quote?)]))))
+
+  ;; Track sqlite handle → guardian entry for leak detection
+  (define *sqlite-handle-entries* (make-hashtable equal-hash equal?))
+
   (define (safe-sqlite-open path)
     ;; Pre: path must be a string
     ;; Post: returns a valid db handle (non-negative fixnum)
+    ;; Safety: registers handle with guardian for leak detection
     (check-string! 'safe-sqlite-open path)
     (ensure-sqlite! 'safe-sqlite-open)
     (let ([handle (raw-sqlite-open path)])
@@ -157,12 +269,22 @@
                  (make-db-connection-error 'db 'sqlite)
                  (make-message-condition
                   (format #f "failed to open database: ~a" path))))))
+      ;; Register with guardian for leak detection
+      (let ([entry (register-guarded-resource!
+                    handle 'sqlite path
+                    (and raw-sqlite-close
+                         (lambda () (raw-sqlite-close handle))))])
+        (hashtable-set! *sqlite-handle-entries* handle entry))
       handle))
 
   (define (safe-sqlite-close db)
     ;; Pre: db must be a fixnum handle
     (check-fixnum! 'safe-sqlite-close db)
     (ensure-sqlite! 'safe-sqlite-close)
+    ;; Mark as closed so guardian won't warn
+    (let ([entry (hashtable-ref *sqlite-handle-entries* db #f)])
+      (mark-resource-closed! entry)
+      (hashtable-delete! *sqlite-handle-entries* db))
     (raw-sqlite-close db))
 
   (define (safe-sqlite-exec db sql)
@@ -170,6 +292,7 @@
     ;; Post: returns 0 on success
     (check-fixnum! 'safe-sqlite-exec db)
     (check-string! 'safe-sqlite-exec sql)
+    (check-sql-safety! 'safe-sqlite-exec sql)
     (ensure-sqlite! 'safe-sqlite-exec)
     (let ([rc (raw-sqlite-exec db sql)])
       (when-checking
@@ -187,6 +310,7 @@
     ;; Pre: db is fixnum handle, sql is string, params is list
     (check-fixnum! 'safe-sqlite-execute db)
     (check-string! 'safe-sqlite-execute sql)
+    (check-sql-safety! 'safe-sqlite-execute sql)
     (ensure-sqlite! 'safe-sqlite-execute)
     (apply raw-sqlite-execute db sql params))
 
@@ -195,6 +319,7 @@
     ;; Post: returns a list of alists
     (check-fixnum! 'safe-sqlite-query db)
     (check-string! 'safe-sqlite-query sql)
+    (check-sql-safety! 'safe-sqlite-query sql)
     (ensure-sqlite! 'safe-sqlite-query)
     (let ([result (apply raw-sqlite-query db sql params)])
       (when-checking
@@ -207,6 +332,7 @@
   (define (safe-sqlite-prepare db sql)
     (check-fixnum! 'safe-sqlite-prepare db)
     (check-string! 'safe-sqlite-prepare sql)
+    (check-sql-safety! 'safe-sqlite-prepare sql)
     (ensure-sqlite! 'safe-sqlite-prepare)
     (let ([stmt (raw-sqlite-prepare db sql)])
       (when-checking
@@ -261,17 +387,19 @@
   (define raw-tcp-write #f)
   (define raw-tcp-write-string #f)
 
+  ;; Set tcp-raw-available? LAST so partial failure leaves it #f.
   (define _init-tcp
-    (guard (exn [#t (void)])
+    (guard (exn [#t (set! tcp-raw-available? #f) (void)])
       (let ([env (environment '(std net tcp-raw))])
-        (set! tcp-raw-available? #t)
         (set! raw-tcp-connect (eval 'tcp-connect env))
         (set! raw-tcp-listen (eval 'tcp-listen env))
         (set! raw-tcp-accept (eval 'tcp-accept env))
         (set! raw-tcp-close (eval 'tcp-close env))
         (set! raw-tcp-read (eval 'tcp-read env))
         (set! raw-tcp-write (eval 'tcp-write env))
-        (set! raw-tcp-write-string (eval 'tcp-write-string env)))))
+        (set! raw-tcp-write-string (eval 'tcp-write-string env))
+        ;; Only mark available after ALL evals succeed
+        (set! tcp-raw-available? #t))))
 
   (define (ensure-tcp! who)
     (unless tcp-raw-available?
@@ -279,6 +407,9 @@
               (make-network-error 'network #f #f)
               (make-message-condition
                (format #f "~a: TCP not available" who))))))
+
+  ;; Track tcp fd → guardian entry for leak detection
+  (define *tcp-handle-entries* (make-hashtable equal-hash equal?))
 
   (define (safe-tcp-connect address port)
     (check-string! 'safe-tcp-connect address)
@@ -294,6 +425,11 @@
                  (make-connection-refused 'network address port)
                  (make-message-condition
                   (format #f "connection refused: ~a:~a" address port))))))
+      ;; Register with guardian for leak detection
+      (let ([entry (register-guarded-resource!
+                    fd 'tcp (format #f "~a:~a" address port)
+                    (and raw-tcp-close (lambda () (raw-tcp-close fd))))])
+        (hashtable-set! *tcp-handle-entries* fd entry))
       fd))
 
   (define (safe-tcp-listen address port . rest)
@@ -313,6 +449,10 @@
   (define (safe-tcp-close fd)
     (check-fixnum! 'safe-tcp-close fd)
     (ensure-tcp! 'safe-tcp-close)
+    ;; Mark as closed so guardian won't warn
+    (let ([entry (hashtable-ref *tcp-handle-entries* fd #f)])
+      (mark-resource-closed! entry)
+      (hashtable-delete! *tcp-handle-entries* fd))
     (raw-tcp-close fd))
 
   (define (safe-tcp-read fd buf len)
@@ -385,12 +525,13 @@
   (define raw-read-json #f)
   (define raw-string->json-object #f)
 
+  ;; Set json-available? LAST so partial failure leaves it #f.
   (define _init-json
-    (guard (exn [#t (void)])
+    (guard (exn [#t (set! json-available? #f) (void)])
       (let ([env (environment '(std text json))])
-        (set! json-available? #t)
         (set! raw-read-json (eval 'read-json env))
-        (set! raw-string->json-object (eval 'string->json-object env)))))
+        (set! raw-string->json-object (eval 'string->json-object env))
+        (set! json-available? #t))))
 
   (define (safe-read-json port)
     (when-checking

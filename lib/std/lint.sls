@@ -282,6 +282,121 @@
           (let ([v (f (car l))])
             (loop (cdr l) (if v (cons v acc) acc))))))
 
+  ;;; ---- unsafe-import rule ----
+  ;;
+  ;; Warns when code imports raw unsafe modules that have safe equivalents.
+  ;; e.g. (import (std db sqlite-native)) should be (import (jerboa prelude safe))
+  ;;      or at minimum (import (std safe))
+
+  (define %unsafe-modules
+    '(((std db sqlite-native)   "(std safe) or (jerboa prelude safe)")
+      ((std db postgresql-native) "(std safe) or (jerboa prelude safe)")
+      ((std net tcp-raw)        "(std safe) or (jerboa prelude safe)")))
+
+  (define (%rule-unsafe-import forms)
+    (let loop ([fs forms] [results '()])
+      (if (null? fs) (reverse results)
+          (let ([f (car fs)])
+            (loop (cdr fs)
+                  (if (and (pair? f)
+                           (or (eq? (car f) 'import)
+                               (eq? (car f) 'library)))
+                    (append results (check-imports-in-form f))
+                    results))))))
+
+  (define (check-imports-in-form form)
+    ;; Walk the form looking for module references that match unsafe-modules
+    (let loop ([parts (cdr form)] [results '()])
+      (if (null? parts) results
+          (let* ([part (car parts)]
+                 [hit (find-unsafe-module part)])
+            (loop (cdr parts)
+                  (if hit
+                    (cons (make-result severity-warn
+                            (format "unsafe import ~s; use ~a instead"
+                                    (car hit) (cadr hit))
+                            'unsafe-import)
+                          results)
+                    results))))))
+
+  (define (find-unsafe-module spec)
+    ;; Check if spec (or a wrapped spec like (except ...)) matches an unsafe module
+    (let ([mod-name (extract-module-name spec)])
+      (and mod-name
+           (let loop ([unsafe %unsafe-modules])
+             (if (null? unsafe) #f
+                 (if (equal? mod-name (caar unsafe))
+                   (car unsafe)
+                   (loop (cdr unsafe))))))))
+
+  (define (extract-module-name spec)
+    ;; Unwrap (except (mod) ...), (only (mod) ...), (prefix (mod) p), etc.
+    (cond
+      [(and (pair? spec) (memq (car spec) '(except only prefix rename)))
+       (and (pair? (cdr spec)) (extract-module-name (cadr spec)))]
+      [(and (pair? spec) (symbol? (car spec)))
+       spec]  ;; bare module name like (std db sqlite-native)
+      [else #f]))
+
+  ;;; ---- bare-error rule ----
+  ;;
+  ;; Warns on bare (error 'who "msg" ...) calls. Suggests using structured
+  ;; conditions from (std error conditions) instead.
+
+  (define (%rule-bare-error forms)
+    (let ([results '()])
+      (define (walk f)
+        (when (pair? f)
+          (when (and (eq? (car f) 'error)
+                     (pair? (cdr f))
+                     ;; Distinguish (error 'who "msg") from (error? x)
+                     ;; Note: 'sym reads as (quote sym)
+                     (or (symbol? (cadr f))
+                         (string? (cadr f))
+                         (and (pair? (cadr f))
+                              (eq? (caadr f) 'quote))))
+            (set! results
+              (cons (make-result severity-info
+                      (format "bare (error ...) call; consider structured conditions from (std error conditions)"
+                              )
+                      'bare-error)
+                    results)))
+          (for-each walk f)))
+      (for-each walk forms)
+      (reverse results)))
+
+  ;;; ---- sql-interpolation rule ----
+  ;;
+  ;; Warns when SQL-looking strings are built via string-append or format
+  ;; inside sqlite-*/safe-sqlite-* calls. This catches:
+  ;;   (sqlite-exec db (string-append "SELECT * FROM " table))
+  ;;   (sqlite-query db (format "SELECT * FROM ~a" table))
+
+  (define %sql-functions
+    '(sqlite-exec sqlite-query sqlite-execute sqlite-prepare
+      safe-sqlite-exec safe-sqlite-query safe-sqlite-execute safe-sqlite-prepare))
+
+  (define (%rule-sql-interpolation forms)
+    (let ([results '()])
+      (define (walk f)
+        (when (pair? f)
+          (when (and (memq (car f) %sql-functions)
+                     (>= (length f) 3))
+            ;; Check the SQL argument (second arg after db handle)
+            (let ([sql-arg (caddr f)])
+              (when (and (pair? sql-arg)
+                         (memq (car sql-arg)
+                               '(string-append format string-concatenate)))
+                (set! results
+                  (cons (make-result severity-warn
+                          (format "SQL built via ~a — use parameterized queries instead"
+                                  (car sql-arg))
+                          'sql-interpolation)
+                        results)))))
+          (for-each walk f)))
+      (for-each walk forms)
+      (reverse results)))
+
   (define %builtin-rules
     (list
       (cons 'empty-begin       %rule-empty-begin)
@@ -292,7 +407,10 @@
       (cons 'redefine-builtin  %rule-redefine-builtin)
       (cons 'magic-number      %rule-magic-number)
       (cons 'shadowed-define   %rule-shadowed-define)
-      (cons 'unused-define     %rule-unused-define)))
+      (cons 'unused-define     %rule-unused-define)
+      (cons 'unsafe-import     %rule-unsafe-import)
+      (cons 'bare-error        %rule-bare-error)
+      (cons 'sql-interpolation %rule-sql-interpolation)))
 
   ;;; ---- default-linter ----
 
