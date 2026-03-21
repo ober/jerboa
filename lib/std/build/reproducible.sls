@@ -45,7 +45,20 @@
     build-cache?
     build-cache-lookup
     build-cache-store!
-    build-cache-stats)
+    build-cache-stats
+
+    ;; Provenance tracking (S3)
+    make-provenance
+    provenance?
+    provenance-source-hash
+    provenance-builder-id
+    provenance-build-timestamp
+    provenance-output-hash
+    provenance->sexp
+    sexp->provenance
+    provenance-write
+    provenance-read
+    verify-provenance)
 
   (import (chezscheme))
 
@@ -346,5 +359,72 @@
       (cons 'hits    (%build-cache-hits cache))
       (cons 'misses  (%build-cache-misses cache))
       (cons 'entries (hashtable-size (%build-cache-table cache)))))
+
+  ;; ========== Provenance Tracking (S3) ==========
+
+  (define-record-type (%provenance %make-provenance provenance?)
+    (fields
+      (immutable source-hash)    ;; git tree hash or content hash
+      (immutable builder-id)     ;; machine identifier
+      (immutable build-timestamp) ;; epoch seconds (or #f for reproducibility)
+      (immutable output-hash)    ;; hash of built artifact
+      (immutable metadata)))     ;; alist of additional info
+
+  (define (make-provenance source-hash builder-id output-hash . opts)
+    (let loop ([o opts] [ts #f] [meta '()])
+      (if (or (null? o) (null? (cdr o)))
+        (%make-provenance source-hash builder-id ts output-hash meta)
+        (let ([k (car o)] [v (cadr o)])
+          (loop (cddr o)
+                (if (eq? k 'timestamp:) v ts)
+                (if (eq? k 'metadata:) v meta))))))
+
+  (define (provenance-source-hash p) (%provenance-source-hash p))
+  (define (provenance-builder-id p)  (%provenance-builder-id p))
+  (define (provenance-build-timestamp p) (%provenance-build-timestamp p))
+  (define (provenance-output-hash p) (%provenance-output-hash p))
+
+  (define (provenance->sexp p)
+    `(provenance
+       (source-hash ,(%provenance-source-hash p))
+       (builder-id  ,(%provenance-builder-id p))
+       (timestamp   ,(%provenance-build-timestamp p))
+       (output-hash ,(%provenance-output-hash p))
+       (metadata    ,@(%provenance-metadata p))))
+
+  (define (sexp->provenance sexp)
+    (unless (and (pair? sexp) (eq? (car sexp) 'provenance))
+      (error 'sexp->provenance "invalid provenance" sexp))
+    (let ([src  (prov-field sexp 'source-hash #f)]
+          [bld  (prov-field sexp 'builder-id #f)]
+          [ts   (prov-field sexp 'timestamp #f)]
+          [out  (prov-field sexp 'output-hash #f)]
+          [meta (let ([m (assq 'metadata (cdr sexp))])
+                  (if m (cdr m) '()))])
+      (%make-provenance src bld ts out meta)))
+
+  (define (prov-field sexp key default)
+    (let ([entry (assq key (cdr sexp))])
+      (if (and entry (pair? (cdr entry)))
+        (cadr entry)
+        default)))
+
+  (define (provenance-write p port)
+    (write (provenance->sexp p) port)
+    (newline port))
+
+  (define (provenance-read port)
+    (let ([sexp (read port)])
+      (if (eof-object? sexp)
+        (error 'provenance-read "empty provenance file")
+        (sexp->provenance sexp))))
+
+  (define (verify-provenance provenance-record expected-source-hash)
+    ;; Verify that a provenance record matches expected source.
+    ;; Returns #t if source hash matches, #f otherwise.
+    (and (%provenance-source-hash provenance-record)
+         (string? expected-source-hash)
+         (string=? (%provenance-source-hash provenance-record)
+                   expected-source-hash)))
 
 ) ;; end library

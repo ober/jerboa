@@ -993,7 +993,9 @@ Linux namespace integration for container-like isolation.
 
 ## Proposed: Supply Chain and Build Security
 
-### S1. Dependency Verification — `(std build verify)`
+### S1. Dependency Verification — `(std build verify)` — IMPLEMENTED
+
+> **Status**: Implemented in `lib/std/build/verify.sls`. SHA-256 file/directory hashing via sha256sum, lockfile batch verification with abort/warn modes, structured verification reports.
 
 Cryptographic verification of all dependencies.
 
@@ -1011,7 +1013,9 @@ Cryptographic verification of all dependencies.
   on-mismatch: 'abort)  ;; 'abort | 'warn | 'update-lock
 ```
 
-### S2. SBOM Generation — `(std build sbom)`
+### S2. SBOM Generation — `(std build sbom)` — IMPLEMENTED
+
+> **Status**: Implemented in `lib/std/build/sbom.sls`. Component tracking with name/version/type/hash/license, S-expression serialization, auto-detection of Scheme (.sls) and C (-l flag) dependencies.
 
 Software Bill of Materials for auditing.
 
@@ -1032,7 +1036,9 @@ Software Bill of Materials for auditing.
 ;; - Build flags and compiler version
 ```
 
-### S3. Reproducible Build Verification
+### S3. Reproducible Build Verification — IMPLEMENTED
+
+> **Status**: Extended `lib/std/build/reproducible.sls` with provenance tracking. Provenance records with source-hash, builder-id, output-hash, optional timestamp. S-expression serialization and source verification.
 
 Extend the existing `(std build reproducible)` system.
 
@@ -1199,7 +1205,9 @@ Extend the existing `(std debug replay)` for security incident reproduction.
 
 ## Proposed: Distributed Systems Security
 
-### D1. Encrypted Actor Transport
+### D1. Encrypted Actor Transport — IMPLEMENTED
+
+> **Status**: Implemented in `lib/std/actor/cluster-security.sls`. Node TLS config records, authenticated messages with HMAC and replay windows, signed delegation tokens with expiry, cluster policies with role-based authorization and connection ACLs.
 
 Replace plaintext TCP with mandatory TLS for all inter-node communication.
 
@@ -1334,14 +1342,14 @@ Extend the capability system to work across nodes.
 | A2: Security metrics | 3 days | New `(std security metrics)` | IMPLEMENTED — Thread-safe counters/gauges/histograms (last 1000 observations), alerting with configurable thresholds/windows/actions, snapshot reporting, counter reset |
 | A3: Safe error responses | 2 days | New `(std security errors)` | IMPLEMENTED — Error classification (internal vs client), safe-error-handler with opaque reference IDs, built-in HTTP status mapping, logging isolation (handler crashes don't propagate) |
 
-### Phase 6: Supply Chain and Distributed (P4)
+### Phase 6: Supply Chain and Distributed (P4) — DONE
 
-| Item | Effort | What Changes |
-|------|--------|-------------|
-| S1: Dependency verification | 3 days | Extend `(jerboa lock)` |
-| S2: SBOM generation | 2 days | New `(std build sbom)` |
-| S3: Reproducible build verification | 2 days | Extend `(std build reproducible)` |
-| D1-D4: Distributed security | 5 days | Extend actor transport + new cluster policy |
+| Item | Effort | What Changes | Status |
+|------|--------|-------------|--------|
+| S1: Dependency verification | 3 days | New `(std build verify)` | IMPLEMENTED — SHA-256 file/directory hashing, lockfile batch verification with abort/warn modes, verification reports |
+| S2: SBOM generation | 2 days | New `(std build sbom)` | IMPLEMENTED — Component tracking (name/version/type/hash/license), S-expression serialization, auto-detection of Scheme and C library deps |
+| S3: Reproducible build verification | 2 days | Extend `(std build reproducible)` | IMPLEMENTED — Provenance records (source-hash, builder-id, output-hash), serialization, verification against expected source |
+| D1-D4: Distributed security | 5 days | New `(std actor cluster-security)` | IMPLEMENTED — D1: node TLS config, D2: authenticated messages with HMAC + replay window, D3: signed delegation tokens with expiry, D4: cluster policies with role-based permissions and connection ACLs |
 
 ---
 
