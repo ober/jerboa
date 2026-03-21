@@ -214,7 +214,7 @@
                   (unless (native-crypto-memcmp server-proof expected)
                     (tcp-close fd)
                     (error 'open-connection! "server auth failed — possible MITM" node-id))
-                  (vector fd write-mutex))))))))))
+                  (vector fd write-mutex)))))))))
 
   ;; -------- 7E: Remote send --------
 
@@ -287,7 +287,7 @@
                           (unless (eq? msg 'eof)
                             (dispatch-remote-message! msg)
                             (loop))))
-                      (tcp-close fd))))))))))))
+                      (tcp-close fd)))))))))))
 
   ;; Dispatch an inbound message to a local actor.
   ;; Expected wire format: (send local-actor-id payload)

@@ -4,3 +4,12 @@
 *~
 \#*
 .#*
+
+# Rust build artifacts
+jerboa-native-rs/target/
+
+# Claude Code exports
+new.txt
+
+# External project stubs (belong in their own repos)
+lib/gerbil-litehtml/

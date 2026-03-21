@@ -15,6 +15,13 @@
 
   ;; ========== FFI ==========
 
+  ;; Load libc so POSIX socket functions are available at compile time.
+  ;; Without this, compile-library fails because foreign-procedure can't
+  ;; resolve "socket" etc. during ahead-of-time compilation.
+  (define _libc
+    (guard (exn [#t (void)])
+      (load-shared-object "libc.so.6")))
+
   (define c-socket    (foreign-procedure "socket" (int int int) int))
   (define c-bind      (foreign-procedure "bind" (int void* int) int))
   (define c-listen    (foreign-procedure "listen" (int int) int))

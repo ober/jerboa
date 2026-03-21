@@ -14,8 +14,12 @@
     rust-hmac-sha256 rust-hmac-sha256-verify
     ;; Timing-safe comparison
     rust-timing-safe-equal?
-    ;; AEAD
+    ;; AEAD (AES-256-GCM)
     rust-aead-seal rust-aead-open
+    ;; AEAD (ChaCha20-Poly1305)
+    rust-chacha20-seal rust-chacha20-open
+    ;; Scrypt KDF
+    rust-scrypt
     ;; PBKDF2
     rust-pbkdf2-derive rust-pbkdf2-verify
     ;; Error
@@ -23,11 +27,12 @@
 
   (import (chezscheme))
 
-  ;; Load the Rust native library
+  ;; Load the Rust native library (for dynamic builds).
+  ;; In static builds, symbols are pre-registered via Sforeign_symbol — skip loading.
   (define _native-loaded
     (or (guard (e [#t #f]) (load-shared-object "libjerboa_native.so") #t)
         (guard (e [#t #f]) (load-shared-object "lib/libjerboa_native.so") #t)
-        (error 'std/crypto/native-rust "libjerboa_native.so not found")))
+        #t))
 
   ;; Helper: extract sub-bytevector (avoids Chez extension warning)
   (define (bv-sub bv start len)
@@ -168,6 +173,70 @@
         (when (< rc 0) (error 'rust-aead-open "open failed" (rust-last-error)))
         (let ([actual-len (bytevector-u64-native-ref len-buf 0)])
           (bv-sub out 0 actual-len)))))
+
+  ;; --- AEAD (ChaCha20-Poly1305) ---
+
+  (define c-jerboa-chacha20-seal
+    (foreign-procedure "jerboa_chacha20_seal"
+      (u8* size_t u8* size_t u8* size_t u8* size_t u8* size_t u8*) int))
+
+  ;; Encrypt with ChaCha20-Poly1305. Returns ciphertext||tag bytevector.
+  (define (rust-chacha20-seal key nonce plaintext aad)
+    (let* ([pt-len (bytevector-length plaintext)]
+           [out-max (+ pt-len 16)]
+           [out (make-bytevector out-max)]
+           [len-buf (make-bytevector 8)])
+      (let ([rc (c-jerboa-chacha20-seal key (bytevector-length key)
+                                         nonce (bytevector-length nonce)
+                                         plaintext pt-len
+                                         aad (bytevector-length aad)
+                                         out out-max
+                                         len-buf)])
+        (when (< rc 0) (error 'rust-chacha20-seal "seal failed" (rust-last-error)))
+        (let ([actual-len (bytevector-u64-native-ref len-buf 0)])
+          (if (= actual-len out-max)
+            out
+            (bv-sub out 0 actual-len))))))
+
+  (define c-jerboa-chacha20-open
+    (foreign-procedure "jerboa_chacha20_open"
+      (u8* size_t u8* size_t u8* size_t u8* size_t u8* size_t u8*) int))
+
+  ;; Decrypt with ChaCha20-Poly1305. Returns plaintext or raises error.
+  (define (rust-chacha20-open key nonce ciphertext aad)
+    (let* ([ct-len (bytevector-length ciphertext)]
+           [out-max ct-len]
+           [out (make-bytevector out-max)]
+           [len-buf (make-bytevector 8)])
+      (let ([rc (c-jerboa-chacha20-open key (bytevector-length key)
+                                         nonce (bytevector-length nonce)
+                                         ciphertext ct-len
+                                         aad (bytevector-length aad)
+                                         out out-max
+                                         len-buf)])
+        (when (< rc 0) (error 'rust-chacha20-open "open failed" (rust-last-error)))
+        (let ([actual-len (bytevector-u64-native-ref len-buf 0)])
+          (bv-sub out 0 actual-len)))))
+
+  ;; --- Scrypt KDF ---
+
+  (define c-jerboa-scrypt
+    (foreign-procedure "jerboa_scrypt"
+      (u8* size_t u8* size_t unsigned-8 unsigned-32 unsigned-32 u8* size_t) int))
+
+  ;; Derive key using scrypt. Takes N (power of 2, e.g. 16384), r, p.
+  ;; Converts N to log2(N) for the Rust API.
+  (define (rust-scrypt password salt output-len n r p)
+    (let* ([pw (if (string? password) (string->utf8 password) password)]
+           [s (if (string? password) (string->utf8 salt) salt)]
+           [log-n (bitwise-length (- n 1))]  ;; log2(16384) = 14
+           [out (make-bytevector output-len)])
+      (let ([rc (c-jerboa-scrypt pw (bytevector-length pw)
+                                  s (bytevector-length s)
+                                  log-n r p
+                                  out output-len)])
+        (when (< rc 0) (error 'rust-scrypt "scrypt failed" (rust-last-error)))
+        out)))
 
   ;; --- PBKDF2 ---
 

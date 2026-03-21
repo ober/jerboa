@@ -259,6 +259,145 @@ pub extern "C" fn jerboa_aead_open(
     })
 }
 
+// --- AEAD (ChaCha20-Poly1305) ---
+
+#[no_mangle]
+pub extern "C" fn jerboa_chacha20_seal(
+    key: *const u8, key_len: usize,
+    nonce: *const u8, nonce_len: usize,
+    plaintext: *const u8, pt_len: usize,
+    aad: *const u8, aad_len: usize,
+    output: *mut u8, output_max: usize,
+    output_len: *mut usize,
+) -> i32 {
+    ffi_wrap(|| {
+        if key.is_null() || nonce.is_null() || output.is_null() || output_len.is_null() {
+            return -1;
+        }
+        let needed = pt_len + aead::CHACHA20_POLY1305.tag_len();
+        if output_max < needed { return -1; }
+        if nonce_len != 12 { return -1; }
+        if key_len != 32 { return -1; }
+
+        let k = unsafe { std::slice::from_raw_parts(key, key_len) };
+        let n = unsafe { std::slice::from_raw_parts(nonce, nonce_len) };
+        let pt = if pt_len == 0 { &[] } else {
+            unsafe { std::slice::from_raw_parts(plaintext, pt_len) }
+        };
+        let ad = if aad_len == 0 || aad.is_null() { &[] } else {
+            unsafe { std::slice::from_raw_parts(aad, aad_len) }
+        };
+
+        let unbound_key = match aead::UnboundKey::new(&aead::CHACHA20_POLY1305, k) {
+            Ok(uk) => uk,
+            Err(_) => return -1,
+        };
+        let sealing_key = aead::LessSafeKey::new(unbound_key);
+        let nonce_val = match aead::Nonce::try_assume_unique_for_key(n) {
+            Ok(nv) => nv,
+            Err(_) => return -1,
+        };
+
+        let out = unsafe { std::slice::from_raw_parts_mut(output, output_max) };
+        out[..pt_len].copy_from_slice(pt);
+
+        let aad_obj = aead::Aad::from(ad);
+        match sealing_key.seal_in_place_separate_tag(nonce_val, aad_obj, &mut out[..pt_len]) {
+            Ok(tag) => {
+                out[pt_len..pt_len + tag.as_ref().len()].copy_from_slice(tag.as_ref());
+                unsafe { *output_len = needed; }
+                0
+            }
+            Err(_) => -1,
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn jerboa_chacha20_open(
+    key: *const u8, key_len: usize,
+    nonce: *const u8, nonce_len: usize,
+    ciphertext: *const u8, ct_len: usize,
+    aad: *const u8, aad_len: usize,
+    output: *mut u8, output_max: usize,
+    output_len: *mut usize,
+) -> i32 {
+    ffi_wrap(|| {
+        if key.is_null() || nonce.is_null() || output.is_null() || output_len.is_null() {
+            return -1;
+        }
+        let tag_len = aead::CHACHA20_POLY1305.tag_len();
+        if ct_len < tag_len { return -1; }
+        let pt_len = ct_len - tag_len;
+        if output_max < pt_len { return -1; }
+        if nonce_len != 12 { return -1; }
+        if key_len != 32 { return -1; }
+
+        let k = unsafe { std::slice::from_raw_parts(key, key_len) };
+        let n = unsafe { std::slice::from_raw_parts(nonce, nonce_len) };
+        let ct = unsafe { std::slice::from_raw_parts(ciphertext, ct_len) };
+        let ad = if aad_len == 0 || aad.is_null() { &[] } else {
+            unsafe { std::slice::from_raw_parts(aad, aad_len) }
+        };
+
+        let unbound_key = match aead::UnboundKey::new(&aead::CHACHA20_POLY1305, k) {
+            Ok(uk) => uk,
+            Err(_) => return -1,
+        };
+        let opening_key = aead::LessSafeKey::new(unbound_key);
+        let nonce_val = match aead::Nonce::try_assume_unique_for_key(n) {
+            Ok(nv) => nv,
+            Err(_) => return -1,
+        };
+
+        let out = unsafe { std::slice::from_raw_parts_mut(output, output_max.max(ct_len)) };
+        out[..ct_len].copy_from_slice(ct);
+
+        let aad_obj = aead::Aad::from(ad);
+        match opening_key.open_in_place(nonce_val, aad_obj, &mut out[..ct_len]) {
+            Ok(plaintext) => {
+                let plen = plaintext.len();
+                unsafe { *output_len = plen; }
+                0
+            }
+            Err(_) => -1,
+        }
+    })
+}
+
+// --- Scrypt KDF ---
+
+#[no_mangle]
+pub extern "C" fn jerboa_scrypt(
+    password: *const u8, password_len: usize,
+    salt: *const u8, salt_len: usize,
+    log_n: u8, r: u32, p: u32,
+    output: *mut u8, output_len: usize,
+) -> i32 {
+    ffi_wrap(|| {
+        if password.is_null() || salt.is_null() || output.is_null() { return -1; }
+        if output_len == 0 { return -1; }
+        let pw = unsafe { std::slice::from_raw_parts(password, password_len) };
+        let s = unsafe { std::slice::from_raw_parts(salt, salt_len) };
+        let out = unsafe { std::slice::from_raw_parts_mut(output, output_len) };
+
+        let params = match scrypt::Params::new(log_n, r, p, output_len) {
+            Ok(p) => p,
+            Err(_) => {
+                set_last_error("invalid scrypt parameters".to_string());
+                return -1;
+            }
+        };
+        match scrypt::scrypt(pw, s, &params, out) {
+            Ok(()) => 0,
+            Err(_) => {
+                set_last_error("scrypt derivation failed".to_string());
+                -1
+            }
+        }
+    })
+}
+
 // --- PBKDF2 ---
 
 #[no_mangle]
