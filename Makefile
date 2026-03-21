@@ -247,7 +247,13 @@ test-security:
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-crypto-random.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-crypto-compare.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-crypto-digest.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-crypto-native.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-security-capability.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-restrict-hardened.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-process-exec.ss
+	@JERBOA_DB_HOST=evil.com JERBOA_DB_PORT=5433 JERBOA_SECRET=leaked $(SCHEME) --libdirs $(LIBDIRS) --script tests/test-config-env.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-audit.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-sanitize.ss
 
 test-all: test test-features test-wrappers test-security
 

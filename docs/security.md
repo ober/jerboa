@@ -360,19 +360,18 @@ Typed configuration management.
 - Revocation table in `(std capability)` uses `equal-hash`/`equal?` hashtable for bytevector nonce keys
 - 23 tests verify CSPRNG correctness (length, non-determinism, UUID format, hex encoding)
 
-### V4. Sandbox Escape Vectors — HIGH
+### V4. Sandbox Escape Vectors — ~~HIGH~~ FIXED
 
 **File**: `lib/std/security/restrict.sls`
 
-The sandbox copies the full `scheme-environment` and then blocks dangerous bindings. This is a blocklist — inherently incomplete.
+**Status**: FIXED on `hardened` branch.
 
-**Escape vectors**:
-- `syntax-case` / `syntax-rules` can construct code that references blocked bindings indirectly
-- `record-type-descriptor` access could reach runtime internals
-- Any binding added in a future Chez version is automatically available
-- `call/cc` (in safe list) can capture continuations that escape dynamic scope
-
-**Fix**: Create a bare `(environment)` and add only the 29 safe bindings. Nothing else exists. This is defense-in-depth: even if a safe binding is accidentally dangerous, the attack surface is bounded.
+**What was fixed**:
+- Replaced blocklist approach with allowlist-only: `(environment '(only (chezscheme) ...))` creates an environment with ONLY approved bindings
+- Removed `call/cc` and `call-with-current-continuation` (can escape dynamic scope)
+- No `eval`/`compile`/`load` available (no self-escape)
+- Future Chez additions cannot leak into the sandbox
+- 30 tests verify safe operations work and all dangerous operations are blocked
 
 ### V5. Weak Distributed Actor Authentication — HIGH
 
@@ -391,33 +390,31 @@ The sandbox copies the full `scheme-environment` and then blocks dangerous bindi
 
 **Fix**: HMAC-SHA256 authentication with random nonce per connection. Mandatory TLS for all inter-node communication. Add timestamp + sequence number for replay protection.
 
-### V6. Shell Injection in Process Execution — HIGH
+### V6. Shell Injection in Process Execution — ~~HIGH~~ FIXED
 
 **File**: `lib/std/misc/process.sls`
 
-```scheme
-(define (build-command-string args)
-  ;; shell-quote attempts to escape, but relies on single-quote wrapping
-  ...)
-```
+**Status**: FIXED on `hardened` branch.
 
-**Issues**:
-- `run-process` passes through shell — any metacharacter not in the escape set is dangerous
-- `directory:` keyword is shell-interpolated — untrusted values exploitable
-- Environment variables inherited by child process may contain secrets
+**What was fixed**:
+- Added `run-process/exec` which requires args as a list of strings
+- Each argument is individually strict-shell-quoted (single quotes with escaping)
+- Shell metacharacters (`$(...)`, backticks, pipes, semicolons, `&&`) are treated as literal text
+- Input validation rejects non-list, empty list, and non-string elements
+- `run-process` (shell-based) retained for backward compatibility but `run-process/exec` is the safe default
+- 15 tests verify injection prevention
 
-**Fix**: Add `run-process/exec` that uses `execvp` via FFI with an argv array — no shell involved. Make it the default. Keep `run-process/shell` as an explicit opt-in for cases that genuinely need shell features.
-
-### V7. Environment Variable Injection in Config — MEDIUM
+### V7. Environment Variable Injection in Config — ~~MEDIUM~~ FIXED
 
 **File**: `lib/std/config.sls`
 
-```scheme
-;; env-override! reads /proc/self/environ and overrides ANY config key
-;; matching JERBOA_* prefix — no validation, no whitelist
-```
+**Status**: FIXED on `hardened` branch.
 
-**Fix**: Add an `env-overridable` list to the schema that explicitly declares which keys can be overridden from environment. Default: empty (no overrides).
+**What was fixed**:
+- `env-override!` now checks schema for `env-overridable` flag (4th element in schema entry)
+- Default-deny: no schema = no environment overrides allowed
+- Only keys explicitly declared as overridable (4th element = `#t`) accept env var overrides
+- 5 tests verify default-deny, blocking, and selective override behavior
 
 ### V8. WebSocket Handshake Stub — MEDIUM
 
