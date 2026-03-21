@@ -5,11 +5,13 @@
   (export
     write-xml print-sxml->xml
     sxml-e sxml-attributes sxml-attribute-e sxml-children
-    *sxml-max-depth*)
+    *sxml-max-depth*
+    *sxml-max-output-size*)
 
   (import (chezscheme))
 
   (define *sxml-max-depth* (make-parameter 512))
+  (define *sxml-max-output-size* (make-parameter (* 50 1024 1024)))  ;; 50MB max output
 
   ;; --- XML escaping ---
 
@@ -98,7 +100,8 @@
 
   (define (write-sxml-node sxml port indent level)
     (when (> level (*sxml-max-depth*))
-      (error 'write-sxml-node "maximum SXML nesting depth exceeded"
+      (error 'write-sxml-node
+             "SXML nesting depth ~a exceeds maximum ~a — increase *sxml-max-depth* if intentional"
              level (*sxml-max-depth*)))
     (cond
       ((string? sxml)
