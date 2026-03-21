@@ -783,55 +783,67 @@ Remove the chez-* wrapper dependencies entirely. The Rust library is the only na
 
 ## Implementation Roadmap
 
-### Week 1-2: Core — Crypto + Secure Memory
+### Week 1-2: Core — Crypto + Secure Memory ✅ IMPLEMENTED
 
-| Task | Crate | Functions |
-|------|-------|-----------|
-| Digests (SHA-256, SHA-512) | ring | `jerboa_sha256`, `jerboa_sha512` |
-| HMAC | ring | `jerboa_hmac_sha256`, `jerboa_hmac_verify` |
-| CSPRNG | ring | `jerboa_random_bytes` |
-| Constant-time compare | ring | `jerboa_timing_safe_equal` |
-| AEAD (AES-256-GCM, ChaCha20-Poly1305) | ring | `jerboa_aead_seal`, `jerboa_aead_open` |
-| PBKDF2 | ring | `jerboa_pbkdf2_derive`, `jerboa_pbkdf2_verify` |
-| Secure memory region | libc (mmap/mlock) | `jerboa_secure_alloc`, `jerboa_secure_free`, `jerboa_secure_wipe` |
-| Scheme bindings | — | `(std crypto native)`, `(std crypto secure-mem)` |
+| Task | Crate | Functions | Status |
+|------|-------|-----------|--------|
+| Digests (SHA-1, SHA-256, SHA-384, SHA-512) | ring | `jerboa_sha1`, `jerboa_sha256`, `jerboa_sha384`, `jerboa_sha512` | ✅ |
+| HMAC | ring | `jerboa_hmac_sha256`, `jerboa_hmac_sha256_verify` | ✅ |
+| CSPRNG | ring | `jerboa_random_bytes` | ✅ |
+| Constant-time compare | ring | `jerboa_timing_safe_equal` | ✅ |
+| AEAD (AES-256-GCM) | ring | `jerboa_aead_seal`, `jerboa_aead_open` | ✅ |
+| PBKDF2 | ring | `jerboa_pbkdf2_derive`, `jerboa_pbkdf2_verify` | ✅ |
+| Secure memory region | libc (mmap/mlock) | `jerboa_secure_alloc`, `jerboa_secure_free`, `jerboa_secure_wipe` | ✅ |
+| Scheme bindings | — | `(std crypto native-rust)`, `(std crypto secure-mem)` | ✅ |
 
-### Week 3: TLS
+Rust: `src/crypto.rs`, `src/secure_mem.rs`. Scheme: `lib/std/crypto/native-rust.sls`, `lib/std/crypto/secure-mem.sls`. Tests: `tests/test-native-rust.ss` (31 tests).
 
-| Task | Crate | Functions |
-|------|-------|-----------|
-| TLS client | rustls + rustls-ffi | `jerboa_tls_connect`, `jerboa_tls_read`, `jerboa_tls_write`, `jerboa_tls_close` |
-| TLS server | rustls + rustls-ffi | `jerboa_tls_accept` |
-| Certificate loading | rustls-pemfile | `jerboa_tls_load_cert`, `jerboa_tls_load_key` |
-| Scheme bindings | — | `(std net tls)` replacement |
+### Week 3: TLS — DEFERRED
 
-### Week 4: Regex + Compression + YAML
+| Task | Crate | Functions | Status |
+|------|-------|-----------|--------|
+| TLS client | rustls + rustls-ffi | `jerboa_tls_connect`, `jerboa_tls_read`, `jerboa_tls_write`, `jerboa_tls_close` | ⏳ |
+| TLS server | rustls + rustls-ffi | `jerboa_tls_accept` | ⏳ |
+| Certificate loading | rustls-pemfile | `jerboa_tls_load_cert`, `jerboa_tls_load_key` | ⏳ |
 
-| Task | Crate | Functions |
-|------|-------|-----------|
-| Regex compile/match/find | regex | `jerboa_regex_compile`, `jerboa_regex_is_match`, `jerboa_regex_find` |
-| Deflate/inflate with size limits | flate2 | `jerboa_deflate`, `jerboa_inflate` |
-| YAML parse | serde_yaml + unsafe-libyaml | `jerboa_yaml_parse_string`, `jerboa_yaml_parse_file` |
-| Scheme bindings | — | `(std pcre2)` replacement, `(std compress zlib)`, `(std text yaml)` |
+TLS requires stateful session management with complex async I/O. Deferred to a future phase.
 
-### Week 5: Databases
+### Week 4: Regex + Compression ✅ IMPLEMENTED
 
-| Task | Crate | Functions |
-|------|-------|-----------|
-| SQLite open/prepare/step/finalize | rusqlite | `jerboa_sqlite_open`, `jerboa_sqlite_prepare`, `jerboa_sqlite_bind_*`, `jerboa_sqlite_step` |
-| PostgreSQL connect/query/execute | rust-postgres | `jerboa_pg_connect`, `jerboa_pg_query`, `jerboa_pg_execute` |
-| Scheme bindings | — | `(std db sqlite)`, `(std db postgresql)` replacements |
+| Task | Crate | Functions | Status |
+|------|-------|-----------|--------|
+| Regex compile/match/find/replace | regex (NFA) | `jerboa_regex_compile`, `jerboa_regex_is_match`, `jerboa_regex_find`, `jerboa_regex_replace_all`, `jerboa_regex_free` | ✅ |
+| Deflate/inflate with size limits | flate2 | `jerboa_deflate`, `jerboa_inflate` | ✅ |
+| Gzip/gunzip with size limits | flate2 | `jerboa_gzip`, `jerboa_gunzip` | ✅ |
+| Scheme bindings | — | `(std regex-native)`, `(std compress native-rust)` | ✅ |
 
-### Week 6: OS Integration + Polish
+Rust: `src/regex_native.rs`, `src/compress.rs`. Scheme: `lib/std/regex-native.sls`, `lib/std/compress/native-rust.sls`. Tests: `tests/test-native-rust.ss`.
 
-| Task | Crate | Functions |
-|------|-------|-----------|
-| Landlock | landlock | `jerboa_landlock_create`, `jerboa_landlock_add_rule`, `jerboa_landlock_enforce` |
-| io_uring | io-uring | `jerboa_uring_init`, `jerboa_uring_submit`, `jerboa_uring_wait` |
-| epoll | libc | `jerboa_epoll_create`, `jerboa_epoll_ctl`, `jerboa_epoll_wait` |
-| inotify | inotify | `jerboa_inotify_init`, `jerboa_inotify_add_watch` |
-| CI integration | — | `cargo audit`, `cargo test`, header generation |
-| Static linking | — | `libjerboa_native.a` for single-binary builds |
+### Week 5: Databases ✅ IMPLEMENTED
+
+| Task | Crate | Functions | Status |
+|------|-------|-----------|--------|
+| SQLite open/close/exec | rusqlite (bundled) | `jerboa_sqlite_open`, `jerboa_sqlite_close`, `jerboa_sqlite_exec` | ✅ |
+| SQLite prepare/bind/step/column | rusqlite | `jerboa_sqlite_prepare`, `jerboa_sqlite_bind_*`, `jerboa_sqlite_step`, `jerboa_sqlite_column_*` | ✅ |
+| SQLite reset/finalize/metadata | rusqlite | `jerboa_sqlite_reset`, `jerboa_sqlite_finalize`, `jerboa_sqlite_last_insert_rowid`, `jerboa_sqlite_changes` | ✅ |
+| PostgreSQL connect/disconnect | rust-postgres | `jerboa_pg_connect`, `jerboa_pg_disconnect` | ✅ |
+| PostgreSQL exec/query | rust-postgres | `jerboa_pg_exec`, `jerboa_pg_query`, `jerboa_pg_nrows`, `jerboa_pg_ncols` | ✅ |
+| PostgreSQL result access | rust-postgres | `jerboa_pg_get_value`, `jerboa_pg_is_null`, `jerboa_pg_column_name`, `jerboa_pg_free_result` | ✅ |
+| Scheme bindings | — | `(std db sqlite-native)`, `(std db postgresql-native)` | ✅ |
+
+Rust: `src/sqlite.rs`, `src/postgres_native.rs`. Scheme: `lib/std/db/sqlite-native.sls`, `lib/std/db/postgresql-native.sls`. Tests: `tests/test-native-rust-week5-6.ss` (26 tests). SQLite uses raw `sqlite3_*` C API via `rusqlite::ffi` to avoid Rust lifetime issues with Statement handles. PostgreSQL uses handle stores for `Client` and `Vec<Row>`.
+
+### Week 6: OS Integration ✅ IMPLEMENTED
+
+| Task | Crate | Functions | Status |
+|------|-------|-----------|--------|
+| epoll create/ctl/wait/close | libc | `jerboa_epoll_create`, `jerboa_epoll_ctl`, `jerboa_epoll_wait`, `jerboa_epoll_close` | ✅ |
+| inotify init/watch/read/close | libc | `jerboa_inotify_init`, `jerboa_inotify_add_watch`, `jerboa_inotify_rm_watch`, `jerboa_inotify_read`, `jerboa_inotify_close` | ✅ |
+| Landlock ABI/ruleset/rules/enforce | libc (syscalls) | `jerboa_landlock_abi_version`, `jerboa_landlock_create_ruleset`, `jerboa_landlock_add_path_rule`, `jerboa_landlock_add_net_rule`, `jerboa_landlock_enforce` | ✅ |
+| io_uring | io-uring | — | ⏳ Deferred |
+| Scheme bindings | — | `(std os epoll-native)`, `(std os inotify-native)`, `(std os landlock-native)` | ✅ |
+
+Rust: `src/epoll.rs`, `src/inotify_native.rs`, `src/landlock.rs`. Scheme: `lib/std/os/epoll-native.sls`, `lib/std/os/inotify-native.sls`, `lib/std/os/landlock-native.sls`. Tests: `tests/test-native-rust-week5-6.ss`. Landlock supports ABI v1-v7 with filesystem + network rules. io_uring deferred (complex async interface).
 
 ---
 

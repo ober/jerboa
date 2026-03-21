@@ -11,6 +11,9 @@ ring = "0.17"
 flate2 = "1"
 regex = "1"
 libc = "0.2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+postgres = "0.19"
+inotify = { version = "0.11", default-features = false }
 
 [profile.release]
 lto = true

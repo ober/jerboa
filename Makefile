@@ -276,8 +276,10 @@ clean-native:
 	rm -f lib/libjerboa_native.so
 
 test-native: native
-	@echo "--- Rust native library tests ---"
-	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-native-rust.ss
+	@echo "--- Rust native library tests (weeks 1-4) ---"
+	@LD_LIBRARY_PATH=lib $(SCHEME) --libdirs $(LIBDIRS) --script tests/test-native-rust.ss
+	@echo "--- Rust native library tests (weeks 5-6) ---"
+	@LD_LIBRARY_PATH=lib $(SCHEME) --libdirs $(LIBDIRS) --script tests/test-native-rust-week5-6.ss
 
 audit-native:
 	cd $(RUST_NATIVE_DIR) && cargo audit
