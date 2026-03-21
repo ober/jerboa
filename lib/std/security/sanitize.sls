@@ -11,6 +11,8 @@
 (library (std security sanitize)
   (export
     sanitize-html
+    sanitize-html-attribute
+    sanitize-url-attribute
     sql-escape
     sanitize-path
     safe-path-join
@@ -40,8 +42,11 @@
   ;; ========== HTML Sanitization ==========
 
   (define (sanitize-html s)
-    ;; Escape HTML special characters to prevent XSS.
+    ;; Escape HTML special characters to prevent XSS in ELEMENT CONTENT.
     ;; Converts: < > & " ' to HTML entities.
+    ;; NOTE: This is safe for <tag>CONTENT</tag> context ONLY.
+    ;; For attribute values, use sanitize-html-attribute instead.
+    ;; For URL attributes (href, src), use sanitize-url-attribute.
     (let ([out (open-output-string)])
       (string-for-each
         (lambda (c)
@@ -54,6 +59,57 @@
             [else (write-char c out)]))
         s)
       (get-output-string out)))
+
+  (define (sanitize-html-attribute s)
+    ;; Escape a string for use in HTML attribute values.
+    ;; More aggressive than sanitize-html: also encodes / ` = and
+    ;; all non-alphanumeric characters below 0x80 as hex entities.
+    ;; This prevents attribute breakout even in unquoted attributes.
+    (let ([out (open-output-string)])
+      (string-for-each
+        (lambda (c)
+          (cond
+            [(char-alphabetic? c) (write-char c out)]
+            [(char-numeric? c) (write-char c out)]
+            [(memv c '(#\- #\_ #\. #\space))
+             ;; Safe chars in attributes (space is ok inside quoted attrs)
+             (write-char c out)]
+            [else
+             ;; Encode everything else as &#xHH;
+             (let ([code (char->integer c)])
+               (display "&#x" out)
+               (display (number->string code 16) out)
+               (display ";" out))]))
+        s)
+      (get-output-string out)))
+
+  (define (sanitize-url-attribute url)
+    ;; Sanitize a URL for use in href/src/action HTML attributes.
+    ;; Rejects dangerous schemes (javascript:, data:, vbscript:) and
+    ;; encodes the result for safe attribute embedding.
+    ;; Returns the sanitized URL string or raises &url-scheme-violation.
+    (let ([lower (string-downcase (string-trim-left* url))])
+      ;; Reject dangerous schemes
+      (when (or (string-prefix? "javascript:" lower)
+                (string-prefix? "data:" lower)
+                (string-prefix? "vbscript:" lower)
+                (string-prefix? "blob:" lower))
+        (raise (condition
+          (make-url-scheme-violation url)
+          (make-message-condition
+            (format "dangerous URL scheme rejected: ~a" url))))))
+    ;; Attribute-encode the URL
+    (sanitize-html-attribute url))
+
+  (define (string-trim-left* s)
+    ;; Trim leading whitespace (used by sanitize-url-attribute to catch
+    ;; " javascript:" with leading spaces).
+    (let ([len (string-length s)])
+      (let lp ([i 0])
+        (cond
+          [(>= i len) ""]
+          [(char-whitespace? (string-ref s i)) (lp (+ i 1))]
+          [else (substring s i len)]))))
 
   ;; ========== SQL Escaping ==========
 

@@ -158,6 +158,14 @@
     (unless (landlock-available?)
       (error 'landlock-install! "Landlock not available on this kernel"))
 
+    ;; WARNING: Full Landlock syscall implementation is not yet complete.
+    ;; Only NO_NEW_PRIVS is set. The filesystem rules are recorded but
+    ;; NOT enforced at the kernel level.
+    (display "WARNING: landlock-install! — policy recorded but NOT enforced. "
+             (current-error-port))
+    (display "Kernel Landlock syscalls not yet implemented.\n"
+             (current-error-port))
+
     ;; NOTE: Full implementation would:
     ;; 1. landlock_create_ruleset() to get a ruleset fd
     ;; 2. For each rule: open(path, O_PATH) → landlock_add_rule(fd, path_beneath, ...)

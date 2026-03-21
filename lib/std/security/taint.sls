@@ -33,6 +33,12 @@
     tainted-substring
     tainted-string-length
 
+    ;; Safe wrappers (auto-check taint at dangerous sinks)
+    safe-open-input-file
+    safe-open-output-file
+    safe-system
+    safe-delete-file
+
     ;; Condition type
     &taint-violation
     make-taint-violation
@@ -128,5 +134,31 @@
     (if (tainted? s)
       (string-length (taint-value s))
       (string-length s)))
+
+  ;; ========== Safe Wrappers (auto-enforce taint at dangerous sinks) ==========
+  ;;
+  ;; These wrappers automatically reject tainted arguments at dangerous
+  ;; operations. Use these instead of bare Chez primitives when processing
+  ;; untrusted input.
+
+  (define (safe-open-input-file path)
+    ;; Reject tainted paths before opening files for reading.
+    (check-untainted! path 'open-input-file)
+    (open-input-file path))
+
+  (define (safe-open-output-file path)
+    ;; Reject tainted paths before opening files for writing.
+    (check-untainted! path 'open-output-file)
+    (open-output-file path))
+
+  (define (safe-system cmd)
+    ;; Reject tainted commands before shell execution.
+    (check-untainted! cmd 'system)
+    (system cmd))
+
+  (define (safe-delete-file path)
+    ;; Reject tainted paths before file deletion.
+    (check-untainted! path 'delete-file)
+    (delete-file path))
 
   ) ;; end library

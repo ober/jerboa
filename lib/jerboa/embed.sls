@@ -12,7 +12,9 @@
     make-sandbox-config sandbox-config?
     with-sandbox)
 
-  (import (chezscheme))
+  (import (chezscheme)
+          (std security restrict)
+          (jerboa reader))
 
   ;; ========== Sandbox Config ==========
 
@@ -70,28 +72,70 @@
 
   (define (make-sandbox . args)
     ;; Optional config as first arg.
+    ;; HARDENED: Defaults to restricted environment (allowlist-only).
+    ;; Use (copy-environment (interaction-environment) #t) only if you
+    ;; explicitly need full access — never for untrusted code.
     (let ([config (if (and (pair? args) (sandbox-config? (car args)))
                     (car args)
                     #f)])
       (make-sandbox-raw
-        (copy-environment (interaction-environment) #t)
+        (make-restricted-environment)
         (make-hashtable equal-hash equal?)
         config)))
 
+  ;; Internal: run thunk with max-eval-time enforcement if configured.
+  (define (%with-time-limit sb thunk)
+    (let ([config (sandbox-config-field sb)])
+      (if (and config (sandbox-config-max-eval-time config))
+        (let ([timeout-ms (sandbox-config-max-eval-time config)]
+              [result     #f]
+              [finished?  #f]
+              [lock       (make-mutex)]
+              [cv         (make-condition)])
+          ;; Run in a worker thread
+          (fork-thread
+            (lambda ()
+              (let ([val (guard (exn [#t (exn->sandbox-error exn)])
+                           (thunk))])
+                (with-mutex lock
+                  (set! result val)
+                  (set! finished? #t)
+                  (condition-signal cv)))))
+          ;; Wait with timeout
+          (with-mutex lock
+            (unless finished?
+              (let ([deadline (+ (cpu-time) (* timeout-ms 1000000))])
+                (let loop ()
+                  (unless finished?
+                    (condition-wait cv lock (make-time 'time-duration
+                                             (* timeout-ms 1000000) 0))
+                    (unless finished?
+                      ;; Timed out
+                      (void)))))))
+          (if finished?
+            result
+            (make-sandbox-error
+              (format "sandbox eval timed out after ~a ms" timeout-ms) '())))
+        ;; No time limit configured — run directly
+        (guard (exn [#t (exn->sandbox-error exn)])
+          (thunk)))))
+
   (define (sandbox-eval sb datum)
     ;; Evaluate a datum in the sandbox. Returns result or sandbox-error.
-    (guard (exn [#t (exn->sandbox-error exn)])
-      (eval datum (sandbox-environment sb))))
+    (%with-time-limit sb
+      (lambda () (eval datum (sandbox-environment sb)))))
 
   (define (sandbox-eval-string sb str)
     ;; Read and eval a string in the sandbox.
-    (guard (exn [#t (exn->sandbox-error exn)])
-      (let ([port (open-input-string str)])
-        (let loop ([last (if #f #f)])
-          (let ([form (read port)])
-            (if (eof-object? form)
-              last
-              (loop (eval form (sandbox-environment sb)))))))))
+    ;; HARDENED: Uses jerboa-read (depth-limited) instead of bare read.
+    (%with-time-limit sb
+      (lambda ()
+        (let ([port (open-input-string str)])
+          (let loop ([last (if #f #f)])
+            (let ([form (jerboa-read port)])
+              (if (eof-object? form)
+                last
+                (loop (eval form (sandbox-environment sb))))))))))
 
   (define (sandbox-define! sb name val)
     ;; Bind name (symbol) to val in the sandbox.
@@ -111,13 +155,23 @@
 
   (define (sandbox-reset! sb)
     ;; Clear user-defined bindings by creating a fresh environment.
+    ;; HARDENED: Uses restricted environment, consistent with make-sandbox.
     (hashtable-clear! (sandbox-user-bindings sb))
     (sandbox-environment-set! sb
-      (copy-environment (interaction-environment) #t)))
+      (make-restricted-environment)))
 
   (define (sandbox-import! sb lib-name)
     ;; Import a library into the sandbox.
     ;; lib-name: e.g., '(std log) or '(chezscheme)
+    ;; HARDENED: Enforces allowed-imports from sandbox config.
+    (let ([config (sandbox-config-field sb)])
+      (when (and config (sandbox-config-allowed-imports config))
+        (unless (member lib-name (sandbox-config-allowed-imports config))
+          (raise (condition
+                   (make-message-condition
+                     (format "sandbox import denied: ~a is not in allowed-imports list"
+                             lib-name))
+                   (make-irritants-condition (list lib-name)))))))
     (guard (exn [#t (exn->sandbox-error exn)])
       (eval `(import ,lib-name) (sandbox-environment sb))))
 

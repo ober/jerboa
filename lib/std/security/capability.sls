@@ -98,8 +98,23 @@
                [canonical (canonicalize-path path)])
            (exists (lambda (p) (string-prefix? p canonical)) allowed))))
 
+  ;; FFI binding for realpath(3) — resolves symlinks and . / ..
+  (define c-realpath
+    (guard (exn [#t #f])
+      (let ([f (foreign-procedure "realpath" (string void*) string)])
+        (lambda (path) (f path 0)))))
+
   (define (canonicalize-path path)
-    ;; Simple path canonicalization (resolve . and ..)
+    ;; HARDENED: Uses realpath(3) to resolve symlinks when available.
+    ;; Falls back to string-based canonicalization if FFI fails.
+    (or (and c-realpath
+             (guard (exn [#t #f])
+               (c-realpath path)))
+        ;; Fallback: string-based canonicalization (no symlink resolution)
+        (canonicalize-path/string-only path)))
+
+  (define (canonicalize-path/string-only path)
+    ;; String-only path canonicalization (resolve . and ..)
     (let ([parts (string-split path #\/)]
           [result '()])
       (let lp ([parts parts] [stack '()])
@@ -149,10 +164,14 @@
          (cdr (assq 'listen (capability-permissions cap)))))
 
   (define (net-allowed-host? cap host)
+    ;; HARDENED: Empty hosts list = NO hosts allowed (default deny).
+    ;; Use hosts: '("*") for explicit wildcard access.
     (and (eq? (capability-type cap) 'network)
          (let ([hosts (cdr (assq 'hosts (capability-permissions cap)))])
-           (or (null? hosts)  ;; empty = all allowed
-               (member host hosts)))))
+           (cond
+             [(null? hosts) #f]                  ;; empty = none allowed
+             [(member "*" hosts) #t]             ;; explicit wildcard
+             [else (member host hosts)]))))
 
   ;; ========== Process Capability ==========
 
@@ -218,13 +237,47 @@
 
   (define (intersect-capabilities parent child)
     ;; Each child capability must be covered by a parent capability
-    ;; of the same type. For now, simple: child caps are used directly
-    ;; if parent allows that type.
-    (filter (lambda (c)
-              (exists (lambda (p)
-                        (eq? (capability-type p) (capability-type c)))
-                      parent))
-            child))
+    ;; of the same type. HARDENED: Per-permission intersection —
+    ;; booleans are ANDed, lists are set-intersected.
+    (filter-map
+      (lambda (c)
+        (let ([matching-parent
+               (find (lambda (p) (eq? (capability-type p) (capability-type c)))
+                     parent)])
+          (and matching-parent
+               (%attenuate-to-parent-bounds matching-parent c))))
+      child))
+
+  (define (filter-map f lst)
+    (let loop ([lst lst] [acc '()])
+      (if (null? lst) (reverse acc)
+        (let ([result (f (car lst))])
+          (loop (cdr lst) (if result (cons result acc) acc))))))
+
+  (define (%attenuate-to-parent-bounds parent-cap child-cap)
+    ;; Create a new capability whose permissions are the intersection
+    ;; of parent and child: booleans ANDed, lists set-intersected.
+    (let ([parent-perms (capability-permissions parent-cap)]
+          [child-perms  (capability-permissions child-cap)])
+      (make-cap (capability-type child-cap)
+        (map (lambda (child-perm)
+               (let* ([key (car child-perm)]
+                      [child-val (cdr child-perm)]
+                      [parent-pair (assq key parent-perms)]
+                      [parent-val (if parent-pair (cdr parent-pair) #f)])
+                 (cons key
+                   (cond
+                     ;; Both booleans: AND them (child can only restrict)
+                     [(and (boolean? child-val) (boolean? parent-val))
+                      (and child-val parent-val)]
+                     ;; Both lists: intersect (child can only narrow)
+                     [(and (list? child-val) (list? parent-val))
+                      (filter (lambda (x) (member x parent-val)) child-val)]
+                     ;; Parent is #f (denied): always deny
+                     [(eq? parent-val #f) #f]
+                     ;; Fallback: use parent's value (more restrictive)
+                     [else parent-val]))))
+             child-perms))))
 
   ;; ========== Attenuation ==========
 

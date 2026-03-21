@@ -130,9 +130,14 @@
     ;; otherwise we record the filter for documentation/testing purposes.
     ;; Full BPF program generation would require assembling sock_filter structs.
     ;;
-    ;; NOTE: A production implementation would generate BPF bytecode here.
-    ;; For now, we set NO_NEW_PRIVS (which is itself a security hardening measure)
-    ;; and record the policy for enforcement via the capability system.
+    ;; WARNING: BPF bytecode generation is not yet implemented.
+    ;; Only NO_NEW_PRIVS is enforced. The seccomp policy is recorded
+    ;; but NOT enforced at the kernel level. Do not rely on this for
+    ;; actual syscall filtering in security-critical contexts.
+    (display "WARNING: seccomp-install! — policy recorded but NOT enforced. "
+             (current-error-port))
+    (display "Kernel BPF filter generation not yet implemented.\n"
+             (current-error-port))
     (void))
 
   ;; ========== Pre-built Filters ==========

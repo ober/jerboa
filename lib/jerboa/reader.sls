@@ -13,6 +13,9 @@
     jerboa-read-string
     *max-read-depth*
     *max-block-comment-depth*
+    *max-string-length*
+    *max-list-length*
+    *max-symbol-length*
     source-location source-location?
     source-location-path source-location-line source-location-column
     make-source-location
@@ -24,6 +27,9 @@
 
   (define *max-read-depth* (make-parameter 1000))
   (define *max-block-comment-depth* (make-parameter 1000))
+  (define *max-string-length* (make-parameter (* 10 1024 1024)))  ;; 10MB default
+  (define *max-list-length* (make-parameter 1000000))             ;; 1M elements default
+  (define *max-symbol-length* (make-parameter 4096))              ;; 4KB default
 
   ;;;; Source locations
   (define-record-type source-location
@@ -247,11 +253,14 @@
       ((rs close-char depth) (read-list-impl rs close-char depth))))
 
   (define (read-list-impl rs close-char depth)
-    (let loop ((acc '()))
+    (let loop ((acc '()) (count 0))
+      (when (> count (*max-list-length*))
+        (error 'jerboa-read "list exceeds maximum element count"
+               count (*max-list-length*)))
       (skip-whitespace! rs)
       (let ((hash-datum (handle-hash-comments! rs)))
         (if hash-datum
-          (loop (cons hash-datum acc))
+          (loop (cons hash-datum acc) (fx+ count 1))
       (let ((ch (reader-peek rs)))
         (cond
           ((eof-object? ch)
@@ -280,12 +289,12 @@
                 (reader-state-peeked-set! rs ch2)
                 (let ((loc (reader-location rs)))
                   (let ((sym (read-symbol-chars rs #\.)))
-                    (loop (cons (annotate rs sym loc) acc))))))))
+                    (loop (cons (annotate rs sym loc) acc) (fx+ count 1))))))))
           (else
            (let ((datum (read-datum rs depth)))
              (if (eof-object? datum)
                  (error 'jerboa-read "unterminated list")
-                 (loop (cons datum acc)))))))))))
+                 (loop (cons datum acc) (fx+ count 1)))))))))))
 
   ;; Handle #| and #; comments inside lists.
   (define (handle-hash-comments! rs)
@@ -577,7 +586,10 @@
   ;;;; String reader
 
   (define (read-string-literal rs)
-    (let loop ((chars '()))
+    (let loop ((chars '()) (len 0))
+      (when (> len (*max-string-length*))
+        (error 'jerboa-read "string literal exceeds maximum length"
+               len (*max-string-length*)))
       (let ((ch (reader-next! rs)))
         (cond
           ((eof-object? ch) (error 'jerboa-read "unterminated string"))
@@ -586,14 +598,14 @@
            (let ((esc (reader-next! rs)))
              (cond
                ((eof-object? esc) (error 'jerboa-read "unterminated string escape"))
-               ((char=? esc #\n) (loop (cons #\newline chars)))
-               ((char=? esc #\t) (loop (cons #\tab chars)))
-               ((char=? esc #\r) (loop (cons #\return chars)))
-               ((char=? esc #\\) (loop (cons #\\ chars)))
-               ((char=? esc #\") (loop (cons #\" chars)))
-               ((char=? esc #\a) (loop (cons #\alarm chars)))
-               ((char=? esc #\b) (loop (cons #\backspace chars)))
-               ((char=? esc #\0) (loop (cons #\nul chars)))
+               ((char=? esc #\n) (loop (cons #\newline chars) (fx+ len 1)))
+               ((char=? esc #\t) (loop (cons #\tab chars) (fx+ len 1)))
+               ((char=? esc #\r) (loop (cons #\return chars) (fx+ len 1)))
+               ((char=? esc #\\) (loop (cons #\\ chars) (fx+ len 1)))
+               ((char=? esc #\") (loop (cons #\" chars) (fx+ len 1)))
+               ((char=? esc #\a) (loop (cons #\alarm chars) (fx+ len 1)))
+               ((char=? esc #\b) (loop (cons #\backspace chars) (fx+ len 1)))
+               ((char=? esc #\0) (loop (cons #\nul chars) (fx+ len 1)))
                ((char=? esc #\x)
                 (let hex-loop ((hex-chars '()))
                   (let ((hch (reader-peek rs)))
@@ -601,7 +613,7 @@
                       ((and (char? hch) (char=? hch #\;))
                        (reader-next! rs)
                        (let ((n (string->number (list->string (reverse hex-chars)) 16)))
-                         (if n (loop (cons (integer->char n) chars))
+                         (if n (loop (cons (integer->char n) chars) (fx+ len 1))
                              (error 'jerboa-read "invalid hex escape"))))
                       ((and (char? hch)
                             (or (char-numeric? hch)
@@ -612,10 +624,10 @@
                        (if (null? hex-chars)
                            (error 'jerboa-read "empty hex escape")
                            (let ((n (string->number (list->string (reverse hex-chars)) 16)))
-                             (if n (loop (cons (integer->char n) chars))
+                             (if n (loop (cons (integer->char n) chars) (fx+ len 1))
                                  (error 'jerboa-read "invalid hex escape")))))))))
-               (else (loop (cons esc chars))))))
-          (else (loop (cons ch chars)))))))
+               (else (loop (cons esc chars) (fx+ len 1))))))
+          (else (loop (cons ch chars) (fx+ len 1)))))))
 
   ;;;; Number reader
 
@@ -699,14 +711,17 @@
            (loop (fx+ i 1) start acc))))))
 
   (define (read-symbol-chars rs prefix-char)
-    (let loop ((chars (if prefix-char (list prefix-char) '())))
+    (let loop ((chars (if prefix-char (list prefix-char) '())) (len (if prefix-char 1 0)))
+      (when (> len (*max-symbol-length*))
+        (error 'jerboa-read "symbol exceeds maximum length"
+               len (*max-symbol-length*)))
       (let ((ch (reader-peek rs)))
         (cond
           ((or (eof-object? ch) (delimiter? ch))
            (string->symbol (list->string (reverse chars))))
           ((subsequent-ident? ch)
            (reader-next! rs)
-           (loop (cons ch chars)))
+           (loop (cons ch chars) (fx+ len 1)))
           (else
            (string->symbol (list->string (reverse chars))))))))
 

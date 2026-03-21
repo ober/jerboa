@@ -13,7 +13,8 @@
     restricted-eval-string
     safe-bindings)
 
-  (import (chezscheme))
+  (import (chezscheme)
+          (jerboa reader))
 
   ;; ========== Safe Binding Set ==========
   ;; These are the ONLY bindings available in restricted environments.
@@ -79,7 +80,9 @@
       utf8->string string->utf8
 
       ;; Symbols
-      symbol? symbol->string string->symbol gensym
+      ;; HARDENED: gensym removed — leaks runtime state via monotonic counter,
+      ;; and string->symbol can cause unbounded symbol table growth.
+      symbol? symbol->string string->symbol
 
       ;; Control (no call/cc — can escape dynamic scope)
       apply call-with-values values
@@ -94,9 +97,11 @@
       equal-hash string-hash symbol-hash
 
       ;; I/O (string ports only — no file I/O)
+      ;; HARDENED: bare `read` removed — it supports #. read-eval.
+      ;; Use jerboa-read (added as extra binding) for safe parsing.
       open-input-string open-output-string
       get-output-string
-      read write display newline
+      write display newline
       port? input-port? output-port?
       eof-object? eof-object
       read-char peek-char write-char
@@ -121,6 +126,9 @@
     (let* ([import-spec `(only (chezscheme) ,@safe-bindings)]
            [base (environment import-spec)]
            [restricted (copy-environment base #t)])
+      ;; Add jerboa-read as a safe replacement for bare read.
+      ;; It has depth limits and no #. read-eval support.
+      (define-top-level-value 'read jerboa-read restricted)
       ;; Add any extra bindings
       (when (pair? extra-bindings)
         (for-each
@@ -139,8 +147,9 @@
 
   (define (restricted-eval-string str . rest)
     ;; Parse and evaluate a string in a restricted environment.
+    ;; HARDENED: Uses jerboa-read (depth-limited) instead of bare read.
     (let ([env (if (pair? rest) (car rest) (make-restricted-environment))]
-          [expr (call-with-port (open-input-string str) read)])
+          [expr (call-with-port (open-input-string str) jerboa-read)])
       (eval expr env)))
 
   ) ;; end library

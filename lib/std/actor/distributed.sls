@@ -50,7 +50,8 @@
 
     ;; Configuration parameters
     *default-send-timeout*
-    *cluster-name*)
+    *cluster-name*
+    *max-message-size*)
 
   (import (chezscheme)
           (std actor core)
@@ -298,10 +299,20 @@
       (write msg port)
       (string->utf8 (get-output-string port))))
 
+  ;; Maximum allowed message size (bytes) for deserialization.
+  (define *max-message-size* (make-parameter (* 1 1024 1024)))  ;; 1MB default
+
   ;; Deserialize a message from a bytevector.
+  ;; HARDENED: Disables read-eval (#. syntax) to prevent code execution
+  ;; during deserialization, and enforces message size limits.
   (define (deserialize-message bv)
+    (when (> (bytevector-length bv) (*max-message-size*))
+      (error 'deserialize-message
+             "message exceeds maximum allowed size"
+             (bytevector-length bv) (*max-message-size*)))
     (let ([port (open-input-string (utf8->string bv))])
-      (read port)))
+      (parameterize ([read-eval #f])
+        (read port))))
 
   ;; Hook into cluster leave events so monitors fire automatically.
   ;; Must be after all define forms (it's an expression, not a definition).
