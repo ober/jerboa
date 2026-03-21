@@ -8,9 +8,14 @@
     write-csv
     write-csv-record
     csv-read
-    csv-write)
+    csv-write
+    *csv-strict-quotes*
+    *csv-max-field-length*)
 
   (import (chezscheme))
+
+  (define *csv-strict-quotes* (make-parameter #t))
+  (define *csv-max-field-length* (make-parameter (* 1 1024 1024)))  ;; 1MB default
 
   (define (read-csv port . rest)
     ;; Read all CSV records from port
@@ -46,7 +51,9 @@
            (let lp2 ((j (+ i 1)) (chars '()))
              (cond
                ((>= j len)
-                (reverse (cons (list->string (reverse chars)) fields)))
+                (if (*csv-strict-quotes*)
+                  (error 'parse-csv-line "unterminated quoted field")
+                  (reverse (cons (list->string (reverse chars)) fields))))
                ((char=? (string-ref line j) #\")
                 (if (and (< (+ j 1) len) (char=? (string-ref line (+ j 1)) #\"))
                   ;; Escaped quote
@@ -57,6 +64,9 @@
                       (lp (+ k 1) (cons (list->string (reverse chars)) fields) '())
                       (lp k fields (reverse chars))))))
                (else
+                (when (> (length chars) (*csv-max-field-length*))
+                  (error 'parse-csv-line "field exceeds maximum length"
+                         (length chars) (*csv-max-field-length*)))
                 (lp2 (+ j 1) (cons (string-ref line j) chars))))))
           ((char=? (string-ref line i) separator)
            (lp (+ i 1) (cons (list->string (reverse current)) fields) '()))

@@ -4,6 +4,7 @@
 (library (std schema)
   (export
     make-schema schema? schema-validate schema-valid? schema-errors schema-type
+    *schema-max-depth*
     s:string s:integer s:number s:boolean s:null s:any
     s:list s:hash s:optional s:required s:enum s:union
     s:pattern s:min-length s:max-length s:min s:max s:keys
@@ -11,6 +12,8 @@
     validation-error-message validation-error-value)
 
   (import (chezscheme) (std pregexp))
+
+  (define *schema-max-depth* (make-parameter 128))
 
   ;;; ---- Validation error ----
 
@@ -42,7 +45,12 @@
 
   ;; Run schema on value, return list of errors
   (define (schema-validate schema value)
-    ((%schema-validator schema) value '()))
+    (define (validate-with-depth schema value path)
+      (when (> (length path) (*schema-max-depth*))
+        (error 'schema-validate "maximum validation depth exceeded"
+               (length path) (*schema-max-depth*)))
+      ((%schema-validator schema) value path))
+    (validate-with-depth schema value '()))
 
   (define (schema-valid? schema value)
     (null? (schema-validate schema value)))

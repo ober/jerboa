@@ -11,6 +11,8 @@
     jerboa-read-all
     jerboa-read-file
     jerboa-read-string
+    *max-read-depth*
+    *max-block-comment-depth*
     source-location source-location?
     source-location-path source-location-line source-location-column
     make-source-location
@@ -19,6 +21,9 @@
     make-annotated-datum)
 
   (import (chezscheme))
+
+  (define *max-read-depth* (make-parameter 1000))
+  (define *max-block-comment-depth* (make-parameter 1000))
 
   ;;;; Source locations
   (define-record-type source-location
@@ -117,6 +122,9 @@
   (define (skip-block-comment! rs depth)
     (let loop ((depth depth))
       (when (fx> depth 0)
+        (when (fx> depth (*max-block-comment-depth*))
+          (error 'jerboa-read "block comment nesting depth exceeded"
+                 depth (*max-block-comment-depth*)))
         (let ((ch (reader-next! rs)))
           (cond
             ((eof-object? ch)
@@ -135,7 +143,16 @@
 
   ;;;; Main reader dispatch
 
-  (define (read-datum rs)
+  (define read-datum
+    (case-lambda
+      ((rs) (read-datum rs 0))
+      ((rs depth)
+       (when (> depth (*max-read-depth*))
+         (error 'jerboa-read "maximum nesting depth exceeded"
+                depth (*max-read-depth*)))
+       (read-datum-impl rs depth))))
+
+  (define (read-datum-impl rs depth)
     (skip-whitespace! rs)
     (let ((loc (reader-location rs))
           (ch (reader-peek rs)))
@@ -145,18 +162,18 @@
         ;; Lists
         ((char=? ch #\()
          (reader-next! rs)
-         (annotate rs (read-list rs #\)) loc))
+         (annotate rs (read-list rs #\) (+ depth 1)) loc))
 
         ;; Square brackets → (list ...)
         ((char=? ch #\[)
          (reader-next! rs)
-         (let ((items (read-list rs #\])))
+         (let ((items (read-list rs #\] (+ depth 1))))
            (annotate rs (cons 'list items) loc)))
 
         ;; Curly braces → (~ obj method args...)
         ((char=? ch #\{)
          (reader-next! rs)
-         (let ((items (read-list rs #\})))
+         (let ((items (read-list rs #\} (+ depth 1))))
            (cond
              ((null? items)
               (error 'jerboa-read "empty method dispatch {}"))
@@ -184,12 +201,12 @@
         ;; Quote
         ((char=? ch #\')
          (reader-next! rs)
-         (annotate rs (list 'quote (read-datum rs)) loc))
+         (annotate rs (list 'quote (read-datum rs (+ depth 1))) loc))
 
         ;; Quasiquote
         ((char=? ch #\`)
          (reader-next! rs)
-         (annotate rs (list 'quasiquote (read-datum rs)) loc))
+         (annotate rs (list 'quasiquote (read-datum rs (+ depth 1))) loc))
 
         ;; Unquote / unquote-splicing
         ((char=? ch #\,)
@@ -198,13 +215,13 @@
            (if (and (char? ch2) (char=? ch2 #\@))
                (begin
                  (reader-next! rs)
-                 (annotate rs (list 'unquote-splicing (read-datum rs)) loc))
-               (annotate rs (list 'unquote (read-datum rs)) loc))))
+                 (annotate rs (list 'unquote-splicing (read-datum rs (+ depth 1))) loc))
+               (annotate rs (list 'unquote (read-datum rs (+ depth 1))) loc))))
 
         ;; Hash dispatch
         ((char=? ch #\#)
          (reader-next! rs)
-         (read-hash rs loc))
+         (read-hash rs loc depth))
 
         ;; Number or symbol starting with + or -
         ((or (char=? ch #\+) (char=? ch #\-))
@@ -224,7 +241,12 @@
 
   ;;;; List reader
 
-  (define (read-list rs close-char)
+  (define read-list
+    (case-lambda
+      ((rs close-char) (read-list rs close-char 0))
+      ((rs close-char depth) (read-list-impl rs close-char depth))))
+
+  (define (read-list-impl rs close-char depth)
     (let loop ((acc '()))
       (skip-whitespace! rs)
       (let ((hash-datum (handle-hash-comments! rs)))
@@ -245,7 +267,7 @@
                ((delimiter? ch2)
                 ;; Dotted pair
                 (skip-whitespace! rs)
-                (let ((tail (read-datum rs)))
+                (let ((tail (read-datum rs depth)))
                   (skip-whitespace! rs)
                   (let ((ch3 (reader-next! rs)))
                     (unless (and (char? ch3) (char=? ch3 close-char))
@@ -260,7 +282,7 @@
                   (let ((sym (read-symbol-chars rs #\.)))
                     (loop (cons (annotate rs sym loc) acc))))))))
           (else
-           (let ((datum (read-datum rs)))
+           (let ((datum (read-datum rs depth)))
              (if (eof-object? datum)
                  (error 'jerboa-read "unterminated list")
                  (loop (cons datum acc)))))))))))
@@ -281,16 +303,21 @@
               ((and (char? ch2) (char=? ch2 #\;))
                (reader-next! rs)
                (skip-whitespace! rs)
-               (read-datum rs) ;; discard
+               (read-datum rs 0) ;; discard
                (skip-whitespace! rs)
                (handle-hash-comments! rs))
               (else
-               (read-hash rs loc)))))
+               (read-hash rs loc 0)))))
         #f)))
 
   ;;;; Hash dispatch (#)
 
-  (define (read-hash rs loc)
+  (define read-hash
+    (case-lambda
+      ((rs loc) (read-hash rs loc 0))
+      ((rs loc depth) (read-hash-impl rs loc depth))))
+
+  (define (read-hash-impl rs loc depth)
     (let ((ch (reader-peek rs)))
       (cond
         ((eof-object? ch) (error 'jerboa-read "unexpected EOF after #"))
@@ -325,7 +352,7 @@
         ;; #( vector
         ((char=? ch #\()
          (reader-next! rs)
-         (let ((items (read-list rs #\))))
+         (let ((items (read-list rs #\) (+ depth 1))))
            (annotate rs (list->vector items) loc)))
 
         ;; #u8( bytevector
@@ -337,7 +364,7 @@
            (let ((ch3 (reader-next! rs)))
              (unless (and (char? ch3) (char=? ch3 #\())
                (error 'jerboa-read "expected #u8("))
-             (let ((items (read-list rs #\))))
+             (let ((items (read-list rs #\) (+ depth 1))))
                (let ((raw-items (map (lambda (x)
                                        (if (annotated-datum? x)
                                          (annotated-datum-value x)
@@ -359,29 +386,29 @@
         ((char=? ch #\|)
          (reader-next! rs)
          (skip-block-comment! rs 1)
-         (read-datum rs))
+         (read-datum rs depth))
 
         ;; #; datum comment
         ((char=? ch #\;)
          (reader-next! rs)
          (skip-whitespace! rs)
-         (read-datum rs) ;; discard
-         (read-datum rs)) ;; read real
+         (read-datum rs depth) ;; discard
+         (read-datum rs depth)) ;; read real
 
         ;; #& box
         ((char=? ch #\&)
          (reader-next! rs)
-         (annotate rs (box (read-datum rs)) loc))
+         (annotate rs (box (read-datum rs (+ depth 1))) loc))
 
         ;; #' syntax quote
         ((char=? ch #\')
          (reader-next! rs)
-         (annotate rs (list 'syntax (read-datum rs)) loc))
+         (annotate rs (list 'syntax (read-datum rs (+ depth 1))) loc))
 
         ;; #` syntax quasiquote
         ((char=? ch #\`)
          (reader-next! rs)
-         (annotate rs (list 'quasisyntax (read-datum rs)) loc))
+         (annotate rs (list 'quasisyntax (read-datum rs (+ depth 1))) loc))
 
         ;; #, syntax unquote
         ((char=? ch #\,)
@@ -390,8 +417,8 @@
            (if (and (char? ch2) (char=? ch2 #\@))
                (begin
                  (reader-next! rs)
-                 (annotate rs (list 'unsyntax-splicing (read-datum rs)) loc))
-               (annotate rs (list 'unsyntax (read-datum rs)) loc))))
+                 (annotate rs (list 'unsyntax-splicing (read-datum rs (+ depth 1))) loc))
+               (annotate rs (list 'unsyntax (read-datum rs (+ depth 1))) loc))))
 
         ;; #x hex, #o octal, #b binary, #d decimal number
         ((or (char=? ch #\x) (char=? ch #\X))

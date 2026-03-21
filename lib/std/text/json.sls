@@ -12,19 +12,23 @@
 
 (library (std text json)
   (export read-json write-json
-          string->json-object json-object->string)
+          string->json-object json-object->string
+          *json-max-depth* *json-max-string-length*)
   (import (except (chezscheme) make-hash-table hash-table? iota 1+ 1-)
           (jerboa runtime))
 
   ;;;; ---- Reader ----
 
+  (define *json-max-depth* (make-parameter 512))
+  (define *json-max-string-length* (make-parameter (* 10 1024 1024)))  ;; 10MB
+
   (define (read-json . args)
     (let ([port (if (null? args) (current-input-port) (car args))])
-      (json-read-value port)))
+      (json-read-value port 0)))
 
   (define (string->json-object str)
     (let ([port (open-input-string str)])
-      (json-read-value port)))
+      (json-read-value port 0)))
 
   (define (json-skip-whitespace port)
     (let loop ()
@@ -33,14 +37,16 @@
           (read-char port)
           (loop)))))
 
-  (define (json-read-value port)
+  (define (json-read-value port depth)
+    (when (> depth (*json-max-depth*))
+      (error 'read-json "maximum nesting depth exceeded" depth))
     (json-skip-whitespace port)
     (let ([ch (peek-char port)])
       (cond
         [(eof-object? ch) (error 'read-json "unexpected EOF")]
         [(char=? ch #\") (json-read-string port)]
-        [(char=? ch #\{) (json-read-object port)]
-        [(char=? ch #\[) (json-read-array port)]
+        [(char=? ch #\{) (json-read-object port depth)]
+        [(char=? ch #\[) (json-read-array port depth)]
         [(char=? ch #\t) (json-read-literal port "true" #t)]
         [(char=? ch #\f) (json-read-literal port "false" #f)]
         [(char=? ch #\n) (json-read-literal port "null" (void))]
@@ -49,7 +55,9 @@
 
   (define (json-read-string port)
     (read-char port) ;; consume opening "
-    (let loop ([chars '()])
+    (let loop ([chars '()] [len 0])
+      (when (> len (*json-max-string-length*))
+        (error 'read-json "string exceeds maximum length" len))
       (let ([ch (read-char port)])
         (cond
           [(eof-object? ch) (error 'read-json "unterminated string")]
@@ -57,23 +65,23 @@
           [(char=? ch #\\)
            (let ([esc (read-char port)])
              (cond
-               [(char=? esc #\") (loop (cons #\" chars))]
-               [(char=? esc #\\) (loop (cons #\\ chars))]
-               [(char=? esc #\/) (loop (cons #\/ chars))]
-               [(char=? esc #\n) (loop (cons #\newline chars))]
-               [(char=? esc #\t) (loop (cons #\tab chars))]
-               [(char=? esc #\r) (loop (cons #\return chars))]
-               [(char=? esc #\b) (loop (cons #\backspace chars))]
-               [(char=? esc #\f) (loop (cons #\xC chars))]  ;; formfeed
+               [(char=? esc #\") (loop (cons #\" chars) (+ len 1))]
+               [(char=? esc #\\) (loop (cons #\\ chars) (+ len 1))]
+               [(char=? esc #\/) (loop (cons #\/ chars) (+ len 1))]
+               [(char=? esc #\n) (loop (cons #\newline chars) (+ len 1))]
+               [(char=? esc #\t) (loop (cons #\tab chars) (+ len 1))]
+               [(char=? esc #\r) (loop (cons #\return chars) (+ len 1))]
+               [(char=? esc #\b) (loop (cons #\backspace chars) (+ len 1))]
+               [(char=? esc #\f) (loop (cons #\xC chars) (+ len 1))]  ;; formfeed
                [(char=? esc #\u)
                 (let* ([hex (string (read-char port) (read-char port)
                                     (read-char port) (read-char port))]
                        [cp (string->number hex 16)])
-                  (loop (cons (integer->char cp) chars)))]
-               [else (loop (cons esc chars))]))]
-          [else (loop (cons ch chars))]))))
+                  (loop (cons (integer->char cp) chars) (+ len 1)))]
+               [else (loop (cons esc chars) (+ len 1))]))]
+          [else (loop (cons ch chars) (+ len 1))]))))
 
-  (define (json-read-object port)
+  (define (json-read-object port depth)
     (read-char port) ;; consume {
     (json-skip-whitespace port)
     (let ([ht (make-hash-table)])
@@ -86,7 +94,7 @@
             (let ([colon (read-char port)])
               (unless (char=? colon #\:)
                 (error 'read-json "expected ':'" colon)))
-            (let ([val (json-read-value port)])
+            (let ([val (json-read-value port (+ depth 1))])
               (hash-put! ht key val)
               (json-skip-whitespace port)
               (let ([ch (read-char port)])
@@ -95,13 +103,13 @@
                   [(char=? ch #\,) (loop)]
                   [else (error 'read-json "expected ',' or '}'" ch)]))))))))
 
-  (define (json-read-array port)
+  (define (json-read-array port depth)
     (read-char port) ;; consume [
     (json-skip-whitespace port)
     (if (char=? (peek-char port) #\])
       (begin (read-char port) '())
       (let loop ([acc '()])
-        (let ([val (json-read-value port)])
+        (let ([val (json-read-value port (+ depth 1))])
           (json-skip-whitespace port)
           (let ([ch (read-char port)])
             (cond

@@ -52,29 +52,46 @@
             (lp (+ i 3) (+ j 4)))))
       result))
 
+  (define (base64-validate-char c)
+    (let ([val (vector-ref *base64-decode-table* (char->integer c))])
+      (when (= val -1)
+        (error 'base64-decode "invalid base64 character" c))
+      val))
+
   (define (base64-string->u8vector str)
-    ;; Strip whitespace and padding
-    (let* ((clean (let lp ((i 0) (chars '()))
-                    (if (>= i (string-length str))
+    ;; Strip whitespace and validate padding position
+    (let* ((slen (string-length str))
+           ;; Validate: '=' only at end, after stripping whitespace
+           (clean (let lp ((i 0) (chars '()) (pad-count 0) (saw-non-pad? #f))
+                    (if (>= i slen)
                       (list->string (reverse chars))
                       (let ((c (string-ref str i)))
-                        (if (or (char-whitespace? c) (char=? c #\=))
-                          (lp (+ i 1) chars)
-                          (lp (+ i 1) (cons c chars)))))))
+                        (cond
+                          [(char-whitespace? c)
+                           (lp (+ i 1) chars pad-count saw-non-pad?)]
+                          [(char=? c #\=)
+                           (when saw-non-pad?
+                             ;; = after non-pad means we're in the padding zone
+                             #f)
+                           (lp (+ i 1) chars (+ pad-count 1) #f)]
+                          [else
+                           (when (> pad-count 0)
+                             (error 'base64-decode "invalid padding: '=' in middle of data"))
+                           (lp (+ i 1) (cons c chars) 0 #t)])))))
            (clen (string-length clean))
            (out-len (quotient (* clen 3) 4))
            (result (make-bytevector out-len)))
       (let lp ((i 0) (j 0))
         (when (< i clen)
-          (let* ((v0 (vector-ref *base64-decode-table* (char->integer (string-ref clean i))))
+          (let* ((v0 (base64-validate-char (string-ref clean i)))
                  (v1 (if (< (+ i 1) clen)
-                       (vector-ref *base64-decode-table* (char->integer (string-ref clean (+ i 1))))
+                       (base64-validate-char (string-ref clean (+ i 1)))
                        0))
                  (v2 (if (< (+ i 2) clen)
-                       (vector-ref *base64-decode-table* (char->integer (string-ref clean (+ i 2))))
+                       (base64-validate-char (string-ref clean (+ i 2)))
                        0))
                  (v3 (if (< (+ i 3) clen)
-                       (vector-ref *base64-decode-table* (char->integer (string-ref clean (+ i 3))))
+                       (base64-validate-char (string-ref clean (+ i 3)))
                        0)))
             (when (< j out-len)
               (bytevector-u8-set! result j

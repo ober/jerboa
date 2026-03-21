@@ -259,6 +259,7 @@ test-security:
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-phase4-safety.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-phase5-os.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-phase6-supply.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-security2-parsers.ss
 
 test-all: test test-features test-wrappers test-security
 

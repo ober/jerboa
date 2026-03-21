@@ -76,7 +76,14 @@
       bv))
 
   ;;; ========== Frame decoding ==========
+
+  (define *http2-max-frame-size* (make-parameter (* 1 1024 1024)))  ;; 1MB default
+
   (define (http2-frame-decode bv)
+    ;; Validate minimum frame header size
+    (unless (>= (bytevector-length bv) 9)
+      (error 'http2-frame-decode "bytevector too short for frame header"
+             (bytevector-length bv)))
     (let* ([plen (bitwise-ior
                    (bitwise-arithmetic-shift-left (bytevector-u8-ref bv 0) 16)
                    (bitwise-arithmetic-shift-left (bytevector-u8-ref bv 1) 8)
@@ -88,11 +95,19 @@
                       (bitwise-and (bytevector-u8-ref bv 5) #x7F) 24)
                     (bitwise-arithmetic-shift-left (bytevector-u8-ref bv 6) 16)
                     (bitwise-arithmetic-shift-left (bytevector-u8-ref bv 7) 8)
-                    (bytevector-u8-ref bv 8))]
-           [payload (let ([p (make-bytevector plen)])
-                      (bytevector-copy! bv 9 p 0 plen)
-                      p)])
-      (make-http2-frame-rec type flags sid payload)))
+                    (bytevector-u8-ref bv 8))])
+      ;; Validate payload size against cap
+      (when (> plen (*http2-max-frame-size*))
+        (error 'http2-frame-decode "frame payload exceeds maximum size"
+               plen (*http2-max-frame-size*)))
+      ;; Validate bytevector contains full payload
+      (unless (>= (bytevector-length bv) (+ 9 plen))
+        (error 'http2-frame-decode "bytevector too short for payload"
+               (bytevector-length bv) (+ 9 plen)))
+      (let ([payload (let ([p (make-bytevector plen)])
+                       (bytevector-copy! bv 9 p 0 plen)
+                       p)])
+        (make-http2-frame-rec type flags sid payload))))
 
   ;;; ========== Frame constructors ==========
   (define (make-http2-data-frame stream-id payload . flags)

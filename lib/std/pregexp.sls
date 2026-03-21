@@ -10,7 +10,8 @@
           pregexp-split
           pregexp-replace
           pregexp-replace*
-          pregexp-quote)
+          pregexp-quote
+          *pregexp-max-steps*)
 
   (import (chezscheme))
 
@@ -26,6 +27,8 @@
 
   (define *pregexp-tab-char*
     (integer->char (+ 9 *pregexp-nul-char-int*)))
+
+  (define *pregexp-max-steps* (make-parameter 1000000))
 
   (define pregexp-space-sensitive?
     (make-parameter #t))
@@ -430,8 +433,16 @@
     (lambda (re s sn start n i)
       (let ((identity (lambda (x) x))
             (backrefs (pregexp-make-backref-list re))
-            (case-sensitive? #t))
+            (case-sensitive? #t)
+            (steps (box (*pregexp-max-steps*))))
+        (define (tick!)
+          (let ((n (unbox steps)))
+            (when (<= n 0)
+              (error 'pregexp-match "backtracking limit exceeded"
+                     (*pregexp-max-steps*)))
+            (set-box! steps (- n 1))))
         (let sub ((re re) (i i) (sk identity) (fk (lambda () #f)))
+          (tick!)
           (cond ((eqv? re ':bos)
                  (if (= i start) (sk i) (fk)))
                 ((eqv? re ':eos)

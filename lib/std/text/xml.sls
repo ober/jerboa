@@ -4,9 +4,12 @@
 (library (std text xml)
   (export
     write-xml print-sxml->xml
-    sxml-e sxml-attributes sxml-attribute-e sxml-children)
+    sxml-e sxml-attributes sxml-attribute-e sxml-children
+    *sxml-max-depth*)
 
   (import (chezscheme))
+
+  (define *sxml-max-depth* (make-parameter 512))
 
   ;; --- XML escaping ---
 
@@ -94,6 +97,9 @@
       (display #\" port)))
 
   (define (write-sxml-node sxml port indent level)
+    (when (> level (*sxml-max-depth*))
+      (error 'write-sxml-node "maximum SXML nesting depth exceeded"
+             level (*sxml-max-depth*)))
     (cond
       ((string? sxml)
        (write-escaped sxml port #f))

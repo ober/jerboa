@@ -102,26 +102,39 @@
   ;; Returns (name-string . new-offset).
   ;; Handles compression pointers (0xC0 prefix).
   (define (dns-decode-name bv offset)
-    (let loop ([pos offset] [labels '()] [jumped? #f] [end-pos -1])
-      (let ([b (bytevector-u8-ref bv pos)])
-        (cond
-          ;; Null label: end of name
-          [(= b 0)
-           (let ([final-pos (if jumped? end-pos (+ pos 1))])
-             (cons (string-join (reverse labels) ".") final-pos))]
-          ;; Compression pointer: 11xxxxxx
-          [(= (bitwise-and b #xC0) #xC0)
-           (let* ([ptr (bitwise-ior
-                         (bitwise-arithmetic-shift-left (bitwise-and b #x3F) 8)
-                         (bytevector-u8-ref bv (+ pos 1)))]
-                  [new-end (if jumped? end-pos (+ pos 2))])
-             (loop ptr labels #t new-end))]
-          ;; Regular label
-          [else
-           (let* ([label-len b]
-                  [label-str (utf8->string
-                               (subbytevector bv (+ pos 1) (+ pos 1 label-len)))])
-             (loop (+ pos 1 label-len) (cons label-str labels) jumped? end-pos))]))))
+    (let ([bvlen (bytevector-length bv)])
+      (let loop ([pos offset] [labels '()] [jumped? #f] [end-pos -1] [hops 0])
+        ;; Prevent compression pointer loops
+        (when (> hops 32)
+          (error 'dns-decode-name "compression pointer loop detected"))
+        ;; Bounds check
+        (unless (< pos bvlen)
+          (error 'dns-decode-name "offset out of bounds" pos bvlen))
+        (let ([b (bytevector-u8-ref bv pos)])
+          (cond
+            ;; Null label: end of name
+            [(= b 0)
+             (let ([final-pos (if jumped? end-pos (+ pos 1))])
+               (cons (string-join (reverse labels) ".") final-pos))]
+            ;; Compression pointer: 11xxxxxx
+            [(= (bitwise-and b #xC0) #xC0)
+             (unless (< (+ pos 1) bvlen)
+               (error 'dns-decode-name "truncated compression pointer" pos))
+             (let* ([ptr (bitwise-ior
+                           (bitwise-arithmetic-shift-left (bitwise-and b #x3F) 8)
+                           (bytevector-u8-ref bv (+ pos 1)))]
+                    [new-end (if jumped? end-pos (+ pos 2))])
+               (unless (< ptr bvlen)
+                 (error 'dns-decode-name "compression pointer out of bounds" ptr bvlen))
+               (loop ptr labels #t new-end (+ hops 1)))]
+            ;; Regular label
+            [else
+             (let* ([label-len b])
+               (unless (<= (+ pos 1 label-len) bvlen)
+                 (error 'dns-decode-name "label extends beyond bytevector" pos label-len))
+               (let ([label-str (utf8->string
+                                  (subbytevector bv (+ pos 1) (+ pos 1 label-len)))])
+                 (loop (+ pos 1 label-len) (cons label-str labels) jumped? end-pos hops)))])))))
 
   ;; Helper: extract sub-bytevector
   (define (subbytevector bv start end)
@@ -190,6 +203,10 @@
 
   ;;; ========== Response decoding ==========
   (define (dns-decode-response bv)
+    ;; DNS header is 12 bytes minimum
+    (unless (>= (bytevector-length bv) 12)
+      (error 'dns-decode-response "bytevector too short for DNS header"
+             (bytevector-length bv)))
     (let* ([id       (bitwise-ior
                        (bitwise-arithmetic-shift-left (bytevector-u8-ref bv 0) 8)
                        (bytevector-u8-ref bv 1))]

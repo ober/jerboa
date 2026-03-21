@@ -19,7 +19,9 @@
     ;; Masking
     ws-mask-payload ws-unmask-payload
     ;; Handshake
-    ws-handshake-key ws-handshake-accept ws-handshake-valid?)
+    ws-handshake-key ws-handshake-accept ws-handshake-valid?
+    ;; Limits
+    *ws-max-payload-size*)
 
   (import (chezscheme))
 
@@ -139,49 +141,72 @@
       bv))
 
   ;;; ========== Frame decoding ==========
+
+  (define *ws-max-payload-size* (make-parameter (* 16 1024 1024)))  ;; 16MB default
+
   (define (ws-frame-decode bv)
-    (let* ([b0      (bytevector-u8-ref bv 0)]
-           [b1      (bytevector-u8-ref bv 1)]
-           [fin?    (not (zero? (bitwise-and b0 #x80)))]
-           [opcode  (bitwise-and b0 #x0F)]
-           [masked? (not (zero? (bitwise-and b1 #x80)))]
-           [len7    (bitwise-and b1 #x7F)]
-           [pos     2])
-      ;; Determine payload length
-      (let-values ([(plen pos)
-                    (cond
-                      [(< len7 126) (values len7 pos)]
-                      [(= len7 126)
-                       (values
-                         (bitwise-ior
-                           (bitwise-arithmetic-shift-left (bytevector-u8-ref bv pos) 8)
-                           (bytevector-u8-ref bv (+ pos 1)))
-                         (+ pos 2))]
-                      [else
-                       ;; 8-byte extended length
-                       (let ([n (let loop ([i 0] [acc 0])
-                                  (if (= i 8)
-                                    acc
-                                    (loop (+ i 1)
-                                          (bitwise-ior
-                                            (bitwise-arithmetic-shift-left acc 8)
-                                            (bytevector-u8-ref bv (+ pos i))))))])
-                         (values n (+ pos 8)))])])
-        ;; Read masking key (if present)
-        (let* ([mask-key (if masked?
-                           (let ([k (make-bytevector 4)])
-                             (do ([i 0 (+ i 1)])
-                                 ((= i 4) k)
-                               (bytevector-u8-set! k i (bytevector-u8-ref bv (+ pos i)))))
-                           #f)]
-               [data-offset (+ pos (if masked? 4 0))]
-               [raw-payload (let ([p (make-bytevector plen)])
-                              (bytevector-copy! bv data-offset p 0 plen)
-                              p)]
-               [payload (if (and masked? mask-key)
-                          (ws-unmask-payload raw-payload mask-key)
-                          raw-payload)])
-          (make-ws-frame fin? masked? opcode payload mask-key)))))
+    (let ([bvlen (bytevector-length bv)])
+      ;; Minimum frame is 2 bytes
+      (unless (>= bvlen 2)
+        (error 'ws-frame-decode "bytevector too short for frame header" bvlen))
+      (let* ([b0      (bytevector-u8-ref bv 0)]
+             [b1      (bytevector-u8-ref bv 1)]
+             [fin?    (not (zero? (bitwise-and b0 #x80)))]
+             [opcode  (bitwise-and b0 #x0F)]
+             [masked? (not (zero? (bitwise-and b1 #x80)))]
+             [len7    (bitwise-and b1 #x7F)]
+             [pos     2])
+        ;; Determine payload length with bounds checks
+        (let-values ([(plen pos)
+                      (cond
+                        [(< len7 126) (values len7 pos)]
+                        [(= len7 126)
+                         (unless (>= bvlen 4)
+                           (error 'ws-frame-decode "too short for 16-bit length" bvlen))
+                         (values
+                           (bitwise-ior
+                             (bitwise-arithmetic-shift-left (bytevector-u8-ref bv pos) 8)
+                             (bytevector-u8-ref bv (+ pos 1)))
+                           (+ pos 2))]
+                        [else
+                         (unless (>= bvlen 10)
+                           (error 'ws-frame-decode "too short for 64-bit length" bvlen))
+                         ;; 8-byte extended length
+                         (let ([n (let loop ([i 0] [acc 0])
+                                    (if (= i 8)
+                                      acc
+                                      (loop (+ i 1)
+                                            (bitwise-ior
+                                              (bitwise-arithmetic-shift-left acc 8)
+                                              (bytevector-u8-ref bv (+ pos i))))))])
+                           (values n (+ pos 8)))])])
+          ;; Validate payload size against cap
+          (when (> plen (*ws-max-payload-size*))
+            (error 'ws-frame-decode "payload exceeds maximum size"
+                   plen (*ws-max-payload-size*)))
+          ;; Validate masking key fits
+          (let ([data-offset (+ pos (if masked? 4 0))])
+            (when masked?
+              (unless (>= bvlen (+ pos 4))
+                (error 'ws-frame-decode "too short for masking key" bvlen)))
+            ;; Validate payload fits
+            (unless (>= bvlen (+ data-offset plen))
+              (error 'ws-frame-decode "bytevector too short for payload"
+                     bvlen (+ data-offset plen)))
+            ;; Read masking key (if present)
+            (let* ([mask-key (if masked?
+                               (let ([k (make-bytevector 4)])
+                                 (do ([i 0 (+ i 1)])
+                                     ((= i 4) k)
+                                   (bytevector-u8-set! k i (bytevector-u8-ref bv (+ pos i)))))
+                               #f)]
+                   [raw-payload (let ([p (make-bytevector plen)])
+                                  (bytevector-copy! bv data-offset p 0 plen)
+                                  p)]
+                   [payload (if (and masked? mask-key)
+                              (ws-unmask-payload raw-payload mask-key)
+                              raw-payload)])
+              (make-ws-frame fin? masked? opcode payload mask-key)))))))
 
   ;;; ========== Handshake ==========
   ;; The WebSocket handshake uses SHA-1 of (key + GUID) then base64.

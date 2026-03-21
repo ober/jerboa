@@ -35,15 +35,17 @@
       (else (error 'hex-decode "invalid hex character" c))))
 
   (define (hex-string->u8vector str)
-    (let* ((len (string-length str))
-           (out-len (quotient len 2))
-           (result (make-bytevector out-len)))
+    (let* ((len (string-length str)))
+      (unless (even? len)
+        (error 'hex-decode "odd-length hex string" len))
+      (let* ((out-len (quotient len 2))
+             (result (make-bytevector out-len)))
       (do ((i 0 (+ i 2))
            (j 0 (+ j 1)))
           ((>= i len) result)
         (let ((hi (hex-char->int (string-ref str i)))
               (lo (hex-char->int (string-ref str (+ i 1)))))
           (bytevector-u8-set! result j
-            (bitwise-ior (bitwise-arithmetic-shift-left hi 4) lo))))))
+            (bitwise-ior (bitwise-arithmetic-shift-left hi 4) lo)))))))
 
   ) ;; end library
