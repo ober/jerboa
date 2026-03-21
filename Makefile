@@ -7,7 +7,7 @@ CHEZ_EXT_LIBDIRS = $(CHEZ_EXT_DIR)/chez-https/src:$(CHEZ_EXT_DIR)/chez-ssl/src:$
 # Shared object paths for FFI-based chez-* libraries
 CHEZ_EXT_LDPATH = $(CHEZ_EXT_DIR)/chez-ssl:$(CHEZ_EXT_DIR)/chez-zlib:$(CHEZ_EXT_DIR)/chez-pcre2:$(CHEZ_EXT_DIR)/chez-leveldb:$(CHEZ_EXT_DIR)/chez-epoll:$(CHEZ_EXT_DIR)/chez-inotify:$(CHEZ_EXT_DIR)/chez-crypto:$(CHEZ_EXT_DIR)/chez-sqlite:$(CHEZ_EXT_DIR)/chez-postgresql
 
-.PHONY: test test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded test-features test-wrappers test-phase4a test-phase4b test-phase4c test-phase4d test-phase4e test-phase4f test-phase5 test-phase5e test-phase6 test-phase7 test-phase8 test-functional test-repl test-security test-native native clean-native audit-native clean
+.PHONY: test test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded test-features test-wrappers test-phase4a test-phase4b test-phase4c test-phase4d test-phase4e test-phase4f test-phase5 test-phase5e test-phase6 test-phase7 test-phase8 test-functional test-repl test-security test-native native clean-native audit-native clean fuzz fuzz-smoke fuzz-deep fuzz-reader-fuzz fuzz-json-fuzz fuzz-http2-fuzz fuzz-websocket-fuzz fuzz-dns-fuzz fuzz-pregexp-fuzz fuzz-csv-fuzz fuzz-base64-fuzz fuzz-hex-fuzz fuzz-uri-fuzz fuzz-format-fuzz fuzz-router-fuzz fuzz-sandbox-fuzz
 
 test: test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded
 
@@ -285,6 +285,63 @@ audit-native:
 	cd $(RUST_NATIVE_DIR) && cargo audit
 
 test-all: test test-features test-wrappers test-security test-native
+
+## ========== Fuzzing ==========
+
+FUZZ_DIR = tests/fuzz/harness
+FUZZ_ITERATIONS ?= 10000
+
+# Run all fuzz harnesses (default iterations)
+fuzz:
+	FUZZ_ITERATIONS=$(FUZZ_ITERATIONS) $(SCHEME) --libdirs $(LIBDIRS) --script $(FUZZ_DIR)/fuzz-all.ss
+
+# Quick smoke test for CI (~30s)
+fuzz-smoke:
+	FUZZ_ITERATIONS=500 $(SCHEME) --libdirs $(LIBDIRS) --script $(FUZZ_DIR)/fuzz-all.ss
+
+# Long-running deep fuzz (nightly/dedicated)
+fuzz-deep:
+	FUZZ_ITERATIONS=1000000 FUZZ_MAX_SIZE=65536 $(SCHEME) --libdirs $(LIBDIRS) --script $(FUZZ_DIR)/fuzz-all.ss
+
+# Individual fuzz targets
+fuzz-reader-fuzz:
+	FUZZ_ITERATIONS=$(FUZZ_ITERATIONS) $(SCHEME) --libdirs $(LIBDIRS) --script $(FUZZ_DIR)/fuzz-reader.ss
+
+fuzz-json-fuzz:
+	FUZZ_ITERATIONS=$(FUZZ_ITERATIONS) $(SCHEME) --libdirs $(LIBDIRS) --script $(FUZZ_DIR)/fuzz-json.ss
+
+fuzz-http2-fuzz:
+	FUZZ_ITERATIONS=$(FUZZ_ITERATIONS) $(SCHEME) --libdirs $(LIBDIRS) --script $(FUZZ_DIR)/fuzz-http2.ss
+
+fuzz-websocket-fuzz:
+	FUZZ_ITERATIONS=$(FUZZ_ITERATIONS) $(SCHEME) --libdirs $(LIBDIRS) --script $(FUZZ_DIR)/fuzz-websocket.ss
+
+fuzz-dns-fuzz:
+	FUZZ_ITERATIONS=$(FUZZ_ITERATIONS) $(SCHEME) --libdirs $(LIBDIRS) --script $(FUZZ_DIR)/fuzz-dns.ss
+
+fuzz-pregexp-fuzz:
+	FUZZ_ITERATIONS=$(FUZZ_ITERATIONS) $(SCHEME) --libdirs $(LIBDIRS) --script $(FUZZ_DIR)/fuzz-pregexp.ss
+
+fuzz-csv-fuzz:
+	FUZZ_ITERATIONS=$(FUZZ_ITERATIONS) $(SCHEME) --libdirs $(LIBDIRS) --script $(FUZZ_DIR)/fuzz-csv.ss
+
+fuzz-base64-fuzz:
+	FUZZ_ITERATIONS=$(FUZZ_ITERATIONS) $(SCHEME) --libdirs $(LIBDIRS) --script $(FUZZ_DIR)/fuzz-base64.ss
+
+fuzz-hex-fuzz:
+	FUZZ_ITERATIONS=$(FUZZ_ITERATIONS) $(SCHEME) --libdirs $(LIBDIRS) --script $(FUZZ_DIR)/fuzz-hex.ss
+
+fuzz-uri-fuzz:
+	FUZZ_ITERATIONS=$(FUZZ_ITERATIONS) $(SCHEME) --libdirs $(LIBDIRS) --script $(FUZZ_DIR)/fuzz-uri.ss
+
+fuzz-format-fuzz:
+	FUZZ_ITERATIONS=$(FUZZ_ITERATIONS) $(SCHEME) --libdirs $(LIBDIRS) --script $(FUZZ_DIR)/fuzz-format.ss
+
+fuzz-router-fuzz:
+	FUZZ_ITERATIONS=$(FUZZ_ITERATIONS) $(SCHEME) --libdirs $(LIBDIRS) --script $(FUZZ_DIR)/fuzz-router.ss
+
+fuzz-sandbox-fuzz:
+	FUZZ_ITERATIONS=$(FUZZ_ITERATIONS) $(SCHEME) --libdirs $(LIBDIRS) --script $(FUZZ_DIR)/fuzz-sandbox.ss
 
 clean:
 	find lib -name "*.so" -delete 2>/dev/null || true

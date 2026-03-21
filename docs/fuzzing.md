@@ -63,6 +63,27 @@ Fuzzing is uniquely effective at finding bugs that humans and code review miss �
 
 ---
 
+## Existing Hardening
+
+Before fuzzing, it's important to know what defenses already exist. These limits are parameterized and can be tested by fuzzing with both default and extreme values.
+
+| Module | Defense | Parameter | Default |
+|--------|---------|-----------|---------|
+| `jerboa/reader` | Read depth limit | `*max-read-depth*` | 1000 |
+| `jerboa/reader` | Block comment nesting limit | `*max-block-comment-depth*` | 1000 |
+| `std/text/json` | JSON nesting depth limit | `*json-max-depth*` | 512 |
+| `std/text/json` | Max string length | `*json-max-string-length*` | 10MB |
+| `std/net/http2` | Max frame payload size | `*http2-max-frame-size*` | 1MB |
+| `std/net/websocket` | Max payload size | `*ws-max-payload-size*` | 16MB |
+| `std/net/dns` | Compression pointer hop limit | hardcoded | 32 hops |
+| `std/text/csv` | Max field length | `*csv-max-field-length*` | 1MB |
+| `std/security/restrict` | Allowlist-only bindings | `safe-bindings` | ~113 bindings |
+| `std/format` | Safe format variants | `safe-printf` / `safe-fprintf` | N/A |
+
+Fuzzing should test both the happy path (limits hold) and the bypass path (can the limit be circumvented?).
+
+---
+
 ## Fuzzing Architecture for Chez Scheme
 
 Chez Scheme is garbage-collected and memory-safe in pure Scheme code, so traditional C fuzzing tools (AFL, libFuzzer) don't directly apply. We need a hybrid approach.
@@ -71,18 +92,30 @@ Chez Scheme is garbage-collected and memory-safe in pure Scheme code, so traditi
 
 Write Scheme harnesses that generate random inputs and feed them to parsing functions. This catches the majority of bugs: unhandled exceptions, infinite loops, memory bombs, and logic errors.
 
+**Important**: Chez Scheme does not have a built-in `with-time-limit`. We implement timeout detection using `(engine)` — Chez's preemptive evaluation mechanism that counts "ticks" (reductions). This catches infinite loops and excessive computation but measures work done, not wall-clock time.
+
 ```scheme
 ;; Generic fuzzing harness pattern
+;; Uses Chez Scheme's engine mechanism for timeout detection
 (import (jerboa prelude)
         (std test))
+
+(define (fuzz-with-timeout thunk fuel)
+  ;; Returns: 'ok, 'timeout, or 'exception
+  ;; fuel = approximate number of reductions before timeout
+  (let ([eng (make-engine thunk)])
+    (eng fuel
+      (lambda (remaining result) 'ok)        ;; completed
+      (lambda (new-engine) 'timeout))))       ;; ran out of fuel
 
 (define (fuzz-target parse-fn input-generator iterations)
   (let loop ([i 0])
     (when (< i iterations)
       (let ([input (input-generator)])
         (guard (exn [#t (void)])  ;; any exception is OK — crashes are not
-          (with-time-limit 5     ;; seconds — catches infinite loops
-            (parse-fn input)))
+          (fuzz-with-timeout
+            (lambda () (parse-fn input))
+            1000000))  ;; ~1M reductions ≈ a few seconds
         (loop (+ i 1))))))
 ```
 
@@ -148,6 +181,9 @@ Targets ordered by priority — a product of attack surface exposure and bug lik
 | **P2** | `std/format` | `format` | User-controlled format strings | Format injection, arity mismatch |
 | **P2** | `std/net/router` | `router-match`, `parse-pattern` | HTTP request paths | Path traversal, segment explosion |
 | **P2** | `std/schema` | `validate` | Untrusted input shapes | Recursion bomb, type confusion |
+| **P2** | `std/net/uri` | `uri-parse`, `uri-decode` | HTTP requests, redirects | Malformed URLs, injection, encoding |
+| **P2** | `std/text/ini` | INI parsing | Config files | Nesting, unterminated values |
+| **P2** | `std/text/json-schema` | `validate` | Untrusted input shapes | Recursion bomb, type confusion |
 | **P2** | `std/config` | `load-config`, `ht-path-get` | Config files | Nesting bomb, env injection |
 | **P3** | `std/text/utf8` | `utf8-decode` | Any text processing | Invalid sequences, bounds |
 | **P3** | `std/crypto/digest` | `md5`, `sha256` | Any data | Shell injection (V1 — pre-fix) |
@@ -277,7 +313,28 @@ Targets ordered by priority — a product of attack surface exposure and bug lik
 | `[^]` | Empty negated class | Behavior |
 | `\p{Lu}` | Unicode property (if supported) | Feature support |
 
-### T7. Sandbox — `std/security/restrict.sls`
+### T7. URI Parser — `std/net/uri.sls`
+
+**Why it's P2**: The URI parser processes every HTTP request URL and redirect target. Malformed URIs can cause incorrect routing or injection.
+
+**Specific fuzz vectors**:
+
+| Vector | What It Tests | Expected Bug |
+|--------|--------------|-------------|
+| `://` (no scheme) | Minimal URI | Graceful error |
+| `http://user:pass@host:99999/path?q=v#f` | Full URI | Correct parsing |
+| `http://[::1]:8080/` | IPv6 host | Bracket handling |
+| `http://host/../../etc/passwd` | Path traversal | Normalization |
+| `http://host/path?a=1&a=2&a=3...x10000` | Query explosion | Memory |
+| `%ZZ` in path/query | Invalid percent-encoding | Error vs silent |
+| `%00` null byte | Embedded NUL | Truncation bug |
+| `http://host\@evil.com/` | Backslash in authority | Parser confusion |
+| Empty string | Zero-length input | Graceful error |
+| 1MB URL | Large input | Memory/hang |
+
+**Oracle**: Roundtrip — `uri->string(uri-parse(input))` should be semantically equivalent for valid URIs.
+
+### T8. Sandbox — `std/security/restrict.sls`
 
 **Specific fuzz vectors**:
 
@@ -334,16 +391,21 @@ Every fuzzer is only as good as its starting corpus. For each target:
 
 ### Standard Harness Template
 
-Each fuzz target gets a harness file in `tests/fuzz/fuzz-<target>.ss`:
+Each fuzz target gets a harness file in `tests/fuzz/harness/fuzz-<target>.ss`:
 
 ```scheme
 (import (jerboa prelude)
         (std test))
 
 ;; Configuration
-(define *iterations* (or (getenv-number "FUZZ_ITERATIONS") 100000))
-(define *max-input-size* (or (getenv-number "FUZZ_MAX_SIZE") 65536))
-(define *timeout-seconds* 5)
+;; Note: Chez has no getenv-number — parse manually
+(define (getenv-int name default)
+  (let ([v (getenv name)])
+    (if v (or (string->number v) default) default)))
+
+(define *iterations* (getenv-int "FUZZ_ITERATIONS" 100000))
+(define *max-input-size* (getenv-int "FUZZ_MAX_SIZE" 65536))
+(define *timeout-fuel* 1000000)  ;; engine ticks, not seconds
 
 ;; Input generation
 (define (random-bytes n)
@@ -366,11 +428,19 @@ Each fuzz target gets a harness file in `tests/fuzz/fuzz-<target>.ss`:
     (guard (e [#t s])  ;; if invalid UTF-8, return original
       (utf8->string bv))))
 
+;; Timeout via Chez engine (measures reductions, not wall-clock)
+(define (fuzz-with-timeout thunk fuel)
+  (let ([eng (make-engine thunk)])
+    (eng fuel
+      (lambda (remaining result) result)
+      (lambda (new-engine) 'timeout))))
+
 ;; Harness
 (define (fuzz-once parse-fn input)
   (guard (exn [#t (void)])  ;; any Scheme exception is acceptable
-    (with-time-limit *timeout-seconds*
-      (parse-fn input))))
+    (fuzz-with-timeout
+      (lambda () (parse-fn input))
+      *timeout-fuel*)))
 
 (define (run-fuzz name parse-fn gen-fn)
   (display (format "Fuzzing ~a for ~a iterations...\n" name *iterations*))
@@ -590,6 +660,20 @@ Every crash found by fuzzing becomes a test case in `tests/test-fuzz-regressions
 | C-level fuzzing | AFL++ harnesses for chez-yaml, chez-sqlite, libcrypto |
 | Differential fuzzing | Reader vs Gerbil, JSON vs jq, base64 vs coreutils |
 | Property-based testing | QuickCheck-style shrinking for minimized reproducers |
+
+---
+
+## Appendix: Known Issues to Verify
+
+These are bugs identified by code review that fuzzing should confirm:
+
+| Module | Issue | Severity |
+|--------|-------|----------|
+| `std/text/json` | `\uD800` (lone surrogate) calls `integer->char` which crashes on surrogates in Chez | High |
+| `std/text/json` | `\uD800\uDC00` surrogate pair not handled — each half parsed independently | Medium |
+| `std/net/http2` | HPACK `hpack-decode-string` doesn't bounds-check `len` against bytevector length | High |
+| `std/net/dns` | No bounds check before reading answer RR fields (type, class, ttl, rdlength) at `pos+0..pos+9` | High |
+| `std/text/base64` | Padding logic with `saw-non-pad?` flag set but never checked | Low |
 
 ---
 
