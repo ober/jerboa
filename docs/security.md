@@ -432,13 +432,18 @@ The handshake implementation returns a hardcoded test vector instead of computin
 
 **Fix**: Add structured logging with mandatory field classification (public/internal/secret). Secret-classified fields are redacted in non-debug output.
 
-### V10. Unbounded Actor Mailboxes — MEDIUM
+### V10. Unbounded Actor Mailboxes — ~~MEDIUM~~ FIXED
 
-**File**: `lib/std/actor/core.sls`
+**File**: `lib/std/actor/bounded.sls`
 
-Mailboxes have no size limit. A malicious or buggy sender can exhaust memory by flooding an actor with messages.
+**Status**: FIXED on `hardened` branch.
 
-**Fix**: Add configurable mailbox capacity with backpressure (sender blocks or message dropped with audit log entry).
+**What was fixed**:
+- New `(std actor bounded)` module with configurable mailbox capacity
+- Three backpressure strategies: `'block` (sender blocks), `'drop` (silent drop), `'error` (raises `&mailbox-full`)
+- `spawn-bounded-actor` / `spawn-bounded-actor/linked` with `make-mailbox-config`
+- `bounded-send` enforces limits; regular `send` bypasses for backward compatibility
+- `mailbox-size` and `mailbox-full?` for monitoring
 
 ---
 
@@ -446,9 +451,17 @@ Mailboxes have no size limit. A malicious or buggy sender can exhaust memory by 
 
 These features leverage Chez Scheme's macro system and Jerboa's existing type infrastructure to provide safety guarantees that most languages cannot express.
 
-### L1. Taint Tracking
+### L1. Taint Tracking — IMPLEMENTED
 
-A compile-time/runtime system that marks data from untrusted sources and prevents it from reaching dangerous sinks without explicit sanitization.
+A compile-time/runtime system that marks data from untrusted sources and prevents it from reaching dangerous sinks without explicit sanitization. Implemented on `hardened` branch in `(std security taint)`.
+
+**What was implemented**:
+- `taint` / `taint-http` / `taint-env` / `taint-file` / `taint-net` / `taint-deser` for marking data
+- `check-untainted!` and `assert-untainted` for sink protection
+- `untaint` for explicit sanitization
+- Taint-propagating string operations: `tainted-string-append`, `tainted-substring`
+- `&taint-violation` condition type with class and sink
+- Opaque sealed records — unforgeable
 
 ```scheme
 ;; Mark data as tainted
@@ -472,9 +485,17 @@ A compile-time/runtime system that marks data from untrusted sources and prevent
 | Network data | `'net-input` | `sanitize-protocol` |
 | Deserialized data | `'deser-input` | `validate-schema` |
 
-### L2. Information Flow Control
+### L2. Information Flow Control — IMPLEMENTED
 
-Extend the type system with security labels that prevent secret data from flowing to public outputs.
+Extend the type system with security labels that prevent secret data from flowing to public outputs. Implemented on `hardened` branch in `(std security flow)`.
+
+**What was implemented**:
+- Four security levels: `level-public`, `level-internal`, `level-secret`, `level-top-secret`
+- `classify` / `classified?` / `classified-level` / `classified-value` for wrapping values
+- `check-flow!` / `assert-flow` prevent downward data flow (secret → public)
+- `declassify` with mandatory audit reason and configurable `current-declassify-handler`
+- `&flow-violation` condition type
+- Custom security levels via `make-security-level`
 
 ```scheme
 ;; Declare security levels
@@ -497,9 +518,15 @@ Extend the type system with security labels that prevent secret data from flowin
 
 **Implementation**: Security labels form a lattice. Data can flow up (public -> secret) but not down (secret -> public) without explicit `declassify` which logs an audit entry. Leverages Jerboa's effect system to track information flow through effect handlers.
 
-### L3. Capability-Typed Functions
+### L3. Capability-Typed Functions — IMPLEMENTED
 
-Combine the capability system with the type system so functions declare their required capabilities in their type signature.
+Combine the capability system with the type system so functions declare their required capabilities in their type signature. Implemented on `hardened` branch in `(std security capability-typed)`.
+
+**What was implemented**:
+- `define/cap` macro: `(define/cap (name args) (requires: cap-type ...) body)`
+- `lambda/cap` macro for anonymous functions with capability requirements
+- `capability-requirements` registry for introspection
+- Functions raise `&capability-violation` when called outside matching capability context
 
 ```scheme
 ;; This function requires filesystem read capability
@@ -540,9 +567,17 @@ Extend `with-fixnum-ops` to provide overflow-checked arithmetic that raises an e
 
 **Security value**: Buffer size calculations, array index computation, and protocol length fields must not silently overflow.
 
-### L5. Lifetime-Scoped Secrets
+### L5. Lifetime-Scoped Secrets — IMPLEMENTED
 
-Combine affine types with automatic memory wiping for cryptographic material.
+Combine affine types with automatic memory wiping for cryptographic material. Implemented on `hardened` branch in `(std security secret)`.
+
+**What was implemented**:
+- `make-secret` wraps bytevectors as affine-typed secrets
+- `secret-use` consumes and wipes original bytevector
+- `secret-peek` for read-only access without consumption
+- `with-secret` macro auto-wipes on scope exit (even on exception) via `dynamic-wind`
+- `wipe-bytevector!` utility for explicit zeroing
+- Double-use raises error ("use-after-wipe")
 
 ```scheme
 ;; Secret is wiped from memory when scope exits
@@ -576,9 +611,17 @@ Extend `define/contract` so that proven invariants can be propagated to callers,
   (safe-substring str 0 n))  ;; preconditions are discharged by post-conditions
 ```
 
-### L7. Effect-Based I/O Interception
+### L7. Effect-Based I/O Interception — IMPLEMENTED
 
-Use the existing effect system to create auditable I/O layers where every filesystem, network, and process operation can be intercepted, logged, and policy-checked.
+Use the existing effect system to create auditable I/O layers where every filesystem, network, and process operation can be intercepted, logged, and policy-checked. Implemented on `hardened` branch in `(std security io-intercept)`.
+
+**What was implemented**:
+- Three effect types: `FileIO` (read/write/delete), `NetIO` (connect/listen), `ProcessIO` (exec)
+- Intercepted I/O: `io/read-file`, `io/write-file`, `io/delete-file`, `io/net-connect`, etc.
+- `make-deny-all-io-handler` — blocks all I/O (sandbox mode)
+- `make-allow-io-handler` — delegates to real I/O (production mode)
+- `make-audit-io-handler` — logs then delegates (audit mode)
+- `with-io-policy` macro for scoped handler installation
 
 ```scheme
 (with-handler ([file-read (lambda (path resume)
@@ -1264,12 +1307,12 @@ Extend the capability system to work across nodes.
 
 | Item | Effort | What Changes |
 |------|--------|-------------|
-| L1: Taint tracking | 5 days | New `(std security taint)` |
-| L2: Information flow | 5 days | New `(std security flow)` |
-| L3: Capability-typed functions | 3 days | Extend `(std security capability)` |
-| L5: Lifetime-scoped secrets | 2 days | Integrate affine types with crypto |
-| L7: Effect-based I/O interception | 3 days | Integrate effects with capabilities |
-| V10: Bounded actor mailboxes | 2 days | Extend `(std actor core)` |
+| ~~L1: Taint tracking~~ | ~~5 days~~ | ~~New `(std security taint)`~~ **DONE** |
+| ~~L2: Information flow~~ | ~~5 days~~ | ~~New `(std security flow)`~~ **DONE** |
+| ~~L3: Capability-typed functions~~ | ~~3 days~~ | ~~`(std security capability-typed)`~~ **DONE** |
+| ~~L5: Lifetime-scoped secrets~~ | ~~2 days~~ | ~~New `(std security secret)`~~ **DONE** |
+| ~~L7: Effect-based I/O interception~~ | ~~3 days~~ | ~~New `(std security io-intercept)`~~ **DONE** |
+| ~~V10: Bounded actor mailboxes~~ | ~~2 days~~ | ~~New `(std actor bounded)`~~ **DONE** |
 
 ### Phase 5: OS-Level Enforcement (P3)
 
