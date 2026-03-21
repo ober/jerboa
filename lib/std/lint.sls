@@ -397,6 +397,69 @@
       (for-each walk forms)
       (reverse results)))
 
+  ;;; ---- duplicate-import rule ----
+  ;;
+  ;; Warns when the same module is imported more than once.
+
+  (define (%rule-duplicate-import forms)
+    (let ([results '()])
+      (for-each
+        (lambda (f)
+          (when (and (pair? f) (eq? (car f) 'import))
+            (let ([mods (map extract-module-name (cdr f))])
+              (let check ([remaining mods] [seen '()])
+                (unless (null? remaining)
+                  (let ([mod (car remaining)])
+                    (when (and mod (member mod seen))
+                      (set! results
+                        (cons (make-result severity-warn
+                                (format "duplicate import: ~s" mod)
+                                'duplicate-import)
+                              results)))
+                    (check (cdr remaining)
+                           (if mod (cons mod seen) seen))))))))
+        forms)
+      (reverse results)))
+
+  ;;; ---- unused-only-import rule ----
+  ;;
+  ;; Warns when (only (module) sym1 sym2 ...) imports symbols that never
+  ;; appear in the rest of the code. This is a precise check because
+  ;; `only` explicitly lists which symbols are imported.
+
+  (define (%rule-unused-only-import forms)
+    ;; Collect all symbols referenced in non-import forms
+    (let ([body-forms (filter (lambda (f)
+                                (not (and (pair? f)
+                                          (memq (car f) '(import library)))))
+                              forms)]
+          [results '()])
+      (let ([all-refs (append-map all-symbols body-forms)])
+        (for-each
+          (lambda (f)
+            (when (and (pair? f) (eq? (car f) 'import))
+              (for-each
+                (lambda (spec)
+                  (when (and (pair? spec)
+                             (eq? (car spec) 'only)
+                             (>= (length spec) 3))
+                    ;; (only (module) sym1 sym2 ...)
+                    (let ([syms (cddr spec)])
+                      (for-each
+                        (lambda (sym)
+                          (when (and (symbol? sym)
+                                     (not (memq sym all-refs)))
+                            (set! results
+                              (cons (make-result severity-info
+                                      (format "imported symbol '~a' from ~s is never used"
+                                              sym (cadr spec))
+                                      'unused-only-import)
+                                    results))))
+                        syms))))
+                (cdr f))))
+          forms))
+      (reverse results)))
+
   (define %builtin-rules
     (list
       (cons 'empty-begin       %rule-empty-begin)
@@ -410,7 +473,9 @@
       (cons 'unused-define     %rule-unused-define)
       (cons 'unsafe-import     %rule-unsafe-import)
       (cons 'bare-error        %rule-bare-error)
-      (cons 'sql-interpolation %rule-sql-interpolation)))
+      (cons 'sql-interpolation %rule-sql-interpolation)
+      (cons 'duplicate-import  %rule-duplicate-import)
+      (cons 'unused-only-import %rule-unused-only-import)))
 
   ;;; ---- default-linter ----
 

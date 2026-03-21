@@ -155,7 +155,49 @@
   #t)
 
 ;; =========================================================================
-;; 5. SQL safety runtime checks
+;; 5. Lint: duplicate-import rule
+;; =========================================================================
+
+(printf "~%-- Lint: duplicate-import rule --~%")
+
+(test "duplicate-import: same module twice flagged"
+  (let* ([linter (make-linter)]
+         [results (lint-string linter "(import (std sort) (std sort))")]
+         [rules (map lint-result-rule results)])
+    (if (memq 'duplicate-import rules) #t #f))
+  #t)
+
+(test "duplicate-import: different modules not flagged"
+  (let* ([linter (make-linter)]
+         [results (lint-string linter "(import (std sort) (std format))")]
+         [rules (map lint-result-rule results)])
+    (if (memq 'duplicate-import rules) #f #t))
+  #t)
+
+;; =========================================================================
+;; 6. Lint: unused-only-import rule
+;; =========================================================================
+
+(printf "~%-- Lint: unused-only-import rule --~%")
+
+(test "unused-only-import: unused symbol flagged"
+  (let* ([linter (make-linter)]
+         [results (lint-string linter
+                    "(import (only (std sort) sort merge)) (sort '(3 1 2))")]
+         [rules (map lint-result-rule results)])
+    (if (memq 'unused-only-import rules) #t #f))
+  #t)
+
+(test "unused-only-import: all symbols used not flagged"
+  (let* ([linter (make-linter)]
+         [results (lint-string linter
+                    "(import (only (std sort) sort)) (sort '(3 1 2))")]
+         [rules (map lint-result-rule results)])
+    (if (memq 'unused-only-import rules) #f #t))
+  #t)
+
+;; =========================================================================
+;; 7. SQL safety runtime checks
 ;; =========================================================================
 
 (printf "~%-- SQL safety runtime checks --~%")

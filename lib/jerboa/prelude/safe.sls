@@ -131,7 +131,12 @@
     *fasl-allow-procedures* *fasl-max-object-count* *fasl-max-byte-size*
 
     ;; Safe mode control
-    *safe-mode*)
+    *safe-mode*
+
+    ;; Structured concurrency (safe alternative to fork-thread)
+    with-task-scope scope-spawn scope-spawn-named
+    task-await task-cancel task-result task? task-name task-done?
+    parallel race)
 
   (import
     (except (chezscheme)
@@ -161,7 +166,9 @@
     (std resource)
     (std error conditions)
     (std safe-timeout)
-    (std safe-fasl))
+    (std safe-fasl)
+    ;; Structured concurrency — safe alternative to raw fork-thread
+    (std concur structured))
 
   ;; =========================================================================
   ;; Re-export safe APIs under standard names
