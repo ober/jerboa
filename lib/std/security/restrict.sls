@@ -1,8 +1,10 @@
 #!chezscheme
 ;;; (std security restrict) — Restricted evaluation environments
 ;;;
-;;; Track 29 (continued): Evaluate code in sandboxed environments with
-;;; limited bindings. No access to FFI, file I/O, or system calls.
+;;; HARDENED: Allowlist-only approach. Creates an environment via
+;;; (environment '(only (chezscheme) ...)) containing ONLY approved
+;;; bindings. No blocklist — nothing exists unless we put it there.
+;;; Even future Chez Scheme additions cannot leak into the sandbox.
 
 (library (std security restrict)
   (export
@@ -14,13 +16,17 @@
   (import (chezscheme))
 
   ;; ========== Safe Binding Set ==========
-  ;; These are the only bindings available in restricted environments.
-  ;; No FFI, no file I/O, no system, no eval, no load.
+  ;; These are the ONLY bindings available in restricted environments.
+  ;; Allowlist approach: nothing else exists.
 
   (define safe-bindings
-    '(;; Core forms (always available as syntax)
-      ;; lambda, if, begin, define, set!, quote, let, let*, letrec, cond, case,
-      ;; and, or, when, unless, do
+    '(;; Core syntax forms
+      lambda if begin define set! quote
+      let let* letrec letrec*
+      cond case and or when unless do
+      define-syntax syntax-rules
+      quasiquote unquote unquote-splicing
+      let-values
 
       ;; Arithmetic
       + - * / = < > <= >= zero? positive? negative?
@@ -30,6 +36,8 @@
       number? integer? rational? real? complex?
       exact? inexact? exact->inexact inexact->exact
       number->string string->number
+      bitwise-and bitwise-ior bitwise-xor bitwise-not
+      bitwise-arithmetic-shift-left bitwise-arithmetic-shift-right
 
       ;; Comparison
       eq? eqv? equal? not
@@ -73,9 +81,8 @@
       ;; Symbols
       symbol? symbol->string string->symbol gensym
 
-      ;; Control
+      ;; Control (no call/cc — can escape dynamic scope)
       apply call-with-values values
-      call-with-current-continuation call/cc
       dynamic-wind
 
       ;; Hashtables (safe operations only)
@@ -92,143 +99,28 @@
       read write display newline
       port? input-port? output-port?
       eof-object? eof-object
+      read-char peek-char write-char
 
       ;; Errors
       error assert assertion-violation
       condition? message-condition? condition-message
-      guard
+      guard with-exception-handler raise
 
       ;; Misc
-      void gensym
+      void
       sort
       format
       ))
 
-  ;; ========== Dangerous Bindings to Remove ==========
-  ;; Explicitly block these — they provide FFI, file I/O, code loading,
-  ;; process execution, and other capabilities that break sandboxing.
-
-  (define dangerous-bindings
-    '(;; Code loading and evaluation
-      load load-shared-object load-program load-library
-      eval eval-when compile compile-file compile-port
-      compile-library compile-program compile-whole-program
-      compile-to-port expand include
-      library-directories library-extensions
-      source-directories
-
-      ;; FFI — must be blocked to prevent arbitrary C calls
-      foreign-procedure foreign-callable foreign-sizeof
-      foreign-alloc foreign-free foreign-ref foreign-set!
-      foreign-entry? foreign-entry
-      ftype-sizeof ftype-ref ftype-set! ftype-pointer-address
-      ftype-pointer-null? ftype-pointer-ftype make-ftype-pointer
-      define-ftype lock-object unlock-object
-      load-shared-object
-
-      ;; Process execution
-      system process
-
-      ;; File I/O
-      open-file-input-port open-file-output-port
-      open-file-input/output-port
-      open-input-file open-output-file
-      call-with-input-file call-with-output-file
-      with-input-from-file with-output-to-file
-      file-exists? delete-file rename-file
-      directory-list make-directory delete-directory
-      file-regular? file-directory? file-symbolic-link?
-      get-mode chmod
-
-      ;; Environment manipulation
-      putenv getenv
-      scheme-environment interaction-environment
-      copy-environment environment environment-symbols
-      define-top-level-value set-top-level-value!
-      top-level-value top-level-bound?
-
-      ;; Module system manipulation
-      import import-only
-
-      ;; Ports to filesystem
-      current-directory
-      standard-input-port standard-output-port standard-error-port
-      console-input-port console-output-port console-error-port
-      transcript-on transcript-off
-
-      ;; Low-level and unsafe
-      #%$top-level-value inspect inspect/object
-      sc-expand syntax->datum datum->syntax
-      pretty-print trace-define trace-lambda
-      with-profile-tracker profile-dump-html
-
-      ;; Exit
-      exit scheme-start
-
-      ;; Thread creation (could be used to escape)
-      fork-thread make-thread thread-start!))
-
   ;; ========== Restricted Environment ==========
 
   (define (make-restricted-environment . extra-bindings)
-    ;; Create an environment with ONLY safe bindings.
-    ;; Strategy: copy the scheme-environment (to get syntax/macros),
-    ;; then rebind all dangerous symbols to error-raising procedures.
-    (let ([restricted (copy-environment (scheme-environment) #t)]
-          [safe-set (make-eq-hashtable)])
-      ;; Build lookup table of safe bindings
-      (for-each (lambda (name) (hashtable-set! safe-set name #t)) safe-bindings)
-      ;; Remove explicitly dangerous bindings
-      (for-each
-        (lambda (name)
-          (guard (e [#t (void)])
-            (when (top-level-bound? name restricted)
-              (define-top-level-value name
-                (lambda args
-                  (error 'restricted-eval
-                    (format "~a is not available in restricted environment" name)))
-                restricted))))
-        dangerous-bindings)
-      ;; Also scan all symbols and block anything not in safe-bindings
-      ;; that looks like a procedure (conservative: block unknown procedures)
-      (guard (e [#t (void)])
-        (for-each
-          (lambda (sym)
-            (unless (hashtable-ref safe-set sym #f)
-              (guard (e2 [#t (void)])
-                (when (and (top-level-bound? sym restricted)
-                           (procedure? (top-level-value sym restricted)))
-                  (define-top-level-value sym
-                    (lambda args
-                      (error 'restricted-eval
-                        (format "~a is not available in restricted environment" sym)))
-                    restricted)))))
-          (environment-symbols restricted)))
-      ;; Block syntax keywords that can't be caught by procedure scanning
-      ;; (foreign-procedure, etc. are special forms, not procedures)
-      (for-each
-        (lambda (name)
-          (guard (e [#t (void)])
-            (define-top-level-value name
-              (lambda args
-                (error 'restricted-eval
-                  (format "~a is not available in restricted environment" name)))
-              restricted)))
-        '(foreign-procedure foreign-callable foreign-entry
-          foreign-entry? ftype-sizeof ftype-ref ftype-set!
-          define-ftype make-ftype-pointer
-          load-shared-object
-          import import-only library
-          meta-cond eval-when))
-      ;; Re-add safe bindings (in case we accidentally blocked any)
-      (for-each
-        (lambda (name)
-          (guard (e [#t (void)])
-            (when (top-level-bound? name (scheme-environment))
-              (define-top-level-value name
-                (top-level-value name (scheme-environment))
-                restricted))))
-        safe-bindings)
+    ;; ALLOWLIST approach: use (environment '(only (chezscheme) ...))
+    ;; to create an environment with ONLY the safe bindings.
+    ;; Then copy to make mutable for extra bindings.
+    (let* ([import-spec `(only (chezscheme) ,@safe-bindings)]
+           [base (environment import-spec)]
+           [restricted (copy-environment base #t)])
       ;; Add any extra bindings
       (when (pair? extra-bindings)
         (for-each
