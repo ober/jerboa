@@ -136,7 +136,15 @@
     ;; Structured concurrency (safe alternative to fork-thread)
     with-task-scope scope-spawn scope-spawn-named
     task-await task-cancel task-result task? task-name task-done?
-    parallel race)
+    parallel race
+
+    ;; Sandbox — one-call entry point for all protections
+    run-safe run-safe-eval
+    make-sandbox-config sandbox-config?
+    sandbox-config-timeout sandbox-config-seccomp
+    sandbox-config-landlock sandbox-config-capabilities
+    *sandbox-timeout* *sandbox-seccomp* *sandbox-landlock*
+    &sandbox-error sandbox-error? sandbox-error-phase sandbox-error-detail)
 
   (import
     (except (chezscheme)
@@ -168,7 +176,15 @@
     (std safe-timeout)
     (std safe-fasl)
     ;; Structured concurrency — safe alternative to raw fork-thread
-    (std concur structured))
+    (std concur structured)
+    ;; Sandbox — one-call sandbox entry point
+    (only (std security sandbox)
+          run-safe run-safe-eval
+          make-sandbox-config sandbox-config?
+          sandbox-config-timeout sandbox-config-seccomp
+          sandbox-config-landlock sandbox-config-capabilities
+          *sandbox-timeout* *sandbox-seccomp* *sandbox-landlock*
+          &sandbox-error sandbox-error? sandbox-error-phase sandbox-error-detail))
 
   ;; =========================================================================
   ;; Re-export safe APIs under standard names

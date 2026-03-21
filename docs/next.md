@@ -54,6 +54,7 @@ See docs/gaps.md for the full audit with completion status.
 | build/sbom | Software bill of materials | Scheme + C + Rust dep detection |
 | safe (contract lib) | Contract-checked stdlib | Pre/post conditions, SQL injection detection |
 | lint | 14 static analysis rules | unsafe-import, bare-error, sql-interpolation, etc. |
+| security/sandbox | One-call sandbox: Landlock + seccomp + caps + timeout | Fork-based isolation, 26 tests |
 
 ### Limitations (Honest)
 
@@ -67,11 +68,28 @@ See docs/gaps.md for the full audit with completion status.
 
 ## Still Open (Real Gaps, Not Stubs)
 
-### Sandbox Entry Point (P2)
+### ~~Sandbox Entry Point~~ DONE (P2)
 
-`(std security restrict)` exists but isn't auto-applied. A `run-safe` wrapper
-combining capabilities + Landlock + seccomp + timeout would make sandboxing
-trivial for Claude-generated code.
+**Implemented** (commit current):
+- `(std security sandbox)` provides `run-safe` and `run-safe-eval`
+- Fork-based isolation: child applies Landlock + seccomp + capabilities, parent stays unrestricted
+- `make-sandbox-config` with keys: `timeout`, `seccomp`, `landlock`, `capabilities`
+- Default parameters: `*sandbox-timeout*` (30s), `*sandbox-seccomp*` ('compute-only), `*sandbox-landlock*` (#f)
+- Engine-based preemptive timeout in child process
+- `(jerboa prelude safe)` re-exports all sandbox APIs
+
+```scheme
+(import (jerboa prelude safe))
+;; Run untrusted code with defaults (30s timeout, compute-only seccomp):
+(run-safe (lambda () (+ 1 2)))
+
+;; Evaluate untrusted string in restricted environment:
+(run-safe-eval "(map (lambda (x) (* x x)) '(1 2 3))")
+
+;; Custom config:
+(run-safe (lambda () (do-work))
+  (make-sandbox-config 'timeout 10 'seccomp 'io-only))
+```
 
 ### Race Detector (P3)
 

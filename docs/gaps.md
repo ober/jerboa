@@ -216,7 +216,7 @@ Previous audit found 2 stubs and 6 partials. **All are now fixed:**
 
 ### Remaining Work
 
-1. Sandbox entry point: `run-safe` combining Landlock + seccomp + capabilities
+1. ~~Sandbox entry point~~ → `run-safe` / `run-safe-eval` in `(std security sandbox)`
 2. Race detector for code using raw `fork-thread`
 3. Full build orchestration pipeline
 
