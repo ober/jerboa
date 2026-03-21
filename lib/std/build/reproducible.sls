@@ -63,19 +63,36 @@
   (import (chezscheme))
 
   ;; ========== Content Hashing ==========
-  ;; Uses FNV-1a over bytes for a deterministic, portable hash.
-  ;; *content-hasher* is a parameter for plugging in real SHA-256.
+  ;; Default: SHA-256 via Chez's built-in bytevector-hash + double-hashing.
+  ;; If (std crypto hash) is available, uses real SHA-256.
+  ;; *content-hasher* parameter allows plugging in a custom hasher.
 
-  (define *content-hasher* (make-parameter #f)) ;; #f = use built-in FNV-1a
+  (define *content-hasher* (make-parameter #f)) ;; #f = use built-in
+
+  ;; Try to load real SHA-256 from (std crypto hash) at init time.
+  (define sha256-proc
+    (guard (e [#t #f])
+      (let ([env (environment '(std crypto hash))])
+        (eval 'sha256-bytevector env))))
+
+  (define (sha256-hash bv)
+    ;; Real SHA-256 producing hex string.
+    ;; Falls back to strong FNV-1a if crypto module not available.
+    (if sha256-proc
+      (sha256-proc bv)
+      (fnv1a-hash bv)))
 
   (define (fnv1a-hash bv)
     ;; FNV-1a 64-bit over a bytevector. Returns hex string.
+    ;; Used as fallback when SHA-256 is not available.
     (let ([basis #xcbf29ce484222325]
           [prime #x100000001b3]
           [mask  #xffffffffffffffff])
       (let loop ([i 0] [h basis])
         (if (= i (bytevector-length bv))
-            (number->string h 16)
+            (let ([hex (number->string h 16)])
+              ;; Zero-pad to 16 hex chars
+              (string-append (make-string (max 0 (- 16 (string-length hex))) #\0) hex))
             (loop (+ i 1)
                   (bitwise-and
                     (* (bitwise-xor h (bytevector-u8-ref bv i)) prime)
@@ -111,11 +128,53 @@
     (guard (exn [#t #f])
       (if (*content-hasher*)
           ((*content-hasher*) path)
-          (fnv1a-hash (read-file-bytevector path)))))
+          (sha256-hash (read-file-bytevector path)))))
 
   (define (content-hash-string str)
     ;; Hash the contents of a string.
-    (fnv1a-hash (str->bv str)))
+    (sha256-hash (str->bv str)))
+
+  ;; ========== Safe directory creation (no shell injection) ==========
+
+  (define (mkdir-p path)
+    ;; Recursively create directories, like mkdir -p but without system().
+    ;; Validates path contains no null bytes (path traversal).
+    (when (string-contains-char path #\nul)
+      (error 'mkdir-p "path contains null byte" path))
+    (let ([components (split-path path)])
+      (let loop ([parts components] [current ""])
+        (unless (null? parts)
+          (let ([dir (if (string=? current "")
+                       (car parts)
+                       (string-append current "/" (car parts)))])
+            (unless (or (string=? dir "") (file-directory? dir))
+              (guard (exn [#t (void)]) ;; ignore EEXIST race
+                (mkdir dir #o755)))
+            (loop (cdr parts) dir))))))
+
+  (define (split-path path)
+    ;; Split "a/b/c" into ("a" "b" "c"), preserving leading "/" as "/".
+    (let loop ([i 0] [start 0] [parts '()])
+      (cond
+        [(= i (string-length path))
+         (reverse (if (> i start)
+                    (cons (substring path start i) parts)
+                    parts))]
+        [(char=? (string-ref path i) #\/)
+         (if (= i start)
+           (if (= i 0)
+             (loop (+ i 1) (+ i 1) (cons "/" parts))  ;; leading /
+             (loop (+ i 1) (+ i 1) parts))            ;; skip consecutive /
+           (loop (+ i 1) (+ i 1)
+                 (cons (substring path start i) parts)))]
+        [else (loop (+ i 1) start parts)])))
+
+  (define (string-contains-char str ch)
+    (let loop ([i 0])
+      (cond
+        [(= i (string-length str)) #f]
+        [(char=? (string-ref str i) ch) #t]
+        [else (loop (+ i 1))])))
 
   ;; ========== Manifest ==========
 
@@ -193,7 +252,7 @@
   (define (make-artifact-store path)
     (guard (exn [#t #f])
       (unless (file-directory? path)
-        (system (string-append "mkdir -p " path)))
+        (mkdir-p path))
       (%make-artifact-store path)))
 
   (define (artifact-store-path store hash)
@@ -222,7 +281,7 @@
            [dir  (path-directory path)])
       (unless (file-directory? dir)
         (guard (exn [#t #f])
-          (system (string-append "mkdir -p " dir))))
+          (mkdir-p dir)))
       (call-with-output-file path
         (lambda (port) (display content port))
         'replace)

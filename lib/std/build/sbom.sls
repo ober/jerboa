@@ -37,7 +37,9 @@
 
     ;; Auto-detection
     detect-scheme-deps
-    detect-c-deps)
+    detect-c-deps
+    detect-rust-deps
+    detect-all-deps)
 
   (import (chezscheme))
 
@@ -211,7 +213,8 @@
           [(and (char=? (string-ref content i) #\-)
                 (char=? (string-ref content (+ i 1)) #\l)
                 (or (= i 0)
-                    (char-whitespace? (string-ref content (- i 1)))))
+                    (char-whitespace? (string-ref content (- i 1)))
+                    (char=? (string-ref content (- i 1)) #\")))
            (let ([end (let find-end ([j (+ i 2)])
                         (if (or (>= j n) (char-whitespace? (string-ref content j))
                                 (char=? (string-ref content j) #\"))
@@ -219,6 +222,124 @@
                           (find-end (+ j 1))))])
              (loop end (cons (substring content (+ i 2) end) results)))]
           [else (loop (+ i 1) results)]))))
+
+  ;; ========== Rust/Cargo Dependency Detection ==========
+
+  (define (detect-rust-deps project-dir)
+    ;; Parse Cargo.lock for crate dependencies.
+    ;; Falls back to Cargo.toml if no lock file.
+    ;; Returns list of (name version) pairs.
+    (let ([lock-file (string-append project-dir "/Cargo.lock")]
+          [toml-file (string-append project-dir "/Cargo.toml")])
+      (cond
+        [(file-exists? lock-file)
+         (parse-cargo-lock lock-file)]
+        [(file-exists? toml-file)
+         (parse-cargo-toml-deps toml-file)]
+        [else '()])))
+
+  (define (parse-cargo-lock path)
+    ;; Parse Cargo.lock [[package]] entries.
+    ;; Format:
+    ;;   [[package]]
+    ;;   name = "crate-name"
+    ;;   version = "1.2.3"
+    (guard (exn [#t '()])
+      (let ([content (call-with-input-file path get-string-all)])
+        (let loop ([lines (string-split-lines* content)]
+                   [current-name #f]
+                   [current-version #f]
+                   [results '()])
+          (if (null? lines)
+            (let ([final (if (and current-name current-version)
+                           (cons (list current-name current-version) results)
+                           results)])
+              (reverse final))
+            (let ([line (string-trim-whitespace (car lines))])
+              (cond
+                ;; New package section
+                [(string=? line "[[package]]")
+                 (let ([updated (if (and current-name current-version)
+                                  (cons (list current-name current-version) results)
+                                  results)])
+                   (loop (cdr lines) #f #f updated))]
+                ;; name = "..."
+                [(string-prefix-ci? "name = " line)
+                 (loop (cdr lines)
+                       (extract-quoted-value line)
+                       current-version results)]
+                ;; version = "..."
+                [(string-prefix-ci? "version = " line)
+                 (loop (cdr lines)
+                       current-name
+                       (extract-quoted-value line)
+                       results)]
+                [else (loop (cdr lines) current-name current-version results)])))))))
+
+  (define (parse-cargo-toml-deps path)
+    ;; Parse [dependencies] section from Cargo.toml.
+    ;; Simplified parser: extracts crate-name = "version" pairs.
+    (guard (exn [#t '()])
+      (let ([content (call-with-input-file path get-string-all)])
+        (let loop ([lines (string-split-lines* content)]
+                   [in-deps #f]
+                   [results '()])
+          (if (null? lines)
+            (reverse results)
+            (let ([line (string-trim-whitespace (car lines))])
+              (cond
+                ;; Section headers
+                [(and (> (string-length line) 0)
+                      (char=? (string-ref line 0) #\[))
+                 (loop (cdr lines)
+                       (or (string=? line "[dependencies]")
+                           (string-prefix-ci? "[dependencies." line))
+                       results)]
+                ;; In dependencies section: name = "version"
+                [(and in-deps (> (string-length line) 0)
+                      (not (char=? (string-ref line 0) #\#)))
+                 (let ([eq-pos (string-index* line #\=)])
+                   (if eq-pos
+                     (let ([name (string-trim-whitespace
+                                   (substring line 0 eq-pos))]
+                           [val  (string-trim-whitespace
+                                   (substring line (+ eq-pos 1) (string-length line)))])
+                       (loop (cdr lines) in-deps
+                             (cons (list name (strip-quotes val)) results)))
+                     (loop (cdr lines) in-deps results)))]
+                [else (loop (cdr lines) in-deps results)])))))))
+
+  (define (detect-all-deps project-dir libdirs)
+    ;; Detect all dependency types and return an SBOM.
+    ;; project-dir: root of the project
+    ;; libdirs: list of Scheme library directories
+    (let ([sbom (make-sbom (path-basename project-dir) "0.0.0")])
+      ;; Scheme dependencies
+      (for-each
+        (lambda (dep)
+          (sbom-add-component! sbom
+            (make-component (car dep) #f 'library)))
+        (detect-scheme-deps libdirs))
+      ;; C dependencies
+      (let ([build-file (string-append project-dir "/build.ss")])
+        (for-each
+          (lambda (lib)
+            (sbom-add-component! sbom
+              (make-component lib #f 'c-library)))
+          (detect-c-deps build-file)))
+      ;; Rust dependencies
+      (for-each
+        (lambda (dep)
+          (sbom-add-component! sbom
+            (make-component (car dep) (cadr dep) 'library
+                            'license: "unknown")))
+        (detect-rust-deps project-dir))
+      ;; Build info
+      (sbom-add-build-info! sbom 'scheme-implementation
+                            (format "~a" (scheme-version)))
+      (sbom-add-build-info! sbom 'machine-type
+                            (format "~a" (machine-type)))
+      sbom))
 
   ;; ========== Helpers ==========
 
@@ -236,5 +357,64 @@
           [(< i 0) #f]
           [(string=? (substring str i (+ i nlen)) needle) i]
           [else (loop (- i 1))]))))
+
+  (define (string-split-lines* s)
+    ;; Split string by newlines, return list of strings.
+    (let loop ([i 0] [start 0] [lines '()])
+      (cond
+        [(= i (string-length s))
+         (reverse (if (> i start)
+                    (cons (substring s start i) lines)
+                    lines))]
+        [(char=? (string-ref s i) #\newline)
+         (loop (+ i 1) (+ i 1) (cons (substring s start i) lines))]
+        [else (loop (+ i 1) start lines)])))
+
+  (define (string-trim-whitespace s)
+    (let* ([n (string-length s)]
+           [start (let loop ([i 0])
+                    (if (or (= i n) (not (char-whitespace? (string-ref s i))))
+                      i (loop (+ i 1))))]
+           [end (let loop ([i (- n 1)])
+                  (if (or (< i start) (not (char-whitespace? (string-ref s i))))
+                    (+ i 1) (loop (- i 1))))])
+      (substring s start end)))
+
+  (define (string-prefix-ci? prefix str)
+    (let ([plen (string-length prefix)]
+          [slen (string-length str)])
+      (and (>= slen plen)
+           (string-ci=? (substring str 0 plen) prefix))))
+
+  (define (string-index* str ch)
+    (let loop ([i 0])
+      (cond
+        [(= i (string-length str)) #f]
+        [(char=? (string-ref str i) ch) i]
+        [else (loop (+ i 1))])))
+
+  (define (extract-quoted-value line)
+    ;; Extract value from: key = "value"
+    (let ([eq-pos (string-index* line #\=)])
+      (if eq-pos
+        (strip-quotes (string-trim-whitespace
+                        (substring line (+ eq-pos 1) (string-length line))))
+        "")))
+
+  (define (strip-quotes s)
+    (let ([n (string-length s)])
+      (if (and (>= n 2)
+               (char=? (string-ref s 0) #\")
+               (char=? (string-ref s (- n 1)) #\"))
+        (substring s 1 (- n 1))
+        s)))
+
+  (define (path-basename path)
+    (let loop ([i (- (string-length path) 1)])
+      (cond
+        [(< i 0) path]
+        [(char=? (string-ref path i) #\/)
+         (substring path (+ i 1) (string-length path))]
+        [else (loop (- i 1))])))
 
 ) ;; end library

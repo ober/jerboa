@@ -29,6 +29,10 @@
     deadlock-checked-mutex-lock!
     deadlock-checked-mutex-unlock!
     deadlock-checked-channel-get
+    ;; Drop-in replacements (auto-instrumented)
+    make-checked-mutex
+    with-checked-mutex
+
     ;; Control
     *deadlock-detection-enabled*
     with-deadlock-detection
@@ -190,6 +194,56 @@
       ;; notification so callers can use this as a guard.
       (unregister-waiting! tid)
       'ok))
+
+  ;; ========== Drop-in replacements ==========
+  ;;
+  ;; make-checked-mutex: creates a real Chez mutex but registers it
+  ;; for deadlock tracking. Returns the raw mutex — callers use
+  ;; with-checked-mutex instead of with-mutex for auto-instrumentation.
+
+  (define *checked-mutex-table* (make-eq-hashtable))
+  (define *checked-mutex-id* 0)
+
+  (define (make-checked-mutex . name-args)
+    ;; Drop-in replacement for (make-mutex).
+    ;; Returns a raw mutex that is tracked for deadlock detection.
+    (let* ([m (make-mutex)]
+           [name (if (null? name-args)
+                   (begin (set! *checked-mutex-id* (+ *checked-mutex-id* 1))
+                          *checked-mutex-id*)
+                   (car name-args))])
+      (hashtable-set! *checked-mutex-table* m name)
+      m))
+
+  (define-syntax with-checked-mutex
+    (syntax-rules ()
+      [(_ m body ...)
+       (let ([mutex m]
+             [tid (self)])
+         ;; Register waiting
+         (register-waiting! tid mutex)
+         ;; Check for deadlock BEFORE blocking
+         (when (*deadlock-detection-enabled*)
+           (let ([cycle (detect-deadlock)])
+             (when cycle
+               (unregister-waiting! tid)
+               (raise
+                 (condition
+                   (make-message-condition
+                     (format "deadlock detected on mutex ~a"
+                             (hashtable-ref *checked-mutex-table* mutex "unknown")))
+                   (make-deadlock-condition cycle))))))
+         ;; Acquire + run + release
+         (mutex-acquire mutex)
+         (unregister-waiting! tid)
+         (holding-resource! tid mutex)
+         (let ([result (guard (exn [#t (releasing-resource! tid mutex)
+                                       (mutex-release mutex)
+                                       (raise exn)])
+                         body ...)])
+           (releasing-resource! tid mutex)
+           (mutex-release mutex)
+           result))]))
 
   ;; ========== with-deadlock-detection ==========
 

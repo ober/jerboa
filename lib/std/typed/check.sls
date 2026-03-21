@@ -27,9 +27,13 @@
     check-program-types
     with-type-checking
     type-check-file
-    *enable-type-checking*)
+    *enable-type-checking*
+    *type-errors-fatal*)
 
-  (import (chezscheme) (std typed) (std typed env) (std typed infer))
+  (import (chezscheme)
+         (std typed)
+         (for (std typed env) run expand)
+         (for (std typed infer) run expand))
 
   ;; ========== Configuration ==========
 
@@ -40,9 +44,16 @@
           (error '*enable-type-checking* "must be boolean" v))
         v)))
 
-  ;; ========== Parse typed-arg list ==========
-  ;; (parse-args-datum args-datum) → ((name . type) ...)
-  ;; Works on plain datums (not syntax objects) for the type checker.
+  ;; When #t, compile-time type mismatches raise errors instead of warnings.
+  ;; Default #f for gradual typing compatibility.
+  (define *type-errors-fatal*
+    (make-parameter #f
+      (lambda (v)
+        (unless (boolean? v)
+          (error '*type-errors-fatal* "must be boolean" v))
+        v)))
+
+  ;; ========== Parse typed-arg list (runtime only — used by check-program-types) ==========
 
   (define (parse-args-datum args-datum)
     (let loop ([rest args-datum] [result '()])
@@ -50,10 +61,8 @@
         (reverse result)
         (let ([item (car rest)])
           (cond
-            ;; [name : type]
             [(and (list? item) (= (length item) 3) (eq? (cadr item) ':))
              (loop (cdr rest) (cons (cons (car item) (caddr item)) result))]
-            ;; plain name
             [(symbol? item)
              (loop (cdr rest) (cons (cons item 'any) result))]
             [else
@@ -65,35 +74,36 @@
   ;; the body forms (as datums), run the type inference engine and emit
   ;; a warning for any mismatch.  Returns #f on success, error list on failure.
 
-  (define (compile-time-check! who arg-bindings ret-type body-forms src-stx)
-    (when (*enable-type-checking*)
-      (let* ([env (type-env-extend (empty-type-env) arg-bindings)]
-             [errors (with-type-errors-collected
-                       (lambda ()
-                         ;; Check each body form; verify last form's type
-                         (let ([inferred-body-type
-                                (let loop ([forms body-forms])
-                                  (if (null? forms)
-                                    'void
-                                    (if (null? (cdr forms))
-                                      (check-type (car forms) ret-type env)
-                                      (begin
-                                        (infer-type (car forms) env)
-                                        (loop (cdr forms))))))])
-                           inferred-body-type)))])
-        (unless (null? errors)
-          ;; Display compile-time warnings (not fatal)
-          (for-each
-            (lambda (te)
-              (display (string-append
-                         "\n; compile-time type warning in "
-                         (symbol->string who)
-                         ": "
-                         (type-error-message te)
-                         "\n")
-                (current-error-port)))
-            errors)
-          errors))))
+  (meta define (compile-time-check! who arg-bindings ret-type body-forms src-stx)
+    ;; Runs at macro-expansion time. Always checks (parameters are for runtime).
+    ;; Returns list of type-error records, or '() if clean.
+    (let* ([env (type-env-extend (empty-type-env) arg-bindings)]
+           [errors (with-type-errors-collected
+                     (lambda ()
+                       (let ([inferred-body-type
+                              (let loop ([forms body-forms])
+                                (if (null? forms)
+                                  'void
+                                  (if (null? (cdr forms))
+                                    (check-type (car forms) ret-type env)
+                                    (begin
+                                      (infer-type (car forms) env)
+                                      (loop (cdr forms))))))])
+                         inferred-body-type)))])
+      (unless (null? errors)
+        ;; At expand time, always emit warnings to stderr.
+        ;; Fatal mode is enforced at runtime via the generated code.
+        (for-each
+          (lambda (te)
+            (display (string-append
+                       "\n; compile-time type warning in "
+                       (symbol->string who)
+                       ": "
+                       (type-error-message te)
+                       "\n")
+              (current-error-port)))
+          errors))
+      errors))
 
   ;; ========== define/ct ==========
   ;;
@@ -148,9 +158,8 @@
                 [body-datums (map syntax->datum (syntax->list #'(body ...)))]
                 [who-sym     (syntax->datum #'name)])
            ;; Infer body type without a return constraint
-           (when (*enable-type-checking*)
-             (let ([env (type-env-extend (empty-type-env) arg-bindings)])
-               (for-each (lambda (b) (infer-type b env)) body-datums)))
+           (let ([env (type-env-extend (empty-type-env) arg-bindings)])
+             (for-each (lambda (b) (infer-type b env)) body-datums))
            (with-syntax ([(arg ...) (map car parsed)]
                          [((aname atype) ...) parsed])
              #'(define (name arg ...)
@@ -186,18 +195,17 @@
                                    parsed)]
                 [ret-datum   (syntax->datum #'ret-type)]
                 [body-datums (map syntax->datum (syntax->list #'(body ...)))])
-           ;; Compile-time check
-           (when (*enable-type-checking*)
-             (let ([env (type-env-extend (empty-type-env) arg-bindings)])
-               (with-type-errors-collected
-                 (lambda ()
-                   (let loop ([forms body-datums])
-                     (if (null? forms)
-                       'void
-                       (if (null? (cdr forms))
-                         (check-type (car forms) ret-datum env)
-                         (begin (infer-type (car forms) env)
-                                (loop (cdr forms))))))))))
+           ;; Compile-time check (always runs at expand time)
+           (let ([env (type-env-extend (empty-type-env) arg-bindings)])
+             (with-type-errors-collected
+               (lambda ()
+                 (let loop ([forms body-datums])
+                   (if (null? forms)
+                     'void
+                     (if (null? (cdr forms))
+                       (check-type (car forms) ret-datum env)
+                       (begin (infer-type (car forms) env)
+                              (loop (cdr forms)))))))))
            (with-syntax ([(arg ...) (map car parsed)]
                          [((aname atype) ...) parsed])
              #'(lambda (arg ...)
