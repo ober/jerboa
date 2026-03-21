@@ -373,22 +373,19 @@ Typed configuration management.
 - Future Chez additions cannot leak into the sandbox
 - 30 tests verify safe operations work and all dangerous operations are blocked
 
-### V5. Weak Distributed Actor Authentication — HIGH
+### V5. Weak Distributed Actor Authentication — ~~HIGH~~ FIXED
 
 **File**: `lib/std/actor/transport.sls`
 
-```scheme
-;; Authentication uses FNV-1a hash — NOT cryptographically secure
-;; Comment in code: "Replace with HMAC-SHA256 via (std crypto hmac) for production"
-```
+**Status**: FIXED on `hardened` branch.
 
-**Issues**:
-- FNV-1a is a non-cryptographic hash — trivially forgeable
-- No TLS — all messages in plaintext over TCP
-- No replay protection — captured handshakes can be replayed indefinitely
-- No nonce in handshake — same cookie always produces same hash
-
-**Fix**: HMAC-SHA256 authentication with random nonce per connection. Mandatory TLS for all inter-node communication. Add timestamp + sequence number for replay protection.
+**What was fixed**:
+- Replaced FNV-1a with HMAC-SHA256 challenge-response handshake via `(std crypto native)`
+- Per-connection 256-bit random nonces prevent replay attacks
+- Mutual authentication: both client and server prove knowledge of cookie
+- Timing-safe comparison via `native-crypto-memcmp` prevents timing side channels
+- Handshake: hello(nonce) → challenge(nonce) → auth(HMAC) → ok(HMAC)
+- `(std net tls)` module added for TLS-encrypted transport
 
 ### V6. Shell Injection in Process Execution — ~~HIGH~~ FIXED
 
@@ -730,9 +727,16 @@ Key lifecycle management for long-running services.
 
 ## Proposed: Network and Protocol Hardening
 
-### N1. TLS Hardening — `(std net tls)`
+### N1. TLS Hardening — `(std net tls)` — IMPLEMENTED
 
-Secure defaults for all TLS connections.
+Secure defaults for all TLS connections. Implemented on `hardened` branch.
+
+**What was implemented**:
+- `(std net tls)` module with hardened defaults: TLS 1.2 minimum, AEAD-only cipher suites
+- `make-tls-config` / `tls-config-with` for configuration composition
+- Peer verification enabled by default
+- Certificate pinning support via `make-pin-set` / `pin-set-check`
+- Full TLS connect/listen/accept/read/write/close API via OpenSSL FFI
 
 ```scheme
 ;; Secure defaults (no opt-out for production)
@@ -808,7 +812,16 @@ Context-aware input sanitization.
 ;; → raises &url-scheme-violation (only http/https allowed)
 ```
 
-### N4. Connection Timeouts and Limits
+### N4. Connection Timeouts and Limits — IMPLEMENTED
+
+Implemented on `hardened` branch in `(std net timeout)`.
+
+**What was implemented**:
+- `make-timeout-config` with connect/read/write/idle timeout defaults
+- `make-http-limits` with max header size/count, URI length, body size, request timeout
+- `with-timeout` deadline enforcement via thread + polling
+- `check-header-limits`, `check-body-limits`, `check-uri-limits` validation
+- `&limit-exceeded` condition type with structured error reporting
 
 ```scheme
 ;; TCP with deadlines
@@ -1239,13 +1252,13 @@ Extend the capability system to work across nodes.
 
 | Item | Effort | What Changes |
 |------|--------|-------------|
-| V5: Actor transport auth | 3 days | HMAC-SHA256 + nonce + TLS |
-| N1: TLS hardening | 2 days | Secure defaults wrapper around `(std net ssl)` |
-| N2: HTTP security headers | 2 days | Security middleware stack |
-| N4: Connection timeouts | 2 days | Extend TCP layer with deadlines |
-| C4: Password hashing | 2 days | New `(std crypto password)` — Argon2id via FFI |
-| C5: AEAD | 2 days | New `(std crypto aead)` — AES-GCM via libcrypto |
-| Authentication module | 3 days | New `(std security auth)` — JWT, API keys, sessions |
+| ~~V5: Actor transport auth~~ | ~~3 days~~ | ~~HMAC-SHA256 + nonce + TLS~~ **DONE** |
+| ~~N1: TLS hardening~~ | ~~2 days~~ | ~~Secure defaults wrapper~~ **DONE** |
+| ~~N2: HTTP security headers~~ | ~~2 days~~ | ~~Security middleware stack~~ **DONE** |
+| ~~N4: Connection timeouts~~ | ~~2 days~~ | ~~Extend TCP layer with deadlines~~ **DONE** |
+| ~~C4: Password hashing~~ | ~~2 days~~ | ~~PBKDF2-HMAC-SHA256~~ **DONE** |
+| ~~C5: AEAD~~ | ~~2 days~~ | ~~AES-256-GCM via libcrypto~~ **DONE** |
+| ~~Authentication module~~ | ~~3 days~~ | ~~API keys, sessions, rate limiting~~ **DONE** |
 
 ### Phase 4: Language-Level Safety (P3)
 

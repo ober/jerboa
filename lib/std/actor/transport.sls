@@ -5,7 +5,12 @@
 ;;; Uses (std net tcp-raw) for TCP: fd-based POSIX sockets, no SSL dependency.
 ;;;
 ;;; Message framing: [4 bytes big-endian length][N bytes fasl-encoded body]
-;;; Authentication: cookie-based FNV-1a hash handshake on connect.
+;;; Authentication: HMAC-SHA256 challenge-response with per-connection nonce.
+;;;   1. Client sends (hello node-id nonce)
+;;;   2. Server sends (challenge server-nonce)
+;;;   3. Client sends HMAC-SHA256(cookie, client-nonce || server-nonce || node-id)
+;;;   4. Server verifies, sends HMAC-SHA256(cookie, server-nonce || client-nonce || node-id)
+;;;   5. Client verifies — mutual authentication complete
 ;;;
 ;;; Wire into the system at startup:
 ;;;   (start-node! "127.0.0.1" 9000 "my-secret-cookie")
@@ -37,7 +42,11 @@
     message->bytes
     bytes->message
   )
-  (import (chezscheme) (std actor core) (std net tcp-raw))
+  (import (chezscheme)
+          (std actor core)
+          (std net tcp-raw)
+          (std crypto native)
+          (std crypto random))
 
   ;; -------- 7A: Serialization --------
 
@@ -135,20 +144,18 @@
                                             (string-length node-id))))]
         [else (loop (fx- i 1))])))
 
-  ;; -------- 7C: Cookie hash --------
+  ;; -------- 7C: HMAC-SHA256 Authentication --------
 
-  ;; FNV-1a hash for cookie authentication.
-  ;; Replace with HMAC-SHA256 via (std crypto hmac) for production.
-  (define (cookie-hash cookie peer-id)
-    (let ([s (string-append cookie ":" peer-id)])
-      (let loop ([h #x811c9dc5] [i 0])
-        (if (fx= i (string-length s))
-          (fxlogand h #xFFFFFFFF)
-          (loop (fxlogand
-                  (fxxor (fx* h 16777619)
-                         (char->integer (string-ref s i)))
-                  #xFFFFFFFF)
-                (fx+ i 1))))))
+  (define NONCE_SIZE 32)  ;; 256-bit nonces
+
+  ;; Compute HMAC-SHA256(cookie, nonce1 || nonce2 || node-id)
+  (define (auth-hmac cookie nonce1 nonce2 node-id)
+    (let* ([id-bv (string->utf8 node-id)]
+           [data (make-bytevector (+ NONCE_SIZE NONCE_SIZE (bytevector-length id-bv)))])
+      (bytevector-copy! nonce1 0 data 0 NONCE_SIZE)
+      (bytevector-copy! nonce2 0 data NONCE_SIZE NONCE_SIZE)
+      (bytevector-copy! id-bv 0 data (* 2 NONCE_SIZE) (bytevector-length id-bv))
+      (native-hmac-sha256 (string->utf8 cookie) data)))
 
   ;; -------- 7D: Connection pool --------
 
@@ -173,24 +180,41 @@
             (tcp-close (vector-ref conn 0))))
         (hashtable-delete! *connections* node-id))))
 
-  ;; Open a new TCP connection and complete the cookie handshake.
+  ;; Open a new TCP connection and complete HMAC-SHA256 challenge-response.
   ;; Returns #(fd write-mutex).
   (define (open-connection! node-id)
     (let-values ([(host port) (node-id->host+port node-id)])
       (let ([fd           (tcp-connect host port)]
-            [write-mutex  (make-mutex)])
-        ;; Send hello: (hello our-node-id cookie-hash)
-        (let ([hello (list 'hello
-                           (current-node-id)
-                           (cookie-hash (*node-cookie*) node-id))])
-          (with-mutex write-mutex
-            (write-framed-message fd hello))
-          ;; Expect: (ok their-node-id)
-          (let ([resp (read-framed-message fd)])
-            (unless (and (pair? resp) (eq? (car resp) 'ok))
-              (tcp-close fd)
-              (error 'open-connection! "handshake rejected" node-id resp))))
-        (vector fd write-mutex))))
+            [write-mutex  (make-mutex)]
+            [client-nonce (random-bytes NONCE_SIZE)])
+        ;; Step 1: Send hello with our nonce
+        (with-mutex write-mutex
+          (write-framed-message fd (list 'hello (current-node-id) client-nonce)))
+        ;; Step 2: Receive server challenge nonce
+        (let ([resp (read-framed-message fd)])
+          (unless (and (pair? resp) (eq? (car resp) 'challenge)
+                       (pair? (cdr resp)) (bytevector? (cadr resp))
+                       (= (bytevector-length (cadr resp)) NONCE_SIZE))
+            (tcp-close fd)
+            (error 'open-connection! "bad challenge from server" node-id))
+          (let ([server-nonce (cadr resp)])
+            ;; Step 3: Send our auth proof
+            (let ([proof (auth-hmac (*node-cookie*) client-nonce server-nonce node-id)])
+              (with-mutex write-mutex
+                (write-framed-message fd (list 'auth proof)))
+              ;; Step 4: Verify server's mutual auth proof
+              (let ([auth-resp (read-framed-message fd)])
+                (unless (and (pair? auth-resp) (eq? (car auth-resp) 'ok)
+                             (pair? (cdr auth-resp)) (bytevector? (cadr auth-resp)))
+                  (tcp-close fd)
+                  (error 'open-connection! "handshake rejected" node-id))
+                (let ([server-proof (cadr auth-resp)]
+                      [expected (auth-hmac (*node-cookie*) server-nonce client-nonce
+                                           (current-node-id))])
+                  (unless (native-crypto-memcmp server-proof expected)
+                    (tcp-close fd)
+                    (error 'open-connection! "server auth failed — possible MITM" node-id))
+                  (vector fd write-mutex))))))))))
 
   ;; -------- 7E: Remote send --------
 
@@ -221,33 +245,49 @@
                 (fork-thread (lambda () (handle-client! client-fd))))
               (loop)))))))
 
-  ;; Handle one incoming connection: authenticate then dispatch messages.
+  ;; Handle one incoming connection: HMAC-SHA256 challenge-response then dispatch.
   (define (handle-client! fd)
     (guard (exn [#t
                  (guard (e [#t (void)]) (tcp-close fd))])
       (let ([hello (read-framed-message fd)])
         (if (not (and (pair? hello)
                       (eq? (car hello) 'hello)
-                      (>= (length hello) 3)))
+                      (>= (length hello) 3)
+                      (string? (cadr hello))
+                      (bytevector? (caddr hello))
+                      (= (bytevector-length (caddr hello)) NONCE_SIZE)))
           (begin
             (write-framed-message fd '(error "bad hello"))
             (tcp-close fd))
           (let* ([peer-id      (cadr  hello)]
-                 [their-hash   (caddr hello)]
-                 [our-expected (cookie-hash (*node-cookie*) peer-id)])
-            (if (not (fx= their-hash our-expected))
-              (begin
-                (write-framed-message fd '(error "bad cookie"))
-                (tcp-close fd))
-              (begin
-                (write-framed-message fd (list 'ok (current-node-id)))
-                (let loop ()
-                  (let ([msg (guard (exn [#t 'eof])
-                               (read-framed-message fd))])
-                    (unless (eq? msg 'eof)
-                      (dispatch-remote-message! msg)
-                      (loop))))
-                (tcp-close fd))))))))
+                 [client-nonce (caddr hello)]
+                 [server-nonce (random-bytes NONCE_SIZE)])
+            ;; Step 2: Send challenge with our nonce
+            (write-framed-message fd (list 'challenge server-nonce))
+            ;; Step 3: Receive client's auth proof
+            (let ([auth-msg (read-framed-message fd)])
+              (if (not (and (pair? auth-msg) (eq? (car auth-msg) 'auth)
+                            (pair? (cdr auth-msg)) (bytevector? (cadr auth-msg))))
+                (begin
+                  (write-framed-message fd '(error "bad auth"))
+                  (tcp-close fd))
+                (let* ([their-proof (cadr auth-msg)]
+                       [expected (auth-hmac (*node-cookie*) client-nonce server-nonce peer-id)])
+                  (if (not (native-crypto-memcmp their-proof expected))
+                    (begin
+                      (write-framed-message fd '(error "auth failed"))
+                      (tcp-close fd))
+                    ;; Step 4: Send our mutual auth proof
+                    (let ([our-proof (auth-hmac (*node-cookie*) server-nonce client-nonce
+                                                (current-node-id))])
+                      (write-framed-message fd (list 'ok our-proof))
+                      (let loop ()
+                        (let ([msg (guard (exn [#t 'eof])
+                                     (read-framed-message fd))])
+                          (unless (eq? msg 'eof)
+                            (dispatch-remote-message! msg)
+                            (loop))))
+                      (tcp-close fd))))))))))))
 
   ;; Dispatch an inbound message to a local actor.
   ;; Expected wire format: (send local-actor-id payload)
