@@ -5,6 +5,7 @@
   (export
     run-process
     run-process/batch
+    run-process/exec
     filter-with-process
 
     ;; Process ports (Gambit-compatible subprocess I/O)
@@ -52,6 +53,38 @@
                        (string-append "cd " (shell-quote dir) " && " cmd)
                        cmd)))
       (system full-cmd)))
+
+  (define (run-process/exec args . rest)
+    ;; Run a process WITHOUT shell interpolation.
+    ;; args: list of strings (command and arguments)
+    ;; Each argument is individually shell-quoted to prevent injection.
+    ;; No shell metacharacters are interpreted.
+    ;; Keywords: directory: path, stdin-data: string
+    (unless (and (list? args) (pair? args) (for-all string? args))
+      (error 'run-process/exec "args must be a non-empty list of strings" args))
+    (let* ([dir (extract-keyword rest 'directory: #f)]
+           [stdin-data (extract-keyword rest 'stdin-data: #f)]
+           ;; Each argument is individually quoted — no shell expansion
+           [cmd (string-join (map strict-shell-quote args) " ")]
+           [full-cmd (if dir
+                       (string-append "cd " (strict-shell-quote dir) " && " cmd)
+                       cmd)])
+      (let-values ([(to-stdin from-stdout from-stderr pid)
+                    (open-process-ports full-cmd 'line (native-transcoder))])
+        (when stdin-data
+          (display stdin-data to-stdin)
+          (flush-output-port to-stdin))
+        (close-port to-stdin)
+        (let ([output (read-all from-stdout)])
+          (close-port from-stdout)
+          (close-port from-stderr)
+          output))))
+
+  (define (strict-shell-quote s)
+    ;; Strictly quote a string for shell: wrap in single quotes,
+    ;; escape embedded single quotes. This prevents ALL shell
+    ;; metacharacter interpretation.
+    (string-append "'" (string-replace-all s "'" "'\"'\"'") "'"))
 
   (define (build-command-string args)
     (if (string? args)
