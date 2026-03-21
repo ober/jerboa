@@ -143,11 +143,16 @@ beyond static linting. Arity checking at call sites would need type info.
 - FASL: `*fasl-max-object-count*` (1M), `*fasl-max-byte-size*` (100 MB)
 - Zlib: 100 MB decompression limit in Rust native backend
 
-### 10. LOW: Deterministic Builds for Security Audit
+### 10. ~~LOW: Deterministic Builds for Security Audit~~ MOSTLY DONE
 
-**Gap**: `build/reproducible.sls` and `build/sbom.sls` exist. Verify they're
-actually producing bit-identical output and complete SBOMs including the Rust
-dependency tree.
+**Implemented** (commit 0230855):
+- `build/reproducible.sls`: SHA-256 content hashing (FNV-1a fallback), safe
+  `mkdir-p` (no shell injection), content-addressed artifact store
+- `build/sbom.sls`: Cargo.lock + Cargo.toml parsers for Rust dep detection,
+  `detect-all-deps` aggregates Scheme + C + Rust dependencies into SBOM
+
+**Remaining**: Bit-identical output verification (reproducible builds end-to-end)
+and full build orchestration pipeline are not yet implemented.
 
 ### 11. ~~Feature Addition: Structured Concurrency as Default~~ DONE
 
