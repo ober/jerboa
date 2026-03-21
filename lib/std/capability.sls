@@ -4,6 +4,9 @@
 ;;; Unforgeable capability tokens that control access to dangerous operations.
 ;;; Capabilities can be attenuated (restricted) but never amplified.
 ;;; Sandboxed evaluation with resource limits.
+;;;
+;;; HARDENED: Capabilities use sealed opaque record types (unforgeable)
+;;; and CSPRNG nonces (unpredictable).
 
 (library (std capability)
   (export
@@ -48,39 +51,36 @@
     capability-type
     capability-valid?)
 
-  (import (chezscheme))
+  (import (chezscheme)
+          (std crypto random))
 
-  ;; ========== Capability Records ==========
+  ;; ========== Capability Record ==========
+  ;;
+  ;; Sealed: cannot be subtyped.
+  ;; Opaque: cannot be inspected via record-type-descriptor.
+  ;; Constructor NOT exported: only this module can mint capabilities.
 
-  ;; Each capability is an opaque token with a unique nonce.
-  ;; The nonce prevents forgery (can't construct a capability from parts).
+  (define-record-type (%capability %make-capability capability?)
+    (sealed #t)
+    (opaque #t)
+    (nongenerative std-capability)
+    (fields
+      (immutable nonce %capability-nonce)
+      (immutable type  capability-type)
+      (immutable data  %capability-data)))
 
-  (define *nonce-counter* 0)
-  (define *nonce-mutex*   (make-mutex))
-
-  (define (make-nonce)
-    (with-mutex *nonce-mutex*
-      (set! *nonce-counter* (+ *nonce-counter* 1))
-      *nonce-counter*))
-
-  ;; capability: #(tag nonce type data)
   (define (make-cap type data)
-    (vector 'capability (make-nonce) type data))
+    (%make-capability (random-bytes 16) type data))
 
-  (define (capability? x)
-    (and (vector? x)
-         (= (vector-length x) 4)
-         (eq? (vector-ref x 0) 'capability)))
-
-  (define (cap-nonce  c) (vector-ref c 1))
-  (define (capability-type  c) (vector-ref c 2))
-  (define (cap-data   c) (vector-ref c 3))
+  (define (cap-nonce c) (%capability-nonce c))
+  (define (cap-data c)  (%capability-data c))
 
   (define (capability-valid? c)
     (and (capability? c)
          (let ([v (hashtable-ref *revoked* (cap-nonce c) #f)])
            (not v))))
 
+  ;; Revocation table uses bytevector nonces — need equal-hash for bytevectors
   (define *revoked* (make-hashtable equal-hash equal?))
 
   (define (kwarg key opts . default-args)

@@ -4,6 +4,9 @@
 ;;; Track 29: Programs declare required capabilities (filesystem, network,
 ;;; process, environment) and the runtime enforces them. Works in static
 ;;; binaries without kernel sandbox support.
+;;;
+;;; HARDENED: Capabilities use sealed opaque record types (unforgeable)
+;;; and CSPRNG nonces (unpredictable).
 
 (library (std security capability)
   (export
@@ -38,31 +41,26 @@
     ;; Attenuation
     attenuate-capability)
 
-  (import (chezscheme))
+  (import (chezscheme)
+          (std crypto random))
 
   ;; ========== Capability Record ==========
+  ;;
+  ;; Sealed: cannot be subtyped.
+  ;; Opaque: cannot be inspected via record-type-descriptor.
+  ;; Constructor NOT exported: only this module can mint capabilities.
 
-  ;; A capability is an unforgeable token granting specific permissions.
-  ;; #(capability nonce type permissions)
-
-  (define *nonce-counter* 0)
-  (define *nonce-mutex* (make-mutex))
-
-  (define (make-nonce)
-    (with-mutex *nonce-mutex*
-      (set! *nonce-counter* (+ *nonce-counter* 1))
-      *nonce-counter*))
+  (define-record-type (%capability %make-capability capability?)
+    (sealed #t)
+    (opaque #t)
+    (nongenerative std-security-capability)
+    (fields
+      (immutable nonce %capability-nonce)
+      (immutable type  capability-type)
+      (immutable permissions capability-permissions)))
 
   (define (make-cap type perms)
-    (vector 'capability (make-nonce) type perms))
-
-  (define (capability? x)
-    (and (vector? x)
-         (= (vector-length x) 4)
-         (eq? (vector-ref x 0) 'capability)))
-
-  (define (capability-type cap)   (vector-ref cap 2))
-  (define (capability-permissions cap) (vector-ref cap 3))
+    (%make-capability (random-bytes 16) type perms))
 
   ;; ========== Capability Violation Condition ==========
 
@@ -253,8 +251,6 @@
                                val)
                              restriction))))))
              perms))))
-
-
 
   (define (extract-opt opts key default)
     (let lp ([opts opts])
