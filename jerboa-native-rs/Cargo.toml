@@ -1,0 +1,18 @@
+[package]
+name = "jerboa-native"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+ring = "0.17"
+flate2 = "1"
+regex = "1"
+libc = "0.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
