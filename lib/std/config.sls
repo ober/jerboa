@@ -194,8 +194,17 @@
   ;; JERBOA_DB_HOST -> key (db host)
 
   (define (env-override! cfg)
+    ;; HARDENED: Only override config keys that are explicitly declared
+    ;; as env-overridable in the schema. If no schema is set, no overrides
+    ;; are applied (default-deny).
+    ;;
+    ;; Schema entries with env-overridable: declare which keys can be
+    ;; overridden. Format: ((key type default env-overridable?) ...)
+    ;; The env-overridable? field is the 4th element (optional, default #f).
     (let* ([prefix "JERBOA_"]
            [plen   (string-length prefix)]
+           [schema (config-rec-schema cfg)]
+           [allowed (env-overridable-keys schema)]
            [env-strings (get-environment-strings)])
       (for-each
         (lambda (entry)
@@ -208,8 +217,28 @@
                      [key-path (map (lambda (p) (string->symbol (string-downcase p)))
                                     parts)]
                      [val   (cdr entry)])
-                (ht-path-set! (config-rec-data cfg) key-path val)))))
+                ;; Only allow if key-path is in the allowed set
+                (when (key-path-allowed? key-path allowed)
+                  (ht-path-set! (config-rec-data cfg) key-path val))))))
         env-strings)))
+
+  (define (env-overridable-keys schema)
+    ;; Extract the list of key-paths that are declared env-overridable.
+    ;; Schema format: ((key type default) ...) or ((key type default #t) ...)
+    ;; The 4th element, if present and true, marks the key as overridable.
+    (if (null? schema)
+      '()  ;; No schema = no overrides allowed (default-deny)
+      (filter-map
+        (lambda (entry)
+          (and (>= (length entry) 4)
+               (list-ref entry 3)
+               (let ([key (car entry)])
+                 (if (pair? key) key (list key)))))
+        schema)))
+
+  (define (key-path-allowed? key-path allowed)
+    ;; Check if key-path matches any allowed path.
+    (exists (lambda (a) (equal? key-path a)) allowed))
 
   ;; ---- string utilities ----
 
