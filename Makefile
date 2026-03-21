@@ -254,6 +254,7 @@ test-security:
 	@JERBOA_DB_HOST=evil.com JERBOA_DB_PORT=5433 JERBOA_SECRET=leaked $(SCHEME) --libdirs $(LIBDIRS) --script tests/test-config-env.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-audit.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-sanitize.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-phase3-security.ss
 
 test-all: test test-features test-wrappers test-security
 
