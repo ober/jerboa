@@ -473,18 +473,18 @@ Move a running actor (state + mailbox) from one node to another without downtime
 
 Build in this order — each builds on the previous:
 
-| Priority | Feature | Module | Dependencies | Effort |
-|----------|---------|--------|--------------|--------|
-| **P1** | Worker Pool | `(std net worker-pool)` | tcp, fasl, transport | ~400 lines |
-| **P1** | Service Discovery | `(std net discovery)` | tcp, actor/registry | ~300 lines |
-| **P1** | Task Queue | `(std net task-queue)` | worker-pool, fasl | ~400 lines |
-| **P2** | Pub/Sub | `(std net pubsub)` | tcp, fasl | ~350 lines |
-| **P2** | Code Shipping | `(std net code-ship)` | worker-pool, compile | ~250 lines |
-| **P2** | Distributed Tracing | `(std debug distributed-trace)` | actor/protocol | ~300 lines |
-| **P3** | DHT | `(std net dht)` | tcp, discovery | ~500 lines |
-| **P3** | Raft Consensus | `(std actor consensus)` | tcp, fasl | ~500 lines |
-| **P3** | Stream Processing | `(std stream distributed)` | pubsub, task-queue | ~600 lines |
-| **P3** | Actor Migration | `(std actor migrate)` | checkpoint, transport | ~350 lines |
+| Priority | Feature             | Module                          | Dependencies          | Effort     |
+|----------|---------------------|---------------------------------|-----------------------|------------|
+| **P1**   | Worker Pool         | `(std net worker-pool)`         | tcp, fasl, transport  | ~400 lines |
+| **P1**   | Service Discovery   | `(std net discovery)`           | tcp, actor/registry   | ~300 lines |
+| **P1**   | Task Queue          | `(std net task-queue)`          | worker-pool, fasl     | ~400 lines |
+| **P2**   | Pub/Sub             | `(std net pubsub)`              | tcp, fasl             | ~350 lines |
+| **P2**   | Code Shipping       | `(std net code-ship)`           | worker-pool, compile  | ~250 lines |
+| **P2**   | Distributed Tracing | `(std debug distributed-trace)` | actor/protocol        | ~300 lines |
+| **P3**   | DHT                 | `(std net dht)`                 | tcp, discovery        | ~500 lines |
+| **P3**   | Raft Consensus      | `(std actor consensus)`         | tcp, fasl             | ~500 lines |
+| **P3**   | Stream Processing   | `(std stream distributed)`      | pubsub, task-queue    | ~600 lines |
+| **P3**   | Actor Migration     | `(std actor migrate)`           | checkpoint, transport | ~350 lines |
 
 ## The End Goal
 
