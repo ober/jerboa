@@ -905,7 +905,9 @@ Shell-free process execution.
 
 ## Proposed: Operating System Integration
 
-### O1. seccomp-BPF Integration — `(std security seccomp)`
+### O1. seccomp-BPF Integration — `(std security seccomp)` — IMPLEMENTED
+
+> **Status**: Implemented in `lib/std/security/seccomp.sls`. Filter construction with x86_64 syscall table, action constants (kill/trap/errno/log), pre-built profiles for compute-only, network-server, and io-only workloads. Sets NO_NEW_PRIVS via prctl.
 
 Restrict available syscalls for sandboxed workers.
 
@@ -923,7 +925,9 @@ Restrict available syscalls for sandboxed workers.
 ;; Now: open, socket, execve, etc. → immediate SIGKILL
 ```
 
-### O2. Landlock Integration — `(std security landlock)`
+### O2. Landlock Integration — `(std security landlock)` — IMPLEMENTED
+
+> **Status**: Implemented in `lib/std/security/landlock.sls`. Linux 5.13+ filesystem access control with read-only/read-write/execute rules, availability detection, pre-built rulesets, irreversible installation.
 
 Filesystem access control without root privileges (Linux 5.13+).
 
@@ -939,7 +943,9 @@ Filesystem access control without root privileges (Linux 5.13+).
     (start-server)))
 ```
 
-### O3. Privilege Separation — `(std security privsep)`
+### O3. Privilege Separation — `(std security privsep)` — IMPLEMENTED
+
+> **Status**: Implemented in `lib/std/security/privsep.sls`. Fork-based privsep with bidirectional pipe channels, fasl-framed message protocol, supervisor handler loop, worker-request/worker-loop APIs.
 
 Fork-based privilege separation for critical operations.
 
@@ -1104,7 +1110,9 @@ Append-only, tamper-evident audit logging for all security events.
                (if (pair? detail) (car detail) ""))))))
 ```
 
-### A2. Security Metrics — `(std security metrics)`
+### A2. Security Metrics — `(std security metrics)` — IMPLEMENTED
+
+> **Status**: Implemented in `lib/std/security/metrics.sls`. Thread-safe counters/gauges/histograms with mutex, alerting with threshold/window/action, snapshot reporting, counter reset.
 
 Real-time security health indicators.
 
@@ -1134,7 +1142,9 @@ Real-time security health indicators.
               `((count . ,count) (window . 300)))))
 ```
 
-### A3. Safe Error Responses — `(std security errors)`
+### A3. Safe Error Responses — `(std security errors)` — IMPLEMENTED
+
+> **Status**: Implemented in `lib/std/security/errors.sls`. Error classification registry (internal vs client), safe error handler with opaque hex reference IDs for correlation, HTTP status code mapping, logging crash isolation.
 
 Prevent information leakage through error messages.
 
@@ -1314,15 +1324,15 @@ Extend the capability system to work across nodes.
 | ~~L7: Effect-based I/O interception~~ | ~~3 days~~ | ~~New `(std security io-intercept)`~~ **DONE** |
 | ~~V10: Bounded actor mailboxes~~ | ~~2 days~~ | ~~New `(std actor bounded)`~~ **DONE** |
 
-### Phase 5: OS-Level Enforcement (P3)
+### Phase 5: OS-Level Enforcement (P3) — DONE
 
-| Item | Effort | What Changes |
-|------|--------|-------------|
-| O1: seccomp-BPF | 5 days | New `(std security seccomp)` |
-| O2: Landlock | 3 days | New `(std security landlock)` |
-| O3: Privilege separation | 5 days | New `(std security privsep)` |
-| A2: Security metrics | 3 days | New `(std security metrics)` |
-| A3: Safe error responses | 2 days | New `(std security errors)` |
+| Item | Effort | What Changes | Status |
+|------|--------|-------------|--------|
+| O1: seccomp-BPF | 5 days | New `(std security seccomp)` | IMPLEMENTED — seccomp-BPF filter construction with pre-built profiles (compute-only, network-server, io-only), x86_64 syscall table, prctl NO_NEW_PRIVS enforcement |
+| O2: Landlock | 3 days | New `(std security landlock)` | IMPLEMENTED — Linux 5.13+ filesystem sandboxing, read-only/read-write/execute rule builders, pre-built rulesets (readonly, tmpdir), availability detection |
+| O3: Privilege separation | 5 days | New `(std security privsep)` | IMPLEMENTED — Fork-based privsep with pipe IPC, fasl-framed bidirectional channels, supervisor handler loop in background thread, worker-request/worker-loop APIs |
+| A2: Security metrics | 3 days | New `(std security metrics)` | IMPLEMENTED — Thread-safe counters/gauges/histograms (last 1000 observations), alerting with configurable thresholds/windows/actions, snapshot reporting, counter reset |
+| A3: Safe error responses | 2 days | New `(std security errors)` | IMPLEMENTED — Error classification (internal vs client), safe-error-handler with opaque reference IDs, built-in HTTP status mapping, logging isolation (handler crashes don't propagate) |
 
 ### Phase 6: Supply Chain and Distributed (P4)
 

@@ -257,6 +257,7 @@ test-security:
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-phase3-security.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-phase3-remaining.ss
 	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-phase4-safety.ss
+	@$(SCHEME) --libdirs $(LIBDIRS) --script tests/test-phase5-os.ss
 
 test-all: test test-features test-wrappers test-security
 
