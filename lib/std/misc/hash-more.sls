@@ -7,7 +7,11 @@
   (export hash-filter hash-map/values
           hash-ref/default hash-value-set!
           hash->alist hash-union hash-intersect
-          hash-count hash-any hash-every)
+          hash-count hash-any hash-every
+          ;; better2 #6 additions
+          hash-fold hash-find hash-clear!
+          hash-copy hash-merge
+          hash-keys/list hash-values/list)
 
   (import (chezscheme))
 
@@ -119,5 +123,49 @@
         (or (= i (vector-length keys))
             (and (pred (vector-ref keys i) (vector-ref vals i))
                  (loop (+ i 1)))))))
+
+  ;; ========== better2 #6 additions ==========
+
+  ;; Fold over hash entries
+  (define (hash-fold proc init ht)
+    (let-values ([(keys vals) (hashtable-entries ht)])
+      (let loop ([i 0] [acc init])
+        (if (= i (vector-length keys))
+            acc
+            (loop (+ i 1)
+                  (proc (vector-ref keys i) (vector-ref vals i) acc))))))
+
+  ;; Find first entry satisfying predicate, return (key . value) or #f
+  (define (hash-find pred ht)
+    (let-values ([(keys vals) (hashtable-entries ht)])
+      (let loop ([i 0])
+        (cond
+          [(= i (vector-length keys)) #f]
+          [(pred (vector-ref keys i) (vector-ref vals i))
+           (cons (vector-ref keys i) (vector-ref vals i))]
+          [else (loop (+ i 1))]))))
+
+  ;; Clear all entries from a hash table
+  (define (hash-clear! ht)
+    (let-values ([(keys vals) (hashtable-entries ht)])
+      (do ([i 0 (+ i 1)])
+          ((= i (vector-length keys)))
+        (hashtable-delete! ht (vector-ref keys i)))))
+
+  ;; Shallow copy of a hash table
+  (define (hash-copy ht)
+    (hashtable-copy ht #t))
+
+  ;; Merge: same as hash-union but more Gerbil-idiomatic name
+  (define hash-merge hash-union)
+
+  ;; Extract keys as a list
+  (define (hash-keys/list ht)
+    (vector->list (hashtable-keys ht)))
+
+  ;; Extract values as a list
+  (define (hash-values/list ht)
+    (let-values ([(keys vals) (hashtable-entries ht)])
+      (vector->list vals)))
 
 ) ;; end library

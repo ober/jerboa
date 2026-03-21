@@ -33,6 +33,11 @@
     translate-spawn-forms
     translate-package-to-library
 
+    ;; better2 translator enhancements
+    translate-hash-operations
+    translate-gerbil-void
+    translate-define-values
+
     ;; File-level operations
     translate-file
 
@@ -391,18 +396,49 @@
     ;; let-hash is handled by the prelude macro; return unchanged.
     form)
 
-  ;; translate-using: (using (obj type) body ...)
-  ;;   → (let ([obj obj]) body ...)   ; method dispatch handled at runtime
+  ;; translate-using (enhanced for better2 #1):
+  ;; Form 1: (using (obj type) body ...) → (let ([obj obj]) body ...)
+  ;; Form 2: (using obj Type method) → (Type-method obj) — accessor shorthand
+  ;; Form 3: (using obj Type (method arg ...)) → (Type-method obj arg ...) — call
   ;; The `using` form in Gerbil binds obj and opens its namespace.
-  ;; We emit a plain let; method calls like {method obj} still work via ~.
   (define (translate-using form)
-    (if (and (pair? form) (eq? (car form) 'using)
-             (pair? (cadr form)))
-        (let* ([binding (cadr form)]
-               [obj-name (car binding)]
-               ;; type annotation ignored — no static dispatch in Jerboa
-               [body (cddr form)])
-          `(let ([,obj-name ,obj-name]) ,@body))
+    (if (and (pair? form) (eq? (car form) 'using))
+        (cond
+          ;; Form 1: (using (obj type) body ...)
+          [(and (pair? (cadr form)) (list? (cadr form)))
+           (let* ([binding (cadr form)]
+                  [obj-name (car binding)]
+                  [body (cddr form)])
+             `(let ([,obj-name ,obj-name]) ,@body))]
+          ;; Form 2: (using obj Type method) → (Type-method obj)
+          [(and (= (length form) 4)
+                (symbol? (cadr form))
+                (symbol? (caddr form))
+                (symbol? (cadddr form)))
+           (let* ([obj (cadr form)]
+                  [type (caddr form)]
+                  [method (cadddr form)]
+                  [accessor (string->symbol
+                              (string-append (symbol->string type)
+                                             "-"
+                                             (symbol->string method)))])
+             `(,accessor ,obj))]
+          ;; Form 3: (using obj Type (method arg ...)) → (Type-method obj arg ...)
+          [(and (= (length form) 4)
+                (symbol? (cadr form))
+                (symbol? (caddr form))
+                (pair? (cadddr form)))
+           (let* ([obj (cadr form)]
+                  [type (caddr form)]
+                  [call (cadddr form)]
+                  [method (car call)]
+                  [args (cdr call)]
+                  [accessor (string->symbol
+                              (string-append (symbol->string type)
+                                             "-"
+                                             (symbol->string method)))])
+             `(,accessor ,obj ,@args))]
+          [else form])
         form))
 
   ;; translate-parameterize: (parameterize ((p v) ...) body ...)
@@ -617,6 +653,56 @@
               [else
                (loop (cdr rest) pkg exports imports (cons f body))])))))
 
+  ;; ========== better2 New S-expr Transforms ==========
+
+  ;; translate-hash-operations (#3): normalize Gerbil hash API names
+  ;; (hash-set! ht k v) → (hash-put! ht k v)
+  ;; (hash-delete! ht k) → (hash-remove! ht k)
+  ;; (hash-contains? ht k) → (hash-key? ht k)
+  ;; (hash-has-key? ht k) → (hash-key? ht k)
+  ;; (hash-update! ht k f default) → (hash-update! ht k f default)  ; pass-through
+  (define (translate-hash-operations form)
+    (if (and (pair? form) (symbol? (car form)))
+        (case (car form)
+          [(hash-set!)     `(hash-put! ,@(cdr form))]
+          [(hash-delete!)  `(hash-remove! ,@(cdr form))]
+          [(hash-contains?) `(hash-key? ,@(cdr form))]
+          [(hash-has-key?)  `(hash-key? ,@(cdr form))]
+          [else form])
+        form))
+
+  ;; translate-gerbil-void (#4): Gerbil's void is variadic; Chez's is 0-arg
+  ;; (void) → (void)  ; pass through
+  ;; (void expr ...) → (begin expr ... (void))
+  (define (translate-gerbil-void form)
+    (if (and (pair? form) (eq? (car form) 'void)
+             (pair? (cdr form)))
+        `(begin ,@(cdr form) (void))
+        form))
+
+  ;; translate-define-values (#2): multiple-value binding at top level
+  ;; (define-values (a b c) expr) → (begin (define a) (define b) (define c)
+  ;;                                   (call-with-values (lambda () expr)
+  ;;                                     (lambda (a* b* c*) (set! a a*) ...)))
+  ;; This is a s-expr transform; the macro version is in sugar.sls
+  (define (translate-define-values form)
+    (if (and (pair? form) (eq? (car form) 'define-values)
+             (>= (length form) 3)
+             (list? (cadr form)))
+        (let* ([vars (cadr form)]
+               [expr (caddr form)]
+               [temps (map (lambda (v)
+                             (string->symbol
+                               (string-append (symbol->string v) "*")))
+                           vars)])
+          `(begin
+             ,@(map (lambda (v) `(define ,v)) vars)
+             (call-with-values
+               (lambda () ,expr)
+               (lambda ,temps
+                 ,@(map (lambda (v t) `(set! ,v ,t)) vars temps)))))
+        form))
+
   ;; ========== Recursive S-expr Walk ==========
 
   ;; Apply a list of s-expr transforms to a form recursively.
@@ -654,7 +740,11 @@
           translate-imports
           translate-for-loops
           translate-match-patterns
-          translate-spawn-forms))
+          translate-spawn-forms
+          ;; better2 additions
+          translate-hash-operations
+          translate-gerbil-void
+          translate-define-values))
 
   ;; ========== String-level Pipeline ==========
 

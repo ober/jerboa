@@ -11,7 +11,9 @@
     for for/collect for/fold for/or for/and
     in-list in-vector in-range in-string
     in-hash-keys in-hash-values in-hash-pairs
-    in-naturals in-indexed)
+    in-naturals in-indexed
+    ;; better2 #7: I/O iterators
+    in-port in-lines in-chars in-bytes in-producer)
 
   (import (except (chezscheme)
             make-hash-table hash-table? iota 1+ 1-)
@@ -126,5 +128,64 @@
          (if (null? rest) #t
            (let ([var (car rest)])
              (and (begin body ...) (loop (cdr rest))))))]))
+
+  ;; ========== better2 #7: I/O iterators ==========
+
+  ;; Read all datums from a port using read
+  (define in-port
+    (case-lambda
+      [() (in-port (current-input-port))]
+      [(port) (in-port port read)]
+      [(port reader)
+       (let loop ([acc '()])
+         (let ([datum (reader port)])
+           (if (eof-object? datum)
+               (reverse acc)
+               (loop (cons datum acc)))))]))
+
+  ;; Read all lines from a port
+  (define in-lines
+    (case-lambda
+      [() (in-lines (current-input-port))]
+      [(port)
+       (let loop ([acc '()])
+         (let ([line (get-line port)])
+           (if (eof-object? line)
+               (reverse acc)
+               (loop (cons line acc)))))]))
+
+  ;; Read all characters from a port
+  (define in-chars
+    (case-lambda
+      [() (in-chars (current-input-port))]
+      [(port)
+       (let loop ([acc '()])
+         (let ([ch (get-char port)])
+           (if (eof-object? ch)
+               (reverse acc)
+               (loop (cons ch acc)))))]))
+
+  ;; Read all bytes from a binary port
+  (define in-bytes
+    (case-lambda
+      [() (in-bytes (current-input-port))]
+      [(port)
+       (let loop ([acc '()])
+         (let ([b (get-u8 port)])
+           (if (eof-object? b)
+               (reverse acc)
+               (loop (cons b acc)))))]))
+
+  ;; Iterate over results of a thunk until it returns eof-object
+  (define (in-producer thunk . sentinel)
+    (let ([stop? (if (null? sentinel)
+                     eof-object?
+                     (let ([s (car sentinel)])
+                       (lambda (x) (equal? x s))))])
+      (let loop ([acc '()])
+        (let ([val (thunk)])
+          (if (stop? val)
+              (reverse acc)
+              (loop (cons val acc)))))))
 
   ) ;; end library

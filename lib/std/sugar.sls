@@ -19,7 +19,9 @@
     ;; Binding macros
     when-let if-let
     ;; Iteration
-    dotimes)
+    dotimes
+    ;; Multiple value binding (re-export from Chez)
+    define-values)
   (import (except (chezscheme)
             make-hash-table hash-table? iota 1+ 1- getenv
             path-extension path-absolute?
@@ -229,5 +231,8 @@
            (when (< var n)
              body body* ...
              (loop (+ var 1)))))]))
+
+  ;; define-values — re-exported from Chez (already built-in)
+  ;; (define-values (a b c) (values 1 2 3))
 
   ) ;; end library
