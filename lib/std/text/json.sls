@@ -74,10 +74,40 @@
                [(char=? esc #\b) (loop (cons #\backspace chars) (+ len 1))]
                [(char=? esc #\f) (loop (cons #\xC chars) (+ len 1))]  ;; formfeed
                [(char=? esc #\u)
-                (let* ([hex (string (read-char port) (read-char port)
-                                    (read-char port) (read-char port))]
-                       [cp (string->number hex 16)])
-                  (loop (cons (integer->char cp) chars) (+ len 1)))]
+                ;; Read 4 hex digits with EOF and validity checks
+                (let* ([c1 (read-char port)] [c2 (read-char port)]
+                       [c3 (read-char port)] [c4 (read-char port)])
+                  (when (or (eof-object? c1) (eof-object? c2)
+                            (eof-object? c3) (eof-object? c4))
+                    (error 'read-json "truncated \\uXXXX escape"))
+                  (let* ([hex (string c1 c2 c3 c4)]
+                         [cp (string->number hex 16)])
+                    (unless cp
+                      (error 'read-json "invalid hex in \\uXXXX escape" hex))
+                    ;; Handle UTF-16 surrogate pairs (U+D800..U+DBFF high, U+DC00..U+DFFF low)
+                    (if (and (>= cp #xD800) (<= cp #xDBFF))
+                      ;; High surrogate — expect \uDCxx low surrogate
+                      (let ([bs1 (read-char port)] [bs2 (read-char port)])
+                        (unless (and (char? bs1) (char=? bs1 #\\)
+                                     (char? bs2) (char=? bs2 #\u))
+                          (error 'read-json "expected low surrogate after high surrogate"))
+                        (let* ([lc1 (read-char port)] [lc2 (read-char port)]
+                               [lc3 (read-char port)] [lc4 (read-char port)])
+                          (when (or (eof-object? lc1) (eof-object? lc2)
+                                    (eof-object? lc3) (eof-object? lc4))
+                            (error 'read-json "truncated low surrogate"))
+                          (let* ([lhex (string lc1 lc2 lc3 lc4)]
+                                 [low (string->number lhex 16)])
+                            (unless (and low (>= low #xDC00) (<= low #xDFFF))
+                              (error 'read-json "invalid low surrogate" lhex))
+                            (let ([full-cp (+ #x10000
+                                              (* (- cp #xD800) #x400)
+                                              (- low #xDC00))])
+                              (loop (cons (integer->char full-cp) chars) (+ len 1))))))
+                      ;; Reject lone low surrogates
+                      (if (and (>= cp #xDC00) (<= cp #xDFFF))
+                        (error 'read-json "unexpected low surrogate without high surrogate" hex)
+                        (loop (cons (integer->char cp) chars) (+ len 1))))))]
                [else (loop (cons esc chars) (+ len 1))]))]
           [else (loop (cons ch chars) (+ len 1))]))))
 
@@ -133,9 +163,21 @@
                  (or (char-numeric? ch)
                      (memv ch '(#\. #\- #\+ #\e #\E))))
           (begin (read-char port) (loop (cons ch chars)))
-          (let ([s (list->string (reverse chars))])
-            (or (string->number s)
-                (error 'read-json "invalid number" s)))))))
+          (let* ([s (list->string (reverse chars))]
+                 [n (string->number s)])
+            ;; Validate: must be a real number (reject complex like 1+2i),
+            ;; must not have leading + (invalid JSON), and must not have
+            ;; leading zeros (except 0 itself or 0.xxx).
+            (unless (and n (real? n))
+              (error 'read-json "invalid number" s))
+            (when (and (> (string-length s) 0)
+                       (char=? (string-ref s 0) #\+))
+              (error 'read-json "leading + not allowed in JSON numbers" s))
+            (when (and (>= (string-length s) 2)
+                       (char=? (string-ref s 0) #\0)
+                       (char-numeric? (string-ref s 1)))
+              (error 'read-json "leading zeros not allowed in JSON numbers" s))
+            n)))))
 
   ;;;; ---- Writer ----
 
@@ -177,9 +219,16 @@
     (display #\" port))
 
   (define (json-write-number n port)
-    (if (and (integer? n) (exact? n))
-      (display n port)
-      (display (format "~a" (inexact n)) port)))
+    (cond
+      [(and (integer? n) (exact? n))
+       (display n port)]
+      [else
+       (let ([x (inexact n)])
+         ;; JSON does not support Infinity or NaN — error instead of
+         ;; producing invalid JSON that downstream parsers would reject.
+         (when (or (infinite? x) (nan? x))
+           (error 'write-json "cannot serialize non-finite number to JSON" n))
+         (display (format "~a" x) port))]))
 
   (define (json-write-object ht port)
     (display "{" port)

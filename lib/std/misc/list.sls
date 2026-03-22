@@ -34,12 +34,12 @@
     (case-lambda
       ((lst n) (take lst n '()))
       ((lst n acc)
-       (if (or (zero? n) (null? lst))
+       (if (or (<= n 0) (null? lst))
          (reverse acc)
          (take (cdr lst) (- n 1) (cons (car lst) acc))))))
 
   (define (drop lst n)
-    (if (or (zero? n) (null? lst)) lst
+    (if (or (<= n 0) (null? lst)) lst
       (drop (cdr lst) (- n 1))))
 
   (define (every pred lst)

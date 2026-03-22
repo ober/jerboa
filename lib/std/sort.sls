@@ -8,6 +8,9 @@
   (define (sort lst less?)
     (list-sort less? lst))
 
+  ;; NOTE: sort! returns a new sorted list — it does NOT mutate the input.
+  ;; R6RS list-sort is not guaranteed to be destructive. Always use the
+  ;; return value: (set! lst (sort! lst <)) or (let ([sorted (sort! lst <)]) ...)
   (define (sort! lst less?)
     (list-sort less? lst))
 

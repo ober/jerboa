@@ -12,16 +12,19 @@
     (let ([base (if (pair? args) (car args) (current-directory))])
       (if (path-absolute? path)
         path
-        (string-append base "/" path))))
+        ;; Strip trailing slash from base to prevent double-slash
+        (let ([clean-base (path-strip-trailing-directory-separator base)])
+          (string-append clean-base "/" path)))))
 
   (define (path-normalize path . args)
     (apply path-expand path args))
 
   (define (path-directory path)
     (let ([idx (string-last-index path #\/)])
-      (if idx
-        (substring path 0 idx)
-        ".")))
+      (cond
+        [(not idx) "."]
+        [(= idx 0) "/"]  ;; root path: (path-directory "/foo") → "/"
+        [else (substring path 0 idx)])))
 
   (define (path-strip-directory path)
     (let ([idx (string-last-index path #\/)])
@@ -37,9 +40,14 @@
           ""))))
 
   (define (path-strip-extension path)
-    (let ([idx (string-last-index path #\.)])
-      (if idx
-        (substring path 0 idx)
+    ;; Operate on the basename to avoid stripping dots in directory components
+    ;; and to handle dotfiles (e.g., .bashrc has no extension).
+    (let* ([dir-idx (string-last-index path #\/)]
+           [base-start (if dir-idx (+ dir-idx 1) 0)]
+           [base (substring path base-start (string-length path))]
+           [dot-idx (string-last-index base #\.)])
+      (if (and dot-idx (> dot-idx 0))  ;; dot-idx > 0 excludes dotfiles like .bashrc
+        (substring path 0 (+ base-start dot-idx))
         path)))
 
   (define (path-join . parts)

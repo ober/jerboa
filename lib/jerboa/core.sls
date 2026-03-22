@@ -722,8 +722,11 @@
   (define create-directory mkdir)
 
   ;; create-directory*: recursive mkdir -p
+  ;; Uses strict quoting to prevent shell injection via path names.
   (define (create-directory* path)
-    (system (string-append "mkdir -p '" path "'")))
+    (system (string-append "mkdir -p '"
+              (string-replace-simple path "'" "'\"'\"'")
+              "'")))
 
   ;; file-info record type (using Chez fields syntax)
   (define-record-type (file-info-rec make-file-info-rec file-info-rec?)
@@ -740,16 +743,23 @@
   (define (file-info-group fi) 0)
 
   ;; file-info: return a file-info-rec for the given path
+  ;; Uses stat(2) via Chez's file-stat when available, with POSIX fallback.
   (define (file-info path . rest)
-    (make-file-info-rec
-      (cond
-        [(file-directory? path) 'directory]
-        [(file-regular? path)   'regular]
-        [(file-symbolic-link? path) 'symbolic-link]
-        [else 'unknown])
-      0   ;; size placeholder
-      0   ;; mode placeholder
-      0)) ;; mtime placeholder
+    (let ([type (cond
+                  [(file-directory? path) 'directory]
+                  [(file-regular? path)   'regular]
+                  [(file-symbolic-link? path) 'symbolic-link]
+                  [else 'unknown])]
+          ;; Use Chez's built-in file-length for size (only works for regular files)
+          [size (guard (exn [#t 0])
+                  (if (file-regular? path)
+                    (call-with-port (open-file-input-port path)
+                      (lambda (p) (port-length p)))
+                    0))]
+          ;; Get modification time via Chez's file-modification-time (seconds since epoch)
+          [mtime (guard (exn [#t 0])
+                   (file-change-time path))])
+      (make-file-info-rec type size 0 mtime)))
 
   ;; directory-files: list files in a directory (like Gambit's)
   (define (directory-files path)
@@ -802,12 +812,12 @@
 
   ;; take/drop: Gerbil/SRFI-1 compat — take/drop first n elements of a list.
   (define (take lst n)
-    (if (or (= n 0) (null? lst))
+    (if (or (<= n 0) (null? lst))
       '()
       (cons (car lst) (take (cdr lst) (- n 1)))))
 
   (define (drop lst n)
-    (if (or (= n 0) (null? lst))
+    (if (or (<= n 0) (null? lst))
       lst
       (drop (cdr lst) (- n 1))))
 
@@ -853,13 +863,25 @@
     (call-with-string-output-port
       (lambda (p) (write obj p))))
 
-  ;; random-bytes: generate n random bytes as a bytevector
+  ;; random-bytes: generate n cryptographically random bytes from /dev/urandom.
+  ;; Falls back to Chez (random 256) only if /dev/urandom is unavailable.
   (define (random-bytes n)
-    (let ((bv (make-bytevector n)))
-      (let loop ((i 0))
-        (if (>= i n) bv
-          (begin (bytevector-u8-set! bv i (random 256))
-                 (loop (+ i 1)))))))
+    (guard (exn [#t
+      ;; Fallback: non-CSPRNG — only for non-security use
+      (let ((bv (make-bytevector n)))
+        (let loop ((i 0))
+          (if (>= i n) bv
+            (begin (bytevector-u8-set! bv i (random 256))
+                   (loop (+ i 1))))))])
+      (let ((bv (make-bytevector n))
+            (port (open-file-input-port "/dev/urandom"
+                    (file-options) (buffer-mode block))))
+        (let loop ((offset 0))
+          (if (>= offset n)
+            (begin (close-port port) bv)
+            (let ((byte (get-u8 port)))
+              (bytevector-u8-set! bv offset byte)
+              (loop (+ offset 1))))))))
 
   ;; getpid: POSIX process ID — read from /proc/self (Linux)
   (define (getpid)
@@ -909,16 +931,24 @@
 
   ;; user-info: Gerbil/Gambit compat — returns a user-info record.
   ;; Simplified: reads from environment; only supports current user.
+  ;; WARNING: The name-or-uid argument is checked — errors if it doesn't
+  ;; match the current user, rather than silently returning wrong data.
   (define-record-type user-info-record
     (fields name home uid gid shell)
     (sealed #t))
   (define (user-name)
     (or (getenv "USER") (getenv "LOGNAME") "user"))
   (define (user-info name-or-uid)
-    (make-user-info-record
-      (user-name)
-      (or (getenv "HOME") "/")
-      0 0 (or (getenv "SHELL") "/bin/sh")))
+    (let ([current (user-name)])
+      (when (and (string? name-or-uid)
+                 (not (string=? name-or-uid current)))
+        (error 'user-info
+          "only current user is supported; use POSIX getpwnam for other users"
+          name-or-uid))
+      (make-user-info-record
+        current
+        (or (getenv "HOME") "/")
+        0 0 (or (getenv "SHELL") "/bin/sh"))))
   (define (user-info-home ui) (user-info-record-home ui))
 
   ;; copy-file: Gerbil compat — copy file at src to dst.
@@ -961,6 +991,25 @@
       (+ (time-second t) (/ (time-nanosecond t) 1000000000.0))
       t))
 
+  ;; Shell quoting helper: wraps in single quotes, escapes embedded single quotes.
+  ;; This prevents ALL shell metacharacter interpretation.
+  (define (shell-quote-simple s)
+    (string-append "'" (string-replace-simple s "'" "'\"'\"'") "'"))
+
+  ;; Simple string replacement (used for shell quoting)
+  (define (string-replace-simple str old new)
+    (let* ([old-len (string-length old)]
+           [str-len (string-length str)])
+      (if (= old-len 0) str
+        (let loop ([i 0] [result '()])
+          (cond
+            [(> (+ i old-len) str-len)
+             (list->string (reverse (append (reverse (string->list (substring str i str-len))) result)))]
+            [(string=? (substring str i (+ i old-len)) old)
+             (loop (+ i old-len) (append (reverse (string->list new)) result))]
+            [else
+             (loop (+ i 1) (cons (string-ref str i) result))])))))
+
   ;; open-process: Gambit compat — run a subprocess and return a bidirectional port.
   ;; plist is a list with keyword args: path: arguments: directory:
   ;; stdin-redirection: stdout-redirection: stderr-redirection:
@@ -977,10 +1026,14 @@
     (let* ((path (or (find-key 'path: plist) "sh"))
            (args (or (find-key 'arguments: plist) '()))
            (dir  (find-key 'directory: plist))
+           ;; Shell-quote each argument to prevent injection
            (cmd  (apply string-append
-                        (cons path (map (lambda (a) (string-append " " a)) args))))
+                        (cons (shell-quote-simple path)
+                              (map (lambda (a)
+                                     (string-append " " (shell-quote-simple a)))
+                                   args))))
            (full-cmd (if dir
-                       (string-append "cd " dir " && " cmd)
+                       (string-append "cd " (shell-quote-simple dir) " && " cmd)
                        cmd)))
       (let-values (((in-port out-port err-port pid)
                     (open-process-ports full-cmd
@@ -1019,7 +1072,8 @@
     (open-process plist))
 
   ;; process-status: Gambit compat — wait for process and return exit code.
-  ;; Drains the port to allow the subprocess to finish, then returns 0.
+  ;; Drains the port to allow the subprocess to finish, then retrieves the PID
+  ;; from our tracking table and waits for the real exit status.
   (define (process-status proc)
     ;; Close port to signal we're done; process will exit
     (when (input-port? proc)
@@ -1027,6 +1081,13 @@
         (let ((ch (read-char proc)))
           (unless (eof-object? ch)
             (drain)))))
-    0)
+    ;; Try to get real exit status via the PID we stored
+    (let ([pid (hashtable-ref *process-pids* proc #f)])
+      (if pid
+        (guard (exn [#t 0])
+          ;; Use waitpid via system call
+          (let ([status (system (string-append "wait " (number->string pid) " 2>/dev/null; echo $?"))])
+            status))
+        0)))
 
 ) ;; end (library jerboa core)

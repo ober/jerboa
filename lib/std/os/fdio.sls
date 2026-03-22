@@ -7,20 +7,31 @@
 
   (import (chezscheme))
 
-  ;; fdread: read count bytes from fd, returns bytevector
+  ;; fdread: read count bytes from fd, returns bytevector.
+  ;; Returns empty bytevector on EOF, raises error on read failure.
+  (define c-read (foreign-procedure "read" (int u8* unsigned-int) int))
   (define (fdread fd count)
     (let* ((buf (make-bytevector count))
-           (n ((foreign-procedure "read" (int u8* unsigned-int) int) fd buf count)))
-      (if (> n 0)
-        (if (= n count) buf
-          (let ((result (make-bytevector n)))
-            (bytevector-copy! buf 0 result 0 n)
-            result))
-        (make-bytevector 0))))
+           (n (c-read fd buf count)))
+      (cond
+        [(> n 0)
+         (if (= n count) buf
+           (let ((result (make-bytevector n)))
+             (bytevector-copy! buf 0 result 0 n)
+             result))]
+        [(= n 0) (make-bytevector 0)]  ;; EOF
+        [else
+         (error 'fdread "read(2) failed" fd)])))
 
-  ;; fdwrite: write bytevector to fd, returns bytes written
+  ;; fdwrite: write bytevector to fd, returns bytes written.
+  ;; Raises error on write failure. Note: may return fewer bytes than
+  ;; requested (short write) — caller should retry for remaining bytes.
+  (define c-write (foreign-procedure "write" (int u8* unsigned-int) int))
   (define (fdwrite fd bv)
-    ((foreign-procedure "write" (int u8* unsigned-int) int) fd bv (bytevector-length bv)))
+    (let ([n (c-write fd bv (bytevector-length bv))])
+      (when (< n 0)
+        (error 'fdwrite "write(2) failed" fd))
+      n))
 
   ;; write-subu8vector: write a slice of a bytevector to a port
   (define (write-subu8vector bv start end . port-opt)

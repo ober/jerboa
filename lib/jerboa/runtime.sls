@@ -106,9 +106,11 @@
                     (error 'hash-ref "key not found" key)
                     v)))
       ((ht key default)
+       ;; Gerbil compatibility: default is returned as-is, never called.
+       ;; Even if default is a procedure, it is returned, not invoked.
        (let ([v (hashtable-ref ht key *not-found*)])
          (if (eq? v *not-found*)
-           (if (procedure? default) (default) default)
+           default
            v)))))
 
   (define-syntax hash-get
@@ -203,10 +205,15 @@
   (define (plist->hash-table lst)
     (let ([ht (make-hash-table)])
       (let lp ([rest lst])
-        (when (and (pair? rest) (pair? (cdr rest)))
-          (hashtable-set! ht (car rest) (cadr rest))
-          (lp (cddr rest))))
-      ht))
+        (cond
+          [(null? rest) ht]
+          [(null? (cdr rest))
+           (error 'plist->hash-table
+             "odd number of elements (missing value for last key)"
+             (car rest))]
+          [else
+           (hashtable-set! ht (car rest) (cadr rest))
+           (lp (cddr rest))]))))
 
   ;; hash-eq constructor: (hash-eq (k1 v1) (k2 v2) ...) is a macro in core.sls
   ;; but we need hash-eq? predicate

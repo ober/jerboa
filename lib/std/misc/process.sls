@@ -87,20 +87,20 @@
     (string-append "'" (string-replace-all s "'" "'\"'\"'") "'"))
 
   (define (build-command-string args)
+    ;; When args is a string, it's passed directly to the shell (caller's
+    ;; responsibility to ensure safety). When a list, each element is quoted.
     (if (string? args)
       args
       (string-join (map shell-quote args) " ")))
 
   (define (shell-quote s)
-    ;; Simple shell quoting
-    (if (and (not (string-contains? s "'"))
-             (not (string-contains? s " "))
-             (not (string-contains? s "\""))
-             (not (string-contains? s "$"))
-             (not (string-contains? s "`"))
-             (not (string-contains? s "\\"))
-             (> (string-length s) 0))
-      s
+    ;; Shell quoting: always use single-quote wrapping for safety.
+    ;; The previous version checked for a small set of dangerous characters
+    ;; but missed many shell metacharacters (|, ;, &, (, ), >, <, {, }, !,
+    ;; #, ~, newline, tab, etc.). Single-quoting is always safe except for
+    ;; embedded single quotes, which we escape.
+    (if (= (string-length s) 0)
+      "''"
       (string-append "'" (string-replace-all s "'" "'\"'\"'") "'")))
 
   (define (string-contains? s sub)
