@@ -15,7 +15,8 @@
     hash-table-copy
     hash-table->alist alist->hash-table)
 
-  (import (chezscheme))
+  (import (except (chezscheme)
+            make-hash-table hash-table? hash-table-for-each hash-table-map))
 
   ;; make-hash-table: accepts equality predicate and optional hash function
   ;; (make-hash-table equal-proc hash-proc)

@@ -342,11 +342,17 @@
         (loop (*mmap-guardian*)))))
 
   ;;; ========== Helpers ==========
+  ;; Match keyword args by symbol name (not identity) to work across libraries.
+  ;; #:mode creates gensyms; we compare the underlying name string.
+  (define (sym-name=? a b)
+    (and (symbol? a) (symbol? b)
+         (string=? (symbol->string a) (symbol->string b))))
+
   (define (get-opt opts key default)
     (let loop ([opts opts])
       (cond
         [(null? opts) default]
-        [(and (pair? opts) (pair? (cdr opts)) (eq? (car opts) key))
+        [(and (pair? opts) (pair? (cdr opts)) (sym-name=? (car opts) key))
          (cadr opts)]
         [else (loop (if (pair? opts) (cdr opts) '()))])))
 

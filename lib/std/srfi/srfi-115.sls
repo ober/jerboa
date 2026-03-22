@@ -9,7 +9,8 @@
     regexp-fold regexp-extract regexp-split
     regexp-match? regexp-match-submatch regexp-match-count)
 
-  (import (chezscheme))
+  (import (chezscheme)
+          (std pregexp))
 
   ;; --- Regexp object ---
   (define-record-type rx
@@ -35,7 +36,7 @@
              [args (cdr sre)])
          (case head
            [(: seq) (apply string-append (map sre->pregexp args))]
-           [(or |\||)
+           [(or)
             (string-append "(?:" (join-with "|" (map sre->pregexp args)) ")")]
            [(*) (string-append "(?:" (sre->pregexp (single args)) ")*")]
            [(+) (string-append "(?:" (sre->pregexp (single args)) ")+")]
@@ -105,7 +106,7 @@
       [(space whitespace white) "\\s"]
       [(upper upper-case) "[A-Z]"]
       [(lower lower-case) "[a-z]"]
-      [(punct punctuation) "[!\"#$%&'()*+,-./:;<=>?@\\[\\\\\\]^_`{|}~]"]
+      [(punct punctuation) "[!-/:-@\\[-`{-~]"]
       [(graph) "[!-~]"]
       [(print printing) "[ -~]"]
       [(word) "[a-zA-Z0-9_]"]
@@ -154,14 +155,7 @@
                      (error 'regexp "expected single char" x))]
       [else (error 'regexp "expected char" x)]))
 
-  ;; Escape special regex characters
-  (define (pregexp-quote s)
-    (let ([len (string-length s)])
-      (let loop ([i 0] [acc '()])
-        (if (= i len)
-          (apply string-append (reverse acc))
-          (loop (+ i 1)
-                (cons (pregexp-quote-char (string-ref s i)) acc))))))
+  ;; pregexp-quote is imported from (std pregexp)
 
   (define (pregexp-quote-char c)
     (if (memv c '(#\. #\* #\+ #\? #\( #\) #\[ #\] #\{ #\} #\\ #\^ #\$ #\|))
@@ -193,14 +187,8 @@
   ;; --- Pregexp helpers using Chez's built-in pregexp ---
   ;; Chez Scheme provides: pregexp, pregexp-match, pregexp-replace, etc.
 
-  (define (rx-pattern rx-obj)
-    (if (rx? rx-obj) (rx-pattern rx-obj) rx-obj))
-
   (define (ensure-rx obj)
     (if (rx? obj) obj (regexp obj)))
-
-  (define (rx-pat obj)
-    (rx-pattern (ensure-rx obj)))
 
   ;; --- Public API ---
 

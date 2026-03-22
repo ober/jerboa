@@ -130,58 +130,37 @@
     (void))
 
   (define (handle-completion state params)
-    ;; Extract word under cursor from document text
     (let* ([td (jref params "textDocument")]
-           [uri (jref td "uri")]
            [pos (jref params "position")]
-           [line-num (jref pos "line" 0)]
-           [col (jref pos "character" 0)]
-           [text (hashtable-ref (lsp-state-files state)
-                                (or uri "") #f)]
-           [prefix (if text (extract-word text line-num col) "")])
-      (let ([matches (symbol-db-complete prefix)])
-        (map (lambda (m)
-               (let ([item (make-hashtable string-hash string=?)])
-                 (hashtable-set! item "label" (car m))
-                 (hashtable-set! item "kind" 3) ;; Function
-                 (hashtable-set! item "detail" (cadr m))
-                 (hashtable-set! item "documentation" (caddr m))
-                 item))
-             matches))))
+           [text (hashtable-ref (lsp-state-files state) (or (jref td "uri") "") #f)]
+           [prefix (if text (extract-word text (jref pos "line" 0)
+                                          (jref pos "character" 0)) "")])
+      (map (lambda (m)
+             (make-json-obj "label" (car m) "kind" 3
+                            "detail" (cadr m) "documentation" (caddr m)))
+           (symbol-db-complete prefix))))
 
   (define (handle-hover state params)
     (let* ([td (jref params "textDocument")]
-           [uri (jref td "uri")]
            [pos (jref params "position")]
-           [line-num (jref pos "line" 0)]
-           [col (jref pos "character" 0)]
-           [text (hashtable-ref (lsp-state-files state)
-                                (or uri "") #f)]
-           [word (if text (extract-word text line-num col) "")])
-      (let ([info (symbol-db-lookup word)])
-        (if info
-            (let ([result (make-hashtable string-hash string=?)]
-                  [contents (make-hashtable string-hash string=?)])
-              (hashtable-set! contents "kind" "markdown")
-              (hashtable-set! contents "value"
-                              (string-append "**" word "** — "
-                                             (car info) "\n\n"
-                                             (cdr info)))
-              (hashtable-set! result "contents" contents)
-              result)
-            ;; no info — return null
-            (void)))))
+           [text (hashtable-ref (lsp-state-files state) (or (jref td "uri") "") #f)]
+           [word (if text (extract-word text (jref pos "line" 0)
+                                        (jref pos "character" 0)) "")]
+           [info (symbol-db-lookup word)])
+      (if info
+          (make-json-obj "contents"
+                         (make-json-obj "kind" "markdown"
+                                        "value" (string-append "**" word "** -- "
+                                                               (car info) "\n\n"
+                                                               (cdr info))))
+          (void))))
 
   ;; ---- Text helpers ----
 
   (define (extract-word text line-num col)
-    ;; Get the symbol-like word ending at (line, col) in text.
     (let* ([lines (string-split text #\newline)]
-           [line (if (< line-num (length lines))
-                     (list-ref lines line-num)
-                     "")]
+           [line (if (< line-num (length lines)) (list-ref lines line-num) "")]
            [c (min col (string-length line))])
-      ;; Walk backwards from col to find start of word
       (let loop ([i (- c 1)] [chars '()])
         (if (or (< i 0)
                 (let ([ch (string-ref line i)])
@@ -194,37 +173,22 @@
     (let ([len (string-length str)])
       (let loop ([i 0] [start 0] [result '()])
         (cond
-         [(= i len)
-          (reverse (cons (substring str start len) result))]
+         [(= i len) (reverse (cons (substring str start len) result))]
          [(char=? (string-ref str i) ch)
-          (loop (+ i 1) (+ i 1)
-                (cons (substring str start i) result))]
-         [else
-          (loop (+ i 1) start result)]))))
-
-  ;; ---- Main dispatch ----
+          (loop (+ i 1) (+ i 1) (cons (substring str start i) result))]
+         [else (loop (+ i 1) start result)]))))
 
   (define (handle-request state method params)
     (cond
-     [(string=? method "initialize")
-      (handle-initialize state params)]
-     [(string=? method "initialized") (void)]
-     [(string=? method "shutdown")
-      (lsp-state-shutdown?-set! state #t)
-      (void)]  ;; return null
-     [(string=? method "textDocument/didOpen")
-      (handle-did-open state params) (void)]
-     [(string=? method "textDocument/didChange")
-      (handle-did-change state params) (void)]
-     [(string=? method "textDocument/didClose")
-      (handle-did-close state params) (void)]
-     [(string=? method "textDocument/completion")
-      (handle-completion state params)]
-     [(string=? method "textDocument/hover")
-      (handle-hover state params)]
+     [(string=? method "initialize")       (handle-initialize state params)]
+     [(string=? method "initialized")      (void)]
+     [(string=? method "shutdown")         (lsp-state-shutdown?-set! state #t) (void)]
+     [(string=? method "textDocument/didOpen")    (handle-did-open state params)]
+     [(string=? method "textDocument/didChange")  (handle-did-change state params)]
+     [(string=? method "textDocument/didClose")   (handle-did-close state params)]
+     [(string=? method "textDocument/completion") (handle-completion state params)]
+     [(string=? method "textDocument/hover")      (handle-hover state params)]
      [else #f]))
-
-  ;; ---- Server loop ----
 
   (define (start-lsp-server)
     (let ([state (make-lsp-state)]
@@ -235,28 +199,18 @@
           (when msg
             (let ([method (jref msg "method")]
                   [id (jref msg "id")]
-                  [params (jref msg "params"
-                                (make-hashtable string-hash string=?))])
+                  [params (jref msg "params" (make-hashtable string-hash string=?))])
               (cond
-               ;; exit notification
                [(and method (string=? method "exit"))
                 (exit (if (lsp-state-shutdown? state) 0 1))]
-               ;; request (has id)
                [(and method id)
                 (let ([result (handle-request state method params)])
                   (if result
                       (lsp-respond out id result)
-                      ;; method not found
                       (lsp-respond-error out id -32601
-                                         (string-append
-                                          "Method not found: "
-                                          method))))
+                                         (string-append "Method not found: " method))))
                 (loop)]
-               ;; notification (no id)
-               [method
-                (handle-request state method params)
-                (loop)]
-               ;; unknown message shape
+               [method (handle-request state method params) (loop)]
                [else (loop)])))))))
 
   ) ;; end library
