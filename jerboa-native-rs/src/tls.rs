@@ -1,0 +1,521 @@
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::sync::Arc;
+use std::sync::Mutex;
+
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::{ClientConfig, ClientConnection, ServerConfig, ServerConnection, StreamOwned};
+
+use crate::panic::{ffi_wrap, set_last_error};
+
+// ============================================================
+// Connection handle management
+// ============================================================
+
+/// Opaque handle wrapping a TLS connection + TCP stream.
+enum TlsConn {
+    Client(StreamOwned<ClientConnection, TcpStream>),
+    Server(StreamOwned<ServerConnection, TcpStream>),
+}
+
+/// Opaque handle for a TLS server config (reused across accepts).
+struct TlsServerCtx {
+    config: Arc<ServerConfig>,
+}
+
+// Macro to create lazy-initialized mutex-protected handle maps
+macro_rules! lazy_static_handles {
+    ($($name:ident: $type:ty),* $(,)?) => {
+        $(
+            fn $name() -> &'static Mutex<$type> {
+                use std::sync::OnceLock;
+                static INSTANCE: OnceLock<Mutex<$type>> = OnceLock::new();
+                INSTANCE.get_or_init(|| Mutex::new(HashMap::new()))
+            }
+        )*
+    };
+}
+
+lazy_static_handles! {
+    conns: HashMap<u64, TlsConn>,
+    server_ctxs: HashMap<u64, TlsServerCtx>,
+}
+
+static NEXT_HANDLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_handle() -> u64 {
+    NEXT_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+// ============================================================
+// Client: connect to a remote TLS server
+// ============================================================
+
+/// Connect to host:port over TLS with system CA trust store.
+/// Returns handle ID (>0) on success, 0 on error.
+#[no_mangle]
+pub extern "C" fn jerboa_tls_connect(
+    host: *const u8,
+    host_len: usize,
+    port: u16,
+) -> u64 {
+    match std::panic::catch_unwind(|| {
+        if host.is_null() {
+            set_last_error("null host".to_string());
+            return 0;
+        }
+        let host_str = unsafe {
+            std::str::from_utf8(std::slice::from_raw_parts(host, host_len))
+        };
+        let host_str = match host_str {
+            Ok(s) => s,
+            Err(_) => {
+                set_last_error("invalid UTF-8 hostname".to_string());
+                return 0;
+            }
+        };
+
+        // Build client config with webpki root certificates
+        let root_store = rustls::RootCertStore::from_iter(
+            webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
+        );
+        let config = ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+
+        let server_name = match ServerName::try_from(host_str.to_string()) {
+            Ok(sn) => sn,
+            Err(e) => {
+                set_last_error(format!("invalid server name: {}", e));
+                return 0;
+            }
+        };
+
+        let conn = match ClientConnection::new(Arc::new(config), server_name) {
+            Ok(c) => c,
+            Err(e) => {
+                set_last_error(format!("TLS client init: {}", e));
+                return 0;
+            }
+        };
+
+        let addr = format!("{}:{}", host_str, port);
+        let tcp = match TcpStream::connect(&addr) {
+            Ok(s) => s,
+            Err(e) => {
+                set_last_error(format!("TCP connect {}: {}", addr, e));
+                return 0;
+            }
+        };
+
+        let stream = StreamOwned::new(conn, tcp);
+        let handle = next_handle();
+        conns().lock().unwrap().insert(handle, TlsConn::Client(stream));
+        handle
+    }) {
+        Ok(h) => h,
+        Err(_) => {
+            set_last_error("panic in tls_connect".to_string());
+            0
+        }
+    }
+}
+
+/// Connect to host:port with certificate pinning (no CA verification).
+/// pin_sha256 is the expected SHA-256 hash of the server's certificate (DER).
+/// Returns handle ID (>0) on success, 0 on error.
+#[no_mangle]
+pub extern "C" fn jerboa_tls_connect_pinned(
+    host: *const u8,
+    host_len: usize,
+    port: u16,
+    pin_sha256: *const u8,
+    pin_len: usize,
+) -> u64 {
+    match std::panic::catch_unwind(|| {
+        if host.is_null() {
+            set_last_error("null host".to_string());
+            return 0;
+        }
+        let host_str = unsafe {
+            match std::str::from_utf8(std::slice::from_raw_parts(host, host_len)) {
+                Ok(s) => s.to_string(),
+                Err(_) => {
+                    set_last_error("invalid UTF-8 hostname".to_string());
+                    return 0;
+                }
+            }
+        };
+
+        let expected_pin = if !pin_sha256.is_null() && pin_len == 32 {
+            Some(unsafe { std::slice::from_raw_parts(pin_sha256, pin_len) }.to_vec())
+        } else {
+            None
+        };
+
+        // Build config that skips CA verification (we verify via pin)
+        let config = ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(PinVerifier {
+                expected_sha256: expected_pin,
+            }))
+            .with_no_client_auth();
+
+        let server_name = match ServerName::try_from(host_str.clone()) {
+            Ok(sn) => sn,
+            Err(e) => {
+                set_last_error(format!("invalid server name: {}", e));
+                return 0;
+            }
+        };
+
+        let conn = match ClientConnection::new(Arc::new(config), server_name) {
+            Ok(c) => c,
+            Err(e) => {
+                set_last_error(format!("TLS client init: {}", e));
+                return 0;
+            }
+        };
+
+        let addr = format!("{}:{}", host_str, port);
+        let tcp = match TcpStream::connect(&addr) {
+            Ok(s) => s,
+            Err(e) => {
+                set_last_error(format!("TCP connect {}: {}", addr, e));
+                return 0;
+            }
+        };
+
+        let stream = StreamOwned::new(conn, tcp);
+        let handle = next_handle();
+        conns().lock().unwrap().insert(handle, TlsConn::Client(stream));
+        handle
+    }) {
+        Ok(h) => h,
+        Err(_) => {
+            set_last_error("panic in tls_connect_pinned".to_string());
+            0
+        }
+    }
+}
+
+// Certificate pin verifier — accepts any cert whose SHA-256 matches
+#[derive(Debug)]
+struct PinVerifier {
+    expected_sha256: Option<Vec<u8>>,
+}
+
+impl rustls::client::danger::ServerCertVerifier for PinVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        if let Some(ref expected) = self.expected_sha256 {
+            let digest = ring::digest::digest(&ring::digest::SHA256, end_entity.as_ref());
+            if digest.as_ref() == expected.as_slice() {
+                Ok(rustls::client::danger::ServerCertVerified::assertion())
+            } else {
+                Err(rustls::Error::General("certificate pin mismatch".to_string()))
+            }
+        } else {
+            // No pin — accept anything (insecure, for testing only)
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+// ============================================================
+// Server: create TLS server context and accept connections
+// ============================================================
+
+/// Create a TLS server context from cert and key PEM files.
+/// Returns context handle (>0) on success, 0 on error.
+#[no_mangle]
+pub extern "C" fn jerboa_tls_server_new(
+    cert_path: *const u8,
+    cert_path_len: usize,
+    key_path: *const u8,
+    key_path_len: usize,
+) -> u64 {
+    match std::panic::catch_unwind(|| {
+        if cert_path.is_null() || key_path.is_null() {
+            set_last_error("null cert/key path".to_string());
+            return 0;
+        }
+        let cert_str = unsafe {
+            match std::str::from_utf8(std::slice::from_raw_parts(cert_path, cert_path_len)) {
+                Ok(s) => s,
+                Err(_) => { set_last_error("invalid cert path".to_string()); return 0; }
+            }
+        };
+        let key_str = unsafe {
+            match std::str::from_utf8(std::slice::from_raw_parts(key_path, key_path_len)) {
+                Ok(s) => s,
+                Err(_) => { set_last_error("invalid key path".to_string()); return 0; }
+            }
+        };
+
+        // Read cert chain
+        let cert_file = match std::fs::File::open(cert_str) {
+            Ok(f) => f,
+            Err(e) => { set_last_error(format!("open cert: {}", e)); return 0; }
+        };
+        let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut std::io::BufReader::new(cert_file))
+            .filter_map(|r| r.ok())
+            .collect();
+        if certs.is_empty() {
+            set_last_error("no certificates found in cert file".to_string());
+            return 0;
+        }
+
+        // Read private key
+        let key_file = match std::fs::File::open(key_str) {
+            Ok(f) => f,
+            Err(e) => { set_last_error(format!("open key: {}", e)); return 0; }
+        };
+        let key = match rustls_pemfile::private_key(&mut std::io::BufReader::new(key_file)) {
+            Ok(Some(k)) => k,
+            Ok(None) => { set_last_error("no private key found".to_string()); return 0; }
+            Err(e) => { set_last_error(format!("read key: {}", e)); return 0; }
+        };
+
+        let config = match ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, PrivateKeyDer::from(key))
+        {
+            Ok(c) => c,
+            Err(e) => { set_last_error(format!("server config: {}", e)); return 0; }
+        };
+
+        let handle = next_handle();
+        server_ctxs().lock().unwrap().insert(handle, TlsServerCtx {
+            config: Arc::new(config),
+        });
+        handle
+    }) {
+        Ok(h) => h,
+        Err(_) => {
+            set_last_error("panic in tls_server_new".to_string());
+            0
+        }
+    }
+}
+
+/// Accept a TLS connection on an already-accepted TCP fd.
+/// Takes the server context handle and a raw fd (from accept()).
+/// Returns a connection handle (>0) on success, 0 on error.
+#[no_mangle]
+pub extern "C" fn jerboa_tls_accept(
+    server_ctx: u64,
+    fd: i32,
+) -> u64 {
+    match std::panic::catch_unwind(|| {
+        let config = {
+            let ctxs = server_ctxs().lock().unwrap();
+            match ctxs.get(&server_ctx) {
+                Some(ctx) => ctx.config.clone(),
+                None => {
+                    set_last_error("invalid server context handle".to_string());
+                    return 0;
+                }
+            }
+        };
+
+        let conn = match ServerConnection::new(config) {
+            Ok(c) => c,
+            Err(e) => {
+                set_last_error(format!("TLS server connection: {}", e));
+                return 0;
+            }
+        };
+
+        // Wrap the raw fd in a TcpStream
+        use std::os::unix::io::FromRawFd;
+        let tcp = unsafe { TcpStream::from_raw_fd(fd) };
+
+        let stream = StreamOwned::new(conn, tcp);
+        let handle = next_handle();
+        conns().lock().unwrap().insert(handle, TlsConn::Server(stream));
+        handle
+    }) {
+        Ok(h) => h,
+        Err(_) => {
+            set_last_error("panic in tls_accept".to_string());
+            0
+        }
+    }
+}
+
+// ============================================================
+// Read / Write / Close
+// ============================================================
+
+/// Read up to max_len bytes from a TLS connection.
+/// Returns bytes read (>0), 0 on EOF, -1 on error.
+#[no_mangle]
+pub extern "C" fn jerboa_tls_read(
+    handle: u64,
+    buf: *mut u8,
+    max_len: usize,
+) -> i32 {
+    ffi_wrap(|| {
+        if buf.is_null() { return -1; }
+        let out = unsafe { std::slice::from_raw_parts_mut(buf, max_len) };
+        let mut map = conns().lock().unwrap();
+        let conn = match map.get_mut(&handle) {
+            Some(c) => c,
+            None => {
+                set_last_error("invalid TLS handle".to_string());
+                return -1;
+            }
+        };
+        let n = match conn {
+            TlsConn::Client(ref mut s) => s.read(out),
+            TlsConn::Server(ref mut s) => s.read(out),
+        };
+        match n {
+            Ok(0) => 0,
+            Ok(n) => n as i32,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => 0,
+            Err(e) => {
+                set_last_error(format!("TLS read: {}", e));
+                -1
+            }
+        }
+    })
+}
+
+/// Write bytes to a TLS connection.
+/// Returns bytes written (>0), or -1 on error.
+#[no_mangle]
+pub extern "C" fn jerboa_tls_write(
+    handle: u64,
+    buf: *const u8,
+    len: usize,
+) -> i32 {
+    ffi_wrap(|| {
+        if buf.is_null() { return -1; }
+        let data = unsafe { std::slice::from_raw_parts(buf, len) };
+        let mut map = conns().lock().unwrap();
+        let conn = match map.get_mut(&handle) {
+            Some(c) => c,
+            None => {
+                set_last_error("invalid TLS handle".to_string());
+                return -1;
+            }
+        };
+        let n = match conn {
+            TlsConn::Client(ref mut s) => s.write(data),
+            TlsConn::Server(ref mut s) => s.write(data),
+        };
+        match n {
+            Ok(n) => n as i32,
+            Err(e) => {
+                set_last_error(format!("TLS write: {}", e));
+                -1
+            }
+        }
+    })
+}
+
+/// Flush pending TLS data.
+/// Returns 0 on success, -1 on error.
+#[no_mangle]
+pub extern "C" fn jerboa_tls_flush(handle: u64) -> i32 {
+    ffi_wrap(|| {
+        let mut map = conns().lock().unwrap();
+        let conn = match map.get_mut(&handle) {
+            Some(c) => c,
+            None => return -1,
+        };
+        let result = match conn {
+            TlsConn::Client(ref mut s) => s.flush(),
+            TlsConn::Server(ref mut s) => s.flush(),
+        };
+        match result {
+            Ok(()) => 0,
+            Err(e) => {
+                set_last_error(format!("TLS flush: {}", e));
+                -1
+            }
+        }
+    })
+}
+
+/// Close and free a TLS connection.
+#[no_mangle]
+pub extern "C" fn jerboa_tls_close(handle: u64) {
+    let _ = conns().lock().unwrap().remove(&handle);
+}
+
+/// Free a TLS server context.
+#[no_mangle]
+pub extern "C" fn jerboa_tls_server_free(handle: u64) {
+    let _ = server_ctxs().lock().unwrap().remove(&handle);
+}
+
+/// Set the underlying TCP stream to nonblocking mode.
+/// Returns 0 on success, -1 on error.
+#[no_mangle]
+pub extern "C" fn jerboa_tls_set_nonblock(handle: u64, nonblock: i32) -> i32 {
+    ffi_wrap(|| {
+        let mut map = conns().lock().unwrap();
+        let conn = match map.get_mut(&handle) {
+            Some(c) => c,
+            None => return -1,
+        };
+        let tcp = match conn {
+            TlsConn::Client(ref s) => s.get_ref(),
+            TlsConn::Server(ref s) => s.get_ref(),
+        };
+        match tcp.set_nonblocking(nonblock != 0) {
+            Ok(()) => 0,
+            Err(e) => {
+                set_last_error(format!("set_nonblocking: {}", e));
+                -1
+            }
+        }
+    })
+}
+
+/// Get the raw fd from a TLS connection (for poll/select).
+/// Returns fd (>=0) or -1 on error.
+#[no_mangle]
+pub extern "C" fn jerboa_tls_get_fd(handle: u64) -> i32 {
+    use std::os::unix::io::AsRawFd;
+    let map = conns().lock().unwrap();
+    match map.get(&handle) {
+        Some(TlsConn::Client(ref s)) => s.get_ref().as_raw_fd(),
+        Some(TlsConn::Server(ref s)) => s.get_ref().as_raw_fd(),
+        None => -1,
+    }
+}
