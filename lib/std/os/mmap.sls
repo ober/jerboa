@@ -244,65 +244,95 @@
     (let ([u (mmap-u16-ref region offset endianness)])
       (if (>= u #x8000) (- u #x10000) u)))
 
+  ;; Native endianness detection (for fast-path direct loads)
+  (define *native-endian*
+    (if (eq? (native-endianness) (endianness little)) 'little 'big))
+
   (define (mmap-u32-ref region offset endianness)
     (mmap-check-bounds region offset 4 'mmap-u32-ref)
-    (let* ([addr (+ (mmap-region-addr region) offset)]
-           [b0   (foreign-ref 'unsigned-8 addr 0)]
-           [b1   (foreign-ref 'unsigned-8 addr 1)]
-           [b2   (foreign-ref 'unsigned-8 addr 2)]
-           [b3   (foreign-ref 'unsigned-8 addr 3)])
-      (case endianness
-        [(little)
-         (bitwise-ior b0
-           (bitwise-arithmetic-shift b1 8)
-           (bitwise-arithmetic-shift b2 16)
-           (bitwise-arithmetic-shift b3 24))]
-        [(big)
-         (bitwise-ior (bitwise-arithmetic-shift b0 24)
-           (bitwise-arithmetic-shift b1 16)
-           (bitwise-arithmetic-shift b2 8)
-           b3)])))
+    (let ([addr (+ (mmap-region-addr region) offset)])
+      (if (eq? endianness *native-endian*)
+          ;; Fast path: single 32-bit load
+          (foreign-ref 'unsigned-32 addr 0)
+          ;; Slow path: byte-swap
+          (let ([b0 (foreign-ref 'unsigned-8 addr 0)]
+                [b1 (foreign-ref 'unsigned-8 addr 1)]
+                [b2 (foreign-ref 'unsigned-8 addr 2)]
+                [b3 (foreign-ref 'unsigned-8 addr 3)])
+            (case endianness
+              [(little)
+               (bitwise-ior b0
+                 (bitwise-arithmetic-shift b1 8)
+                 (bitwise-arithmetic-shift b2 16)
+                 (bitwise-arithmetic-shift b3 24))]
+              [(big)
+               (bitwise-ior (bitwise-arithmetic-shift b0 24)
+                 (bitwise-arithmetic-shift b1 16)
+                 (bitwise-arithmetic-shift b2 8)
+                 b3)])))))
 
   (define (mmap-u32-set! region offset val endianness)
     (mmap-check-bounds region offset 4 'mmap-u32-set!)
     (let ([addr (+ (mmap-region-addr region) offset)])
-      (case endianness
-        [(little)
-         (foreign-set! 'unsigned-8 addr 0 (bitwise-and val #xff))
-         (foreign-set! 'unsigned-8 addr 1 (bitwise-and (bitwise-arithmetic-shift val -8) #xff))
-         (foreign-set! 'unsigned-8 addr 2 (bitwise-and (bitwise-arithmetic-shift val -16) #xff))
-         (foreign-set! 'unsigned-8 addr 3 (bitwise-and (bitwise-arithmetic-shift val -24) #xff))]
-        [(big)
-         (foreign-set! 'unsigned-8 addr 0 (bitwise-and (bitwise-arithmetic-shift val -24) #xff))
-         (foreign-set! 'unsigned-8 addr 1 (bitwise-and (bitwise-arithmetic-shift val -16) #xff))
-         (foreign-set! 'unsigned-8 addr 2 (bitwise-and (bitwise-arithmetic-shift val -8) #xff))
-         (foreign-set! 'unsigned-8 addr 3 (bitwise-and val #xff))])))
+      (if (eq? endianness *native-endian*)
+          ;; Fast path: single 32-bit store
+          (foreign-set! 'unsigned-32 addr 0 val)
+          ;; Slow path: byte-swap
+          (case endianness
+            [(little)
+             (foreign-set! 'unsigned-8 addr 0 (bitwise-and val #xff))
+             (foreign-set! 'unsigned-8 addr 1 (bitwise-and (bitwise-arithmetic-shift val -8) #xff))
+             (foreign-set! 'unsigned-8 addr 2 (bitwise-and (bitwise-arithmetic-shift val -16) #xff))
+             (foreign-set! 'unsigned-8 addr 3 (bitwise-and (bitwise-arithmetic-shift val -24) #xff))]
+            [(big)
+             (foreign-set! 'unsigned-8 addr 0 (bitwise-and (bitwise-arithmetic-shift val -24) #xff))
+             (foreign-set! 'unsigned-8 addr 1 (bitwise-and (bitwise-arithmetic-shift val -16) #xff))
+             (foreign-set! 'unsigned-8 addr 2 (bitwise-and (bitwise-arithmetic-shift val -8) #xff))
+             (foreign-set! 'unsigned-8 addr 3 (bitwise-and val #xff))]))))
 
   (define (mmap-s32-ref region offset endianness)
-    (let ([u (mmap-u32-ref region offset endianness)])
-      (if (>= u #x80000000) (- u #x100000000) u)))
+    (mmap-check-bounds region offset 4 'mmap-s32-ref)
+    (let ([addr (+ (mmap-region-addr region) offset)])
+      (if (eq? endianness *native-endian*)
+          (foreign-ref 'integer-32 addr 0)
+          (let ([u (mmap-u32-ref region offset endianness)])
+            (if (>= u #x80000000) (- u #x100000000) u)))))
 
   (define (mmap-u64-ref region offset endianness)
     (mmap-check-bounds region offset 8 'mmap-u64-ref)
-    (let* ([lo (mmap-u32-ref region offset endianness)]
-           [hi (mmap-u32-ref region (+ offset 4) endianness)])
-      (case endianness
-        [(little) (bitwise-ior lo (bitwise-arithmetic-shift hi 32))]
-        [(big)    (bitwise-ior (bitwise-arithmetic-shift lo 32) hi)])))
+    (let ([addr (+ (mmap-region-addr region) offset)])
+      (if (eq? endianness *native-endian*)
+          ;; Fast path: single 64-bit load
+          (foreign-ref 'unsigned-64 addr 0)
+          ;; Slow path: assemble from two 32-bit reads
+          (let* ([lo (mmap-u32-ref region offset endianness)]
+                 [hi (mmap-u32-ref region (+ offset 4) endianness)])
+            (case endianness
+              [(little) (bitwise-ior lo (bitwise-arithmetic-shift hi 32))]
+              [(big)    (bitwise-ior (bitwise-arithmetic-shift lo 32) hi)])))))
 
   (define (mmap-u64-set! region offset val endianness)
     (mmap-check-bounds region offset 8 'mmap-u64-set!)
-    (case endianness
-      [(little)
-       (mmap-u32-set! region offset (bitwise-and val #xffffffff) 'little)
-       (mmap-u32-set! region (+ offset 4) (bitwise-arithmetic-shift val -32) 'little)]
-      [(big)
-       (mmap-u32-set! region offset (bitwise-arithmetic-shift val -32) 'big)
-       (mmap-u32-set! region (+ offset 4) (bitwise-and val #xffffffff) 'big)]))
+    (let ([addr (+ (mmap-region-addr region) offset)])
+      (if (eq? endianness *native-endian*)
+          ;; Fast path: single 64-bit store
+          (foreign-set! 'unsigned-64 addr 0 val)
+          ;; Slow path: split into two 32-bit writes
+          (case endianness
+            [(little)
+             (mmap-u32-set! region offset (bitwise-and val #xffffffff) 'little)
+             (mmap-u32-set! region (+ offset 4) (bitwise-arithmetic-shift val -32) 'little)]
+            [(big)
+             (mmap-u32-set! region offset (bitwise-arithmetic-shift val -32) 'big)
+             (mmap-u32-set! region (+ offset 4) (bitwise-and val #xffffffff) 'big)]))))
 
   (define (mmap-s64-ref region offset endianness)
-    (let ([u (mmap-u64-ref region offset endianness)])
-      (if (>= u (expt 2 63)) (- u (expt 2 64)) u)))
+    (mmap-check-bounds region offset 8 'mmap-s64-ref)
+    (let ([addr (+ (mmap-region-addr region) offset)])
+      (if (eq? endianness *native-endian*)
+          (foreign-ref 'integer-64 addr 0)
+          (let ([u (mmap-u64-ref region offset endianness)])
+            (if (>= u (expt 2 63)) (- u (expt 2 64)) u)))))
 
   ;;; ========== Copy to/from bytevector ==========
 

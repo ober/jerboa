@@ -123,7 +123,8 @@
       (mutable count)                ;; Number of live objects
       (mutable capacity)             ;; Max objects before grow
       (mutable file-path)            ;; Backing file path
-      (mutable clos-class)))         ;; The CLOS class object
+      (mutable clos-class)           ;; The CLOS class object
+      (mutable slot-layout)))        ;; Hashtable: slot-name -> (offset . type) [fast path]
 
   ;; =========================================================================
   ;; Tagged pointer (mptr)
@@ -234,6 +235,8 @@
         (%c-close (%odb-lock-fd store))
         (%odb-lock-fd-set! store #f))
       (%odb-open?-set! store #f)
+      ;; Clear tag->info cache (stale after close)
+      (hashtable-clear! *tag->info*)
       (when (eq? (*odb*) store) (*odb* #f))))
 
   (define (odb-sync . opts)
@@ -295,7 +298,8 @@
                                       (quotient (- (mmap-region-size region)
                                                    *header-size*)
                                                 rec-sz)
-                                      file-path #f)])
+                                      file-path #f
+                                      (make-eq-hashtable))])
                           (hashtable-set! (%odb-classes store) name info)
                           (when (> tag (%odb-next-tag store))
                             (%odb-next-tag-set! store (+ tag 1)))
@@ -346,6 +350,17 @@
           (string->symbol (substring s 1 (string-length s)))
           t)))
 
+  ;; Build combined slot-name -> (offset . type) hashtable for O(1) lookup
+  (define (build-slot-layout slot-names slot-types slot-offsets)
+    (let ([ht (make-eq-hashtable)])
+      (for-each
+        (lambda (name type)
+          (let ([off (hashtable-ref slot-offsets name #f)])
+            (when off
+              (hashtable-set! ht name (cons off type)))))
+        slot-names slot-types)
+      ht))
+
   (define (register-persistent-class! name slot-specs clos-class)
     (let ([store (*odb*)])
       (unless store (error 'register-persistent-class! "no open store"))
@@ -361,6 +376,8 @@
                 (persistent-class-info-slot-types-set! existing slot-types)
                 (persistent-class-info-slot-offsets-set! existing slot-offsets)
                 (persistent-class-info-record-size-set! existing record-size)
+                (persistent-class-info-slot-layout-set!
+                  existing (build-slot-layout slot-names slot-types slot-offsets))
                 existing)
               ;; Create new
               (let* ([tag (%odb-next-tag store)]
@@ -373,7 +390,8 @@
                              tag name slot-names slot-types
                              slot-offsets record-size
                              #f 0 *initial-capacity* file-path
-                             clos-class)])
+                             clos-class
+                             (build-slot-layout slot-names slot-types slot-offsets))])
                 ;; Create backing file
                 (create-backing-file! file-path file-size)
                 ;; Memory-map it
@@ -478,18 +496,20 @@
   ;; A persistent object in Scheme is a lightweight proxy: (tag . offset).
   ;; It references data in the mmap region, not heap memory.
 
-  ;; Persistent objects are CLOS instances with hidden %odb-tag, %odb-offset, %odb-store slots.
-  ;; These accessors extract the proxy info from any persistent CLOS object.
+  ;; Persistent objects are CLOS instances with hidden slots:
+  ;;   %odb-tag, %odb-offset, %odb-store, %odb-info
+  ;; Storing %odb-info directly avoids the tag->info scan on every access.
 
   (define (odb-proxy? obj)
     (and (instance? obj)
-         (slot-exists? obj '%odb-tag)
-         (slot-bound? obj '%odb-tag)
-         (not (not (slot-ref obj '%odb-tag)))))
+         (slot-exists? obj '%odb-info)
+         (slot-bound? obj '%odb-info)
+         (not (not (slot-ref obj '%odb-info)))))
 
   (define (odb-proxy-tag obj)    (slot-ref obj '%odb-tag))
   (define (odb-proxy-offset obj) (slot-ref obj '%odb-offset))
   (define (odb-proxy-store obj)  (slot-ref obj '%odb-store))
+  (define (odb-proxy-info obj)   (slot-ref obj '%odb-info))
 
   ;; Create a CLOS persistent object wrapper from raw mmap data
   (define (make-persistent-proxy tag offset store)
@@ -500,9 +520,9 @@
             (slot-set! obj '%odb-tag tag)
             (slot-set! obj '%odb-offset offset)
             (slot-set! obj '%odb-store store)
+            (slot-set! obj '%odb-info info)
             obj)
           ;; Fallback: class not yet defined (pre-registration scan)
-          ;; Use a simple vector as placeholder
           (vector 'odb-proxy tag offset store))))
 
   (define (proxy->info proxy)
@@ -534,18 +554,17 @@
   ;; =========================================================================
 
   (define (odb-slot-ref proxy slot-name)
-    (let* ([info (proxy->info proxy)]
-           [region (persistent-class-info-region info)]
-           [offset (odb-proxy-offset proxy)]
-           [slot-off (hashtable-ref (persistent-class-info-slot-offsets info)
-                                    slot-name #f)]
-           [slot-idx (list-index slot-name (persistent-class-info-slot-names info))]
-           [type (and slot-idx (list-ref (persistent-class-info-slot-types info)
-                                         slot-idx))])
-      (unless slot-off
+    (let* ([info (odb-proxy-info proxy)]
+           [layout-entry (hashtable-ref (persistent-class-info-slot-layout info)
+                                        slot-name #f)])
+      (unless layout-entry
         (error 'odb-slot-ref "no such slot" slot-name
                (persistent-class-info-name info)))
-      (let ([raw (odb-slot-ref-raw region offset slot-off type)])
+      (let* ([slot-off (car layout-entry)]
+             [type (cdr layout-entry)]
+             [region (persistent-class-info-region info)]
+             [offset (odb-proxy-offset proxy)]
+             [raw (odb-slot-ref-raw region offset slot-off type)])
         ;; For mptr types, return a proxy
         (if (and (eq? type 'mptr) (> raw 0))
             (make-persistent-proxy (mptr-tag raw) (mptr-offset raw)
@@ -553,24 +572,22 @@
             raw))))
 
   (define (odb-slot-set! proxy slot-name value)
-    (let* ([info (proxy->info proxy)]
-           [region (persistent-class-info-region info)]
-           [offset (odb-proxy-offset proxy)]
-           [slot-off (hashtable-ref (persistent-class-info-slot-offsets info)
-                                    slot-name #f)]
-           [slot-idx (list-index slot-name (persistent-class-info-slot-names info))]
-           [type (and slot-idx (list-ref (persistent-class-info-slot-types info)
-                                         slot-idx))])
-      (unless slot-off
+    (let* ([info (odb-proxy-info proxy)]
+           [layout-entry (hashtable-ref (persistent-class-info-slot-layout info)
+                                        slot-name #f)])
+      (unless layout-entry
         (error 'odb-slot-set! "no such slot" slot-name
                (persistent-class-info-name info)))
-      ;; Convert proxy values to mptrs
-      (let ([raw (if (and (eq? type 'mptr) (odb-proxy? value))
-                     (make-mptr (odb-proxy-tag value) (odb-proxy-offset value))
-                     value)])
+      (let* ([slot-off (car layout-entry)]
+             [type (cdr layout-entry)]
+             [region (persistent-class-info-region info)]
+             [offset (odb-proxy-offset proxy)]
+             ;; Convert proxy values to mptrs
+             [raw (if (and (eq? type 'mptr) (odb-proxy? value))
+                      (make-mptr (odb-proxy-tag value) (odb-proxy-offset value))
+                      value)])
         (odb-slot-set!-raw region offset slot-off type raw)
-        (let ([store (odb-proxy-store proxy)])
-          (%odb-dirty?-set! store #t)))))
+        (%odb-dirty?-set! (odb-proxy-store proxy) #t))))
 
   (define (list-index item lst)
     (let loop ([l lst] [i 0])
@@ -602,6 +619,7 @@
       (slot-set! obj '%odb-tag (persistent-class-info-tag info))
       (slot-set! obj '%odb-offset offset)
       (slot-set! obj '%odb-store store)
+      (slot-set! obj '%odb-info info)
       ;; Apply initargs to persistent slots
       (let loop ([args initargs])
         (when (and (pair? args) (pair? (cdr args)))
@@ -886,7 +904,8 @@
                         (datum->syntax #'class-name n))
                       '((%odb-tag :initform #f)
                         (%odb-offset :initform #f)
-                        (%odb-store :initform #f)))
+                        (%odb-store :initform #f)
+                        (%odb-info :initform #f)))
                  ;; User-defined slots with virtual allocation
                  (map (lambda (sd)
                         (let ([name (car sd)]
