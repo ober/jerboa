@@ -28,7 +28,6 @@ Gerbil has ~438 `:std/*` modules. Jerboa currently implements 51. This document 
 | [chez-https](https://github.com/ober/chez-https) | HTTP client+server | `(std net request)`, `(std net httpd)` |
 | [chez-zlib](https://github.com/ober/chez-zlib) | zlib compression | `(std compress zlib)` |
 | [chez-pcre2](https://github.com/ober/chez-pcre2) | PCRE2 regex | `(std pcre2)` |
-| [chez-yaml](https://github.com/ober/chez-yaml) | YAML parser | `(std text yaml)` |
 | [chez-leveldb](https://github.com/ober/chez-leveldb) | LevelDB | `(std db leveldb)` |
 
 ### Completed (New)
@@ -40,6 +39,12 @@ Gerbil has ~438 `:std/*` modules. Jerboa currently implements 51. This document 
 | [chez-crypto](https://github.com/ober/chez-crypto) | OpenSSL EVP | `(std crypto cipher)`, `(std crypto hmac)`, `(std crypto pkey)`, `(std crypto kdf)`, `(std crypto etc)` | Done |
 | [chez-sqlite](https://github.com/ober/chez-sqlite) | SQLite3 | `(std db sqlite)` | Done |
 | [chez-postgresql](https://github.com/ober/chez-postgresql) | libpq | `(std db postgresql)` | Done |
+
+### Replaced (No Longer Needed)
+
+| Library | Replaced By | Notes |
+|---------|------------|-------|
+| [chez-yaml](https://github.com/ober/chez-yaml) | Pure Scheme `(std text yaml)` | Roundtrip support: preserves comments, key ordering, scalar styles. No C dependency. 58 tests. |
 
 ## Pure Scheme Modules (No External Deps)
 

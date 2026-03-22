@@ -63,8 +63,13 @@ These are pure C glue — no logic beyond marshaling:
 
 | Library | Why chez-* |
 |---------|-----------|
-| chez-yaml | Pure parser — no concurrency, no resource management, just string → data |
 | chez-r7rs | Standards compliance layer — must be stock Chez by definition |
+
+### Replaced by pure Scheme (no FFI needed)
+
+| Library | Replacement | Notes |
+|---------|------------|-------|
+| chez-yaml | `(std text yaml)` — pure Scheme | Roundtrip support (preserves comments, key ordering, scalar styles). No C dependency. Eliminates libyaml attack surface. |
 
 ### Migrated to jerboa (completed)
 

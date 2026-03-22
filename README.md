@@ -100,6 +100,7 @@ scheme --libdirs lib --script your-file.ss
 | `(std text utf8)` | UTF-8 utilities |
 | `(std text csv)` | CSV read/write |
 | `(std text xml)` | SXML → XML serialization |
+| `(std text yaml)` | YAML load/dump with roundtrip support (pure Scheme, preserves comments/ordering/styles) |
 | `(std os env)` | `getenv`, `setenv`, `unsetenv` |
 | `(std os temporaries)` | Temporary file creation |
 | `(std os signal)` | POSIX signal constants + handlers |
@@ -142,7 +143,6 @@ scheme --libdirs lib --script your-file.ss
 | `(std net httpd)` | [chez-https](https://github.com/ober/chez-https) | `httpd-start`, `httpd-route`, `http-respond-json`, etc. |
 | `(std net ssl)` | [chez-ssl](https://github.com/ober/chez-ssl) | `ssl-connect`, `tcp-connect`, `tcp-listen`, TLS/TCP networking |
 | `(std compress zlib)` | [chez-zlib](https://github.com/ober/chez-zlib) | `gzip-bytevector`, `gunzip-bytevector`, `deflate-bytevector` |
-| `(std text yaml)` | [chez-yaml](https://github.com/ober/chez-yaml) | `yaml-load`, `yaml-dump`, `yaml-load-string`, `yaml-dump-string` |
 | `(std db leveldb)` | [chez-leveldb](https://github.com/ober/chez-leveldb) | `leveldb-open`, `leveldb-put`, `leveldb-get`, iterators, batches |
 | `(std db sqlite)` | [chez-sqlite](https://github.com/ober/chez-sqlite) | `sqlite-open`, `sqlite-query`, `sqlite-eval`, prepared statements |
 | `(std db postgresql)` | [chez-postgresql](https://github.com/ober/chez-postgresql) | `pg-connect`, `pg-query`, `pg-eval`, parameterized queries |
@@ -184,7 +184,7 @@ Runs 289 core tests across reader, core macros, runtime, standard library, FFI, 
 ## Requirements
 
 - [Chez Scheme](https://cisco.github.io/ChezScheme/) 10.x (stock, unmodified)
-- Optional: [chez-*](https://github.com/ober) libraries for networking, compression, PCRE2, YAML, LevelDB, SQLite, PostgreSQL, epoll, inotify, crypto
+- Optional: [chez-*](https://github.com/ober) libraries for networking, compression, PCRE2, LevelDB, SQLite, PostgreSQL, epoll, inotify, crypto
 
 ## Project Structure
 
@@ -223,7 +223,11 @@ lib/
       utf8.sls         # :std/text/utf8
       csv.sls          # :std/text/csv
       xml.sls          # :std/text/xml
-      yaml.sls         # :std/text/yaml (wraps chez-yaml)
+      yaml.sls         # :std/text/yaml (pure Scheme, roundtrip)
+      yaml/
+        nodes.sls      # AST record types
+        reader.sls     # YAML parser
+        writer.sls     # YAML emitter
     os/
       path.sls         # :std/os/path
       env.sls          # :std/os/env
@@ -267,6 +271,7 @@ tests/
   test-modules.ss      # 8 module path tests
   test-expanded-stdlib.ss  # 76 expanded stdlib tests
   test-wrappers.ss     # 27 wrapper module tests
+  test-yaml-roundtrip.ss  # 58 YAML roundtrip tests
 ```
 
 ## What Gerbil Code Works

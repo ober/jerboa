@@ -263,7 +263,8 @@ Phases 1-4 are implemented and tested (42 tests in `tests/test-security2-parsers
 | HTTP/2 | frame size cap | 16 KB | Per-frame |
 | WebSocket | payload cap | 64 MB | Per-message |
 | Zlib | decompression limit | configurable | Output size |
-| YAML | input size limit | configurable | Total input |
+| YAML | input size limit | configurable (`*yaml-max-input-size*`, 10 MB) | Total input |
+| YAML | nesting depth limit | configurable (`*yaml-max-depth*`, 512) | Recursion depth |
 | Actor messages | `*max-message-size*` | 1 MB | Per-message |
 
 ### Other hardening

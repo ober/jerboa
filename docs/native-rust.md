@@ -22,13 +22,13 @@ Replace Jerboa's 10+ C library dependencies with a single Rust shared library. E
 
 ## Motivation
 
-Jerboa currently links 10+ C shared libraries for crypto, TLS, compression, regex, databases, YAML, and OS integration. Each C library is an independent attack surface: its own CVE history, its own build system, its own ABI compatibility concerns.
+Jerboa currently links 9+ C shared libraries for crypto, TLS, compression, regex, databases, and OS integration. (YAML was previously a C dependency but is now pure Scheme.) Each C library is an independent attack surface: its own CVE history, its own build system, its own ABI compatibility concerns.
 
 Replacing them with a single Rust shared library (`libjerboa_native.so`) provides:
 
 1. **Memory safety** across all native code — buffer overflows, use-after-free, and double-free become compile-time errors
 2. **A single dependency** instead of 10+ — one build, one audit surface, one update path
-3. **Solved vulnerability classes** — ReDoS eliminated (Rust regex uses NFA, not backtracking), timing-safe crypto by default (ring), YAML parsing without C memory bugs (unsafe-libyaml)
+3. **Solved vulnerability classes** — ReDoS eliminated (Rust regex uses NFA, not backtracking), timing-safe crypto by default (ring). (YAML parsing is now pure Scheme — no C/Rust needed.)
 4. **Stable C ABI** — Rust's `extern "C"` produces `.so` files that Chez Scheme loads identically to C libraries
 5. **Reproducible builds** — Cargo.lock pins every transitive dependency with exact hashes
 
@@ -58,7 +58,7 @@ Replacing them with a single Rust shared library (`libjerboa_native.so`) provide
 | **libsqlite3.so**          | chez-sqlite     | `std/db/sqlite`     | SQLite database             |
 | **libpq.so**               | chez-postgresql | `std/db/postgresql` | PostgreSQL client           |
 | **libleveldb.so**          | chez-leveldb    | `std/db/leveldb`    | LevelDB key-value store     |
-| **libyaml.so**             | chez-yaml       | `std/text/yaml`     | YAML parsing                |
+| ~~**libyaml.so**~~         | ~~chez-yaml~~   | `std/text/yaml`     | ~~YAML parsing~~ — **Eliminated**: now pure Scheme with roundtrip support |
 | **libcurl.so** (or libssl) | chez-https      | `std/net/request`   | HTTPS client                |
 
 ### Custom C Code
@@ -142,14 +142,15 @@ pub extern "C" fn jerboa_inflate(
 }
 ```
 
-### YAML: libyaml → unsafe-libyaml
+### ~~YAML: libyaml → unsafe-libyaml~~ — SUPERSEDED
 
-| Feature | Current (libyaml) | Replacement (unsafe-libyaml) | Notes |
-|---------|-------------------|------------------------------|-------|
-| YAML 1.1 parsing | C implementation | Mechanical Rust translation of same C code | Same parser, memory-safe |
-| Event-based API | `yaml_parser_parse()` | `unsafe_libyaml::Parser` | Same event model |
+**This swap is no longer needed.** `(std text yaml)` is now a pure Scheme implementation with full roundtrip support (preserves comments, key ordering, scalar styles, block/flow collection styles). No C dependency, no FFI — the entire libyaml attack surface has been eliminated without needing a Rust replacement.
 
-`unsafe-libyaml` is a c2rust translation of libyaml, cleaned up by David Tolnay (serde maintainer). It's the exact same parser logic, byte-for-byte compatible, but compiled as Rust with bounds checking. Used by `serde_yaml` which is the standard Rust YAML library.
+The pure Scheme implementation provides:
+- Simple API: `yaml-load`, `yaml-dump` (backward-compatible with old chez-yaml interface)
+- Roundtrip API: `yaml-read`, `yaml-write` (returns/consumes AST nodes with comment and style metadata)
+- Node manipulation: `yaml-mapping-ref`, `yaml-mapping-set!`, `yaml-ref`, `yaml-set!`
+- Security: `*yaml-max-input-size*` (1MB) and `*yaml-max-depth*` (512) limits
 
 ### Databases: libsqlite3 → rusqlite, libpq → rust-postgres
 
@@ -186,7 +187,6 @@ jerboa-native-rs/
 │   ├── tls.rs                 # rustls-ffi: connect, accept, read, write
 │   ├── regex.rs               # regex crate: compile, match, find, replace
 │   ├── compress.rs            # flate2: deflate, inflate (with size limits)
-│   ├── yaml.rs                # serde_yaml: parse string/file to Scheme-friendly format
 │   ├── sqlite.rs              # rusqlite: open, prepare, bind, step, finalize
 │   ├── postgres.rs            # rust-postgres: connect, query, execute
 │   ├── secure_mem.rs          # mlock, guard pages, explicit_bzero, DONTDUMP
@@ -218,7 +218,7 @@ rustls-pemfile = "2"
 webpki-roots = "0.26"
 regex = "1"
 flate2 = "1"
-unsafe-libyaml = "0.2"
+# unsafe-libyaml — no longer needed: (std text yaml) is pure Scheme
 rusqlite = { version = "0.32", features = ["bundled"] }
 postgres = "0.19"
 landlock = "0.4"
@@ -675,7 +675,7 @@ Jerboa side:
 |-----------|----------|-----|
 | **ReDoS** | Rust regex crate | NFA engine — linear time guaranteed, backtracking impossible |
 | **Zlib decompression bombs** | flate2 (compress.rs) | Output size limit parameter in Rust wrapper |
-| **YAML C parser bugs** | unsafe-libyaml | Same parser, memory-safe Rust compilation |
+| ~~**YAML C parser bugs**~~ | ~~unsafe-libyaml~~ | **Eliminated** — `(std text yaml)` is now pure Scheme, no C/Rust needed |
 | **FFI null pointer deref** | Rust wrappers | Every function validates inputs and checks returns |
 | **FFI type confusion** | Rust type system | Rust compiler rejects type mismatches |
 | **Secret material in GC heap** | secure_mem.rs | mlock'd region outside GC, wiped on free |
@@ -852,7 +852,7 @@ Rust: `src/epoll.rs`, `src/inotify_native.rs`, `src/landlock.rs`. Scheme: `lib/s
 | Metric | Before (C libraries) | After (Rust native) |
 |--------|---------------------|---------------------|
 | Shared libraries loaded | 10+ | 1 |
-| C code in trust boundary | ~500K lines (OpenSSL + libyaml + SQLite + ...) | 0 (Rust only; C primitives inside ring are audited asm) |
+| C code in trust boundary | ~500K lines (OpenSSL + SQLite + ...; libyaml already eliminated via pure Scheme) | 0 (Rust only; C primitives inside ring are audited asm) |
 | Memory safety CVEs possible | Yes — every C library | No — Rust compiler prevents them |
 | ReDoS possible | Yes — PCRE2 backtracks | No — Rust regex uses NFA |
 | Secret wiping guarantee | No — GC copies | Yes — secure region is outside GC |
