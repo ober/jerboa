@@ -92,12 +92,20 @@
               (if re
                 ;; Return current value (version mismatch is caught at commit)
                 (stm-tvar-stm-value tv)
-                ;; 3. First read: snapshot version + value
-                (let* ([ver (stm-tvar-stm-version tv)]
-                       [val (stm-tvar-stm-value tv)])
+                ;; 3. First read: snapshot version + value atomically.
+                ;; Hold commit-mutex briefly to ensure version and value
+                ;; are consistent (prevents reading stale value with new
+                ;; version when another thread commits between the reads).
+                (let ([snapshot
+                       (begin
+                         (mutex-acquire *commit-mutex*)
+                         (let ([v (stm-tvar-stm-version tv)]
+                               [x (stm-tvar-stm-value tv)])
+                           (mutex-release *commit-mutex*)
+                           (cons v x)))])
                   (tx-rec-tx-read-set-set! tx
-                    (cons (cons tv ver) (tx-rec-tx-read-set tx)))
-                  val))))))))
+                    (cons (cons tv (car snapshot)) (tx-rec-tx-read-set tx)))
+                  (cdr snapshot)))))))))
 
   ;; ========== tvar-write! ==========
 

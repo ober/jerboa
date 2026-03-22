@@ -40,9 +40,22 @@ jerboa_t *jerboa_new(const jerboa_config_t *config) {
     /* Set up library directories */
     if (config && config->lib_dirs) {
         for (const char **dir = config->lib_dirs; *dir; dir++) {
-            char buf[4096];
+            /* Escape the directory string to prevent Scheme injection.
+             * Double any backslashes and double-quotes in the path. */
+            const char *src = *dir;
+            char escaped[8192];
+            int ei = 0;
+            for (int si = 0; src[si] && ei < (int)sizeof(escaped) - 2; si++) {
+                if (src[si] == '"' || src[si] == '\\') {
+                    escaped[ei++] = '\\';
+                }
+                escaped[ei++] = src[si];
+            }
+            escaped[ei] = '\0';
+
+            char buf[8192 + 128];
             snprintf(buf, sizeof(buf),
-                "(library-directories (cons \"%s\" (library-directories)))", *dir);
+                "(library-directories (cons \"%s\" (library-directories)))", escaped);
             Sscheme_script(buf, 0, NULL);
         }
     }
@@ -88,9 +101,18 @@ int jerboa_eval_safe(jerboa_t *j, const char *expr, jerboa_error_t *err) {
         return -1;
     }
 
-    /* Wrap in guard to catch exceptions */
-    char buf[8192];
-    snprintf(buf, sizeof(buf),
+    /* Wrap in guard to catch exceptions.
+     * NOTE: expr is interpolated directly into Scheme code here.
+     * This is internal API — callers are trusted. For untrusted input,
+     * use jerboa_eval() with a read+eval pattern instead. */
+    size_t expr_len = strlen(expr);
+    size_t buf_size = expr_len + 256;
+    char *buf = malloc(buf_size);
+    if (!buf) {
+        if (err) { err->code = -1; err->message = strdup("allocation failed"); }
+        return -1;
+    }
+    snprintf(buf, buf_size,
         "(guard (exn [#t (set! *jerboa-last-error* "
         "(if (message-condition? exn) (condition-message exn) "
         "(format \"~a\" exn))) #f]) "
@@ -103,6 +125,7 @@ int jerboa_eval_safe(jerboa_t *j, const char *expr, jerboa_error_t *err) {
     }
 
     jerboa_eval(j, buf);
+    free(buf);
 
     ptr errval = Stoplevel_value(sym);
     if (errval != Sfalse) {
@@ -111,10 +134,14 @@ int jerboa_eval_safe(jerboa_t *j, const char *expr, jerboa_error_t *err) {
             if (Sstringp(errval)) {
                 iptr len = Sstring_length(errval);
                 char *msg = malloc(len + 1);
-                for (iptr i = 0; i < len; i++)
-                    msg[i] = (char)Sstring_ref(errval, i);
-                msg[len] = '\0';
-                err->message = msg;
+                if (!msg) {
+                    err->message = strdup("allocation failed");
+                } else {
+                    for (iptr i = 0; i < len; i++)
+                        msg[i] = (char)Sstring_ref(errval, i);
+                    msg[len] = '\0';
+                    err->message = msg;
+                }
             } else {
                 err->message = strdup("unknown error");
             }
@@ -148,13 +175,14 @@ const char *jerboa_get_string(jerboa_t *j, const char *name) {
     if (!Sstringp(val)) return NULL;
 
     iptr len = Sstring_length(val);
-    /* Allocate a C string — caller should use this before next eval */
-    static char buf[65536];
-    iptr copy = (len < (iptr)sizeof(buf) - 1) ? len : (iptr)sizeof(buf) - 1;
-    for (iptr i = 0; i < copy; i++)
-        buf[i] = (char)Sstring_ref(val, i);
-    buf[copy] = '\0';
-    return buf;
+    /* Dynamically allocate to handle any string length.
+     * Caller must free the returned string with free(). */
+    char *result = malloc(len + 1);
+    if (!result) return NULL;
+    for (iptr i = 0; i < len; i++)
+        result[i] = (char)Sstring_ref(val, i);
+    result[len] = '\0';
+    return result;
 }
 
 int jerboa_get_bool(jerboa_t *j, const char *name) {
@@ -164,44 +192,77 @@ int jerboa_get_bool(jerboa_t *j, const char *name) {
 }
 
 int64_t jerboa_call_int(jerboa_t *j, const char *func, int argc, ...) {
-    /* Simple: build a call expression string */
-    char buf[4096];
-    int pos = snprintf(buf, sizeof(buf), "(%s", func);
+    /* Dynamically sized buffer: func name + up to 24 chars per int arg */
+    size_t buf_size = strlen(func) + (size_t)argc * 24 + 64;
+    char *buf = malloc(buf_size);
+    if (!buf) return 0;
+    int pos = snprintf(buf, buf_size, "(%s", func);
 
     va_list ap;
     va_start(ap, argc);
     for (int i = 0; i < argc; i++) {
         int64_t arg = va_arg(ap, int64_t);
-        pos += snprintf(buf + pos, sizeof(buf) - pos, " %ld", (long)arg);
+        pos += snprintf(buf + pos, buf_size - pos, " %ld", (long)arg);
     }
     va_end(ap);
-    snprintf(buf + pos, sizeof(buf) - pos, ")");
+    snprintf(buf + pos, buf_size - pos, ")");
 
     /* Eval and capture result */
-    char full[4096 + 64];
-    snprintf(full, sizeof(full), "(define *jerboa-result* %s)", buf);
+    size_t full_size = buf_size + 64;
+    char *full = malloc(full_size);
+    if (!full) { free(buf); return 0; }
+    snprintf(full, full_size, "(define *jerboa-result* %s)", buf);
+    free(buf);
     jerboa_eval(j, full);
+    free(full);
     return jerboa_get_int(j, "*jerboa-result*");
 }
 
-const char *jerboa_call_string(jerboa_t *j, const char *func, int argc, ...) {
-    char buf[4096];
-    int pos = snprintf(buf, sizeof(buf), "(%s", func);
+char *jerboa_call_string(jerboa_t *j, const char *func, int argc, ...) {
+    /* Compute required buffer size: measure all string args first */
+    va_list ap_size;
+    va_start(ap_size, argc);
+    size_t total_arg_len = 0;
+    for (int i = 0; i < argc; i++) {
+        int64_t arg = va_arg(ap_size, int64_t);
+        const char *s = (const char *)(intptr_t)arg;
+        /* Each char could be escaped to 2 chars, plus quotes and space */
+        total_arg_len += (s ? strlen(s) * 2 : 0) + 4;
+    }
+    va_end(ap_size);
+
+    size_t buf_size = strlen(func) + total_arg_len + 64;
+    char *buf = malloc(buf_size);
+    if (!buf) return NULL;
+    int pos = snprintf(buf, buf_size, "(%s", func);
 
     va_list ap;
     va_start(ap, argc);
     for (int i = 0; i < argc; i++) {
         int64_t arg = va_arg(ap, int64_t);
-        /* Assume it's a string pointer */
         const char *s = (const char *)(intptr_t)arg;
-        pos += snprintf(buf + pos, sizeof(buf) - pos, " \"%s\"", s);
+        /* Escape the string to prevent Scheme injection */
+        pos += snprintf(buf + pos, buf_size - pos, " \"");
+        if (s) {
+            for (int si = 0; s[si] && (size_t)pos < buf_size - 2; si++) {
+                if (s[si] == '"' || s[si] == '\\') {
+                    buf[pos++] = '\\';
+                }
+                buf[pos++] = s[si];
+            }
+        }
+        pos += snprintf(buf + pos, buf_size - pos, "\"");
     }
     va_end(ap);
-    snprintf(buf + pos, sizeof(buf) - pos, ")");
+    snprintf(buf + pos, buf_size - pos, ")");
 
-    char full[4096 + 64];
-    snprintf(full, sizeof(full), "(define *jerboa-result* %s)", buf);
+    size_t full_size = buf_size + 64;
+    char *full = malloc(full_size);
+    if (!full) { free(buf); return NULL; }
+    snprintf(full, full_size, "(define *jerboa-result* %s)", buf);
+    free(buf);
     jerboa_eval(j, full);
+    free(full);
     return jerboa_get_string(j, "*jerboa-result*");
 }
 

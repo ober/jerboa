@@ -49,8 +49,20 @@
          'void*
          (if (and (pair? type) (eq? (car type) 'nonnull-pointer))
            'void*
-           ;; Pass through — may be a Chez type already
-           type))]))
+           ;; Validate against known Chez FFI types before passing through.
+           ;; This catches typos and unsupported types at expand time.
+           (let ([known-chez-types
+                  '(int unsigned integer-8 unsigned-8 integer-16 unsigned-16
+                    integer-32 unsigned-32 integer-64 unsigned-64
+                    float double char boolean void string scheme-object
+                    size_t ssize_t short unsigned-short long unsigned-long
+                    void* wchar_t ptrdiff_t
+                    u8* fixnum iptr uptr)])
+             (if (memq type known-chez-types)
+               type
+               (error 'translate-ffi-type
+                 "unknown FFI type (not a recognized Gambit or Chez type)"
+                 type)))))]))
 
   ;; Runtime helper: load-shared-object with search
   (define (load-shared-object* name)

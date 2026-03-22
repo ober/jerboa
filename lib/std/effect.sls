@@ -30,9 +30,13 @@
     (sealed #t))
 
   ;; ========== Handler stack ==========
-  ;; Thread-local stack of frames.
+  ;; Thread-local stack of frames (via make-thread-parameter).
   ;; Each frame: eq-hashtable mapping effect-descriptor -> ((op-sym . proc) ...)
   ;; proc :: (k arg ...) -> any,  k = one-shot continuation
+  ;;
+  ;; Thread safety: Each thread has its own independent handler stack.
+  ;; The stack is extended via parameterize (cons), never mutated in place,
+  ;; so concurrent reads within the same thread during effect dispatch are safe.
 
   (define *effect-handlers* (make-thread-parameter '()))
 

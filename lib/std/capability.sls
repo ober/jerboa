@@ -211,11 +211,17 @@
               #t
               (loop (cdr ps))))))))
 
+  (define (%check-cap-valid who cap)
+    ;; Validate capability on every use, not just at creation/attenuation.
+    (unless (capability? cap)
+      (error who "not a capability" cap))
+    (unless (capability-valid? cap)
+      (error who "capability has been revoked" cap)))
+
   (define (cap-file-open cap path mode)
     ;; Open a file with capability check.
     ;; mode: 'r | 'w | 'rw
-    (unless (and (capability? cap) (capability-valid? cap))
-      (error 'cap-file-open "invalid or revoked capability"))
+    (%check-cap-valid 'cap-file-open cap)
     (unless (fs-capability? cap)
       (error 'cap-file-open "requires fs capability" cap))
     (let ([need-write (or (eq? mode 'w) (eq? mode 'rw))])
@@ -245,8 +251,7 @@
 
   (define (cap-connect cap host port)
     ;; Check network capability before allowing connection.
-    (unless (and (capability? cap) (capability-valid? cap))
-      (error 'cap-connect "invalid or revoked capability"))
+    (%check-cap-valid 'cap-connect cap)
     (unless (net-capability? cap)
       (error 'cap-connect "requires net capability" cap))
     (let ([allowed (net-cap-allowed-hosts cap)]

@@ -379,6 +379,12 @@
                                          (annotated-datum-value x)
                                          x))
                                      items)))
+                 ;; Validate all elements are valid u8 values (0-255)
+                 (for-each (lambda (x)
+                             (unless (and (fixnum? x) (fx>= x 0) (fx<= x 255))
+                               (error 'jerboa-read
+                                 "invalid bytevector element (must be 0-255)" x)))
+                           raw-items)
                  (annotate rs (apply bytevector raw-items) loc))))))
 
         ;; #\ character

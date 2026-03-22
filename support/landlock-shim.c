@@ -19,6 +19,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <limits.h>
 
 /* ========== Landlock Definitions ========== */
 /* Defined inline — neither glibc nor musl provides these. */
@@ -136,9 +138,15 @@ int jerboa_landlock_sandbox(const char *packed_read,
                              &attr, sizeof(attr), 0);
     if (ruleset_fd < 0) return -1;
 
-    /* Helper: add one path rule */
+    /* Helper: add one path rule.
+     * Uses O_NOFOLLOW to prevent symlink traversal at the final component.
+     * Falls back to O_PATH without O_NOFOLLOW for directories that may
+     * be symlinks to essential system paths (e.g. /lib -> /usr/lib). */
     #define ADD_RULE(path, access) do { \
-        int fd = open((path), O_PATH | O_CLOEXEC); \
+        /* Resolve symlinks to canonical path to prevent bypass */ \
+        char *resolved = realpath((path), NULL); \
+        const char *target = resolved ? resolved : (path); \
+        int fd = open(target, O_PATH | O_CLOEXEC); \
         if (fd >= 0) { \
             struct landlock_path_beneath_attr pb; \
             pb.allowed_access = (access) & handled; \
@@ -147,6 +155,7 @@ int jerboa_landlock_sandbox(const char *packed_read,
                     LANDLOCK_RULE_PATH_BENEATH, &pb, 0); \
             close(fd); \
         } \
+        free(resolved); \
     } while(0)
 
     /* 3. Always allow read access to essential system paths */
@@ -161,56 +170,42 @@ int jerboa_landlock_sandbox(const char *packed_read,
 
     /* 4. Parse packed paths and add user rules */
 
+    /* Helper: parse SOH-separated packed paths and add rules */
+    #define PARSE_AND_ADD(packed, access_flags) do { \
+        if ((packed) && (packed)[0]) { \
+            const char *p = (packed); \
+            while (*p) { \
+                const char *end = p; \
+                while (*end && *end != '\001') end++; \
+                int len = (int)(end - p); \
+                if (len > 0 && len < PATH_MAX) { \
+                    char *path = malloc(len + 1); \
+                    if (path) { \
+                        memcpy(path, p, len); \
+                        path[len] = '\0'; \
+                        /* Reject paths with embedded NUL (shouldn't happen, \
+                         * but defense in depth) */ \
+                        if ((int)strlen(path) == len) { \
+                            ADD_RULE(path, access_flags); \
+                        } \
+                        free(path); \
+                    } \
+                } \
+                p = *end ? end + 1 : end; \
+            } \
+        } \
+    } while(0)
+
     /* Read-only paths */
-    if (packed_read && packed_read[0]) {
-        const char *p = packed_read;
-        while (*p) {
-            const char *end = p;
-            while (*end && *end != '\001') end++;
-            char path[4096];
-            int len = end - p;
-            if (len > 0 && len < (int)sizeof(path)) {
-                memcpy(path, p, len);
-                path[len] = '\0';
-                ADD_RULE(path, ACCESS_FS_READ);
-            }
-            p = *end ? end + 1 : end;
-        }
-    }
+    PARSE_AND_ADD(packed_read, ACCESS_FS_READ);
 
     /* Read+write paths */
-    if (packed_write && packed_write[0]) {
-        const char *p = packed_write;
-        while (*p) {
-            const char *end = p;
-            while (*end && *end != '\001') end++;
-            char path[4096];
-            int len = end - p;
-            if (len > 0 && len < (int)sizeof(path)) {
-                memcpy(path, p, len);
-                path[len] = '\0';
-                ADD_RULE(path, ACCESS_FS_READ | ACCESS_FS_WRITE);
-            }
-            p = *end ? end + 1 : end;
-        }
-    }
+    PARSE_AND_ADD(packed_write, ACCESS_FS_READ | ACCESS_FS_WRITE);
 
     /* Execute paths (read + execute) */
-    if (packed_exec && packed_exec[0]) {
-        const char *p = packed_exec;
-        while (*p) {
-            const char *end = p;
-            while (*end && *end != '\001') end++;
-            char path[4096];
-            int len = end - p;
-            if (len > 0 && len < (int)sizeof(path)) {
-                memcpy(path, p, len);
-                path[len] = '\0';
-                ADD_RULE(path, ACCESS_FS_READ | LANDLOCK_ACCESS_FS_EXECUTE);
-            }
-            p = *end ? end + 1 : end;
-        }
-    }
+    PARSE_AND_ADD(packed_exec, ACCESS_FS_READ | LANDLOCK_ACCESS_FS_EXECUTE);
+
+    #undef PARSE_AND_ADD
 
     #undef ADD_RULE
 

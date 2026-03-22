@@ -269,7 +269,12 @@
     (let loop ([rest kwargs])
       (cond
         [(null? rest) default]
-        [(null? (cdr rest)) default]
+        [(null? (cdr rest))
+         ;; Odd-length kwargs list: last key has no value.
+         ;; Raise error so callers don't silently lose arguments.
+         (error 'keyword-arg-ref
+           "odd number of keyword arguments (missing value for last key)"
+           (car rest))]
         [(eq? (car rest) key) (cadr rest)]
         [else (loop (cddr rest))])))
 

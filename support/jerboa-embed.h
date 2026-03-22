@@ -44,15 +44,16 @@ void      jerboa_destroy(jerboa_t *j);
 int jerboa_eval(jerboa_t *j, const char *expr);
 int jerboa_eval_safe(jerboa_t *j, const char *expr, jerboa_error_t *err);
 
-/* Value getters (for top-level variables) */
+/* Value getters (for top-level variables)
+ * jerboa_get_string returns a malloc'd string — caller must free() it. */
 int64_t     jerboa_get_int(jerboa_t *j, const char *name);
 double      jerboa_get_double(jerboa_t *j, const char *name);
-const char *jerboa_get_string(jerboa_t *j, const char *name);
+char       *jerboa_get_string(jerboa_t *j, const char *name);
 int         jerboa_get_bool(jerboa_t *j, const char *name);
 
 /* Function calls */
 int64_t     jerboa_call_int(jerboa_t *j, const char *func, int argc, ...);
-const char *jerboa_call_string(jerboa_t *j, const char *func, int argc, ...);
+char       *jerboa_call_string(jerboa_t *j, const char *func, int argc, ...);
 
 /* Argument constructors for jerboa_call_* */
 /* (These are passed as variadic args) */

@@ -77,11 +77,17 @@
     ;; acquire: thunk that returns a resource
     ;; cleanup: (lambda (resource) ...) or #f for auto-detect
     ;; body: (lambda (resource) ...)
-    (let ([resource (acquire)])
+    ;;
+    ;; If acquire succeeds, cleanup is guaranteed even if body throws.
+    ;; If acquire throws, no cleanup is attempted (nothing to clean up).
+    (let ([resource (acquire)]
+          [acquired? #t])
       (let ([do-cleanup
-             (if cleanup
-                 (lambda () (cleanup resource))
-                 (auto-cleanup resource))])
+             (lambda ()
+               (when acquired?
+                 (if cleanup
+                   (cleanup resource)
+                   ((auto-cleanup resource)))))])
         (dynamic-wind
           (lambda () (void))
           (lambda () (body resource))

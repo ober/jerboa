@@ -39,20 +39,22 @@
       [(message-condition? exn)
        (let ([msg  (condition-message exn)]
              [irrs (if (irritants-condition? exn) (condition-irritants exn) '())])
-         ;; Detect the "invalid message argument" pattern from eval context
+         ;; Detect the "invalid message argument" pattern from eval context.
+         ;; Guard with length checks before any list-ref access.
          (if (and (string? msg)
                   (>= (string-length msg) 24)
-                  (string=? (substring msg 0 24) "invalid message argument"))
+                  (string=? (substring msg 0 24) "invalid message argument")
+                  (list? irrs)
+                  (>= (length irrs) 3)
+                  (string? (list-ref irrs 1)))
            ;; irritants = (first-arg "real-msg" (rest-args...))
            ;; Extract real message and irritants from the encoded form
-           (if (and (>= (length irrs) 3)
-                    (string? (list-ref irrs 1)))
-             (make-sandbox-error
-               (list-ref irrs 1)
-               (let ([rest (list-ref irrs 2)])
-                 (if (list? rest) (cons (car irrs) rest)
-                     (list (car irrs)))))
-             (make-sandbox-error msg irrs))
+           (make-sandbox-error
+             (list-ref irrs 1)
+             (let ([rest (list-ref irrs 2)])
+               (if (and (list? rest) (not (null? irrs)))
+                 (cons (car irrs) rest)
+                 (list (car irrs)))))
            (make-sandbox-error msg irrs)))]
       [(string? exn)
        (make-sandbox-error exn '())]
@@ -101,17 +103,17 @@
                   (set! result val)
                   (set! finished? #t)
                   (condition-signal cv)))))
-          ;; Wait with timeout
+          ;; Wait with timeout (wall-clock via time-utc, not CPU time,
+          ;; so that blocked I/O operations are properly timed out)
           (with-mutex lock
             (unless finished?
-              (let ([deadline (+ (cpu-time) (* timeout-ms 1000000))])
-                (let loop ()
+              (let loop ()
+                (unless finished?
+                  (condition-wait cv lock (make-time 'time-duration
+                                           (* timeout-ms 1000000) 0))
                   (unless finished?
-                    (condition-wait cv lock (make-time 'time-duration
-                                             (* timeout-ms 1000000) 0))
-                    (unless finished?
-                      ;; Timed out
-                      (void)))))))
+                    ;; Timed out
+                    (void))))))
           (if finished?
             result
             (make-sandbox-error
@@ -128,11 +130,15 @@
   (define (sandbox-eval-string sb str)
     ;; Read and eval a string in the sandbox.
     ;; HARDENED: Uses jerboa-read (depth-limited) instead of bare read.
+    ;; Both reading and evaluation are covered by the time limit,
+    ;; so pathological input (deeply nested structures) is bounded.
     (%with-time-limit sb
       (lambda ()
         (let ([port (open-input-string str)])
           (let loop ([last (if #f #f)])
-            (let ([form (jerboa-read port)])
+            (let ([form (parameterize ([*max-read-depth* 200]
+                                       [*max-list-length* 100000])
+                          (jerboa-read port))])
               (if (eof-object? form)
                 last
                 (loop (eval form (sandbox-environment sb))))))))))
