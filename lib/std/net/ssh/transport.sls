@@ -5,6 +5,8 @@
 ;;; sequence numbers, and rekey support.
 ;;;
 ;;; FFI operations are imported from (chez-ssh crypto).
+;;; Uses (std net ssh conditions) for structured error hierarchy.
+;;; Uses (std misc guardian-pool) for TCP fd cleanup on GC.
 
 (library (std net ssh transport)
   (export
@@ -78,10 +80,15 @@
     ;; Low-level TCP I/O
     ssh-tcp-read-exact
     ssh-tcp-write-all
+
+    ;; Guardian pool for fd cleanup
+    ssh-transport-fd-pool
     )
 
   (import (chezscheme)
           (std net ssh wire)
+          (std net ssh conditions)
+          (std misc guardian-pool)
           (chez-ssh crypto))
 
   ;; ---- Constants ----
@@ -89,6 +96,15 @@
   (define MAX-PACKET-SIZE 262144)   ;; 256 KB
   (define REKEY-BYTES-THRESHOLD (* 1024 1024 1024))  ;; 1 GB
   (define REKEY-PACKETS-THRESHOLD (* 1024 1024))      ;; 1M packets
+
+  ;; ---- Guardian pool for TCP fds ----
+  ;; Safety net: when transport states are GC'd without explicit close,
+  ;; the guardian pool closes their TCP fds to prevent fd leaks.
+  (define ssh-transport-fd-pool
+    (make-guardian-pool
+      (lambda (ts)
+        (guard (e [#t (void)])
+          (ssh-crypto-tcp-close (transport-state-fd ts))))))
 
   ;; ---- Records ----
 
@@ -133,8 +149,10 @@
     (protocol
       (lambda (new)
         (lambda (fd server-version client-version)
-          (new fd #f server-version client-version
-               0 0 #f #f #f #f #f #f #f 0 0 0 0)))))
+          (let ([ts (new fd #f server-version client-version
+                         0 0 #f #f #f #f #f #f #f 0 0 0 0)])
+            (guardian-pool-register ssh-transport-fd-pool ts)
+            ts)))))
 
   ;; ---- Low-level TCP I/O ----
 
@@ -147,14 +165,14 @@
                  [tmp (make-bytevector remaining)]
                  [got (ssh-crypto-tcp-read fd tmp remaining)])
             (when (<= got 0)
-              (error 'ssh-tcp-read-exact "connection closed" off n))
+              (raise-ssh-error 'ssh-tcp-read-exact "connection closed" off n))
             (bytevector-copy! tmp 0 buf off got)
             (loop (+ off got)))))))
 
   (define (ssh-tcp-write-all fd bv)
     (let ([rc (ssh-crypto-tcp-write fd bv (bytevector-length bv))])
       (when (< rc 0)
-        (error 'ssh-tcp-write-all "write failed"))
+        (raise-ssh-error 'ssh-tcp-write-all "write failed"))
       rc))
 
   ;; ---- Connection ----
@@ -162,7 +180,8 @@
   (define (ssh-transport-connect host port)
     (let ([fd (ssh-crypto-tcp-connect host port)])
       (when (< fd 0)
-        (error 'ssh-transport-connect "connection failed" host port))
+        (raise-ssh-connection-error 'ssh-transport-connect host port
+          "TCP connection failed"))
       (ssh-crypto-tcp-set-nodelay fd 1)
       fd))
 
@@ -179,14 +198,19 @@
   (define (ssh-transport-recv-version fd)
     (let loop ([lines-read 0])
       (when (> lines-read 20)
-        (error 'ssh-transport-recv-version "too many banner lines"))
+        (raise-ssh-protocol-error 'ssh-transport-recv-version
+          "SSH version string" "excess banner lines"
+          "too many banner lines before SSH version"))
       (let line-loop ([acc '()] [count 0])
         (when (> count 255)
-          (error 'ssh-transport-recv-version "line too long"))
+          (raise-ssh-protocol-error 'ssh-transport-recv-version
+            "line <=255 bytes" "line too long"
+            "version line exceeds 255 bytes"))
         (let* ([tmp (make-bytevector 1)]
                [got (ssh-crypto-tcp-read fd tmp 1)])
           (when (<= got 0)
-            (error 'ssh-transport-recv-version "connection closed"))
+            (raise-ssh-error 'ssh-transport-recv-version
+              "connection closed during version exchange"))
           (let ([ch (bytevector-u8-ref tmp 0)])
             (cond
               [(= ch 10)  ;; \n — end of line
@@ -238,13 +262,17 @@
            [hdr (ssh-tcp-read-exact fd 4)]
            [pkt-len (car (ssh-read-uint32 hdr 0))])
       (when (or (< pkt-len 2) (> pkt-len MAX-PACKET-SIZE))
-        (error 'recv-packet-unencrypted "invalid packet length" pkt-len))
+        (raise-ssh-protocol-error 'ssh-transport-recv-packet
+          "valid packet length" pkt-len
+          "invalid unencrypted packet length"))
       (let* ([data (ssh-tcp-read-exact fd pkt-len)]
              [pad-len (bytevector-u8-ref data 0)]
              [payload-len (- pkt-len 1 pad-len)]
              [payload (make-bytevector payload-len)])
         (when (< payload-len 0)
-          (error 'recv-packet-unencrypted "invalid padding" pad-len pkt-len))
+          (raise-ssh-protocol-error 'ssh-transport-recv-packet
+            "valid padding" pad-len
+            "invalid padding in unencrypted packet"))
         (bytevector-copy! data 1 payload 0 payload-len)
         (transport-state-recv-seqno-set! ts
           (bitwise-and (+ (transport-state-recv-seqno ts) 1) #xFFFFFFFF))
@@ -280,7 +308,8 @@
              [rc (ssh-crypto-chacha20-poly1305-encrypt key seqno
                    plain (bytevector-length plain) out-buf out-len-buf)])
         (when (< rc 0)
-          (error 'send-packet-chacha20 "encryption failed"))
+          (raise-ssh-error 'ssh-transport-send-packet
+            "ChaCha20-Poly1305 encryption failed"))
         (let ([out-len (car (ssh-read-uint32 out-len-buf 0))])
           (let ([final (make-bytevector out-len)])
             (bytevector-copy! out-buf 0 final 0 out-len)
@@ -300,10 +329,14 @@
            [len-buf (make-bytevector 4)]
            [rc (ssh-crypto-chacha20-poly1305-decrypt-length key seqno enc-len-bytes len-buf)])
       (when (< rc 0)
-        (error 'recv-packet-chacha20 "length decryption failed"))
+        (raise-ssh-protocol-error 'ssh-transport-recv-packet
+          "valid encrypted length" "decryption failure"
+          "ChaCha20 length decryption failed"))
       (let* ([pkt-len (car (ssh-read-uint32 len-buf 0))])
         (when (or (< pkt-len 2) (> pkt-len MAX-PACKET-SIZE))
-          (error 'recv-packet-chacha20 "invalid packet length" pkt-len))
+          (raise-ssh-protocol-error 'ssh-transport-recv-packet
+            "valid packet length" pkt-len
+            "invalid encrypted packet length"))
         (let* ([enc-payload+tag (ssh-tcp-read-exact fd (+ pkt-len 16))]
                [full-ct (make-bytevector (+ 4 pkt-len 16))]
                [out-buf (make-bytevector (+ 4 pkt-len))]
@@ -313,12 +346,16 @@
           (let ([rc2 (ssh-crypto-chacha20-poly1305-decrypt key seqno
                        full-ct (bytevector-length full-ct) out-buf out-len-buf)])
             (when (< rc2 0)
-              (error 'recv-packet-chacha20 "decryption/authentication failed"))
+              (raise-ssh-protocol-error 'ssh-transport-recv-packet
+                "authenticated ciphertext" "decryption/auth failure"
+                "ChaCha20-Poly1305 decryption failed"))
             (let* ([pad-len (bytevector-u8-ref out-buf 4)]
                    [payload-len (- pkt-len 1 pad-len)]
                    [payload (make-bytevector payload-len)])
               (when (< payload-len 0)
-                (error 'recv-packet-chacha20 "invalid padding"))
+                (raise-ssh-protocol-error 'ssh-transport-recv-packet
+                  "valid padding" "invalid padding"
+                  "invalid padding in decrypted ChaCha20 packet"))
               (bytevector-copy! out-buf 5 payload 0 payload-len)
               (transport-state-recv-seqno-set! ts
                 (bitwise-and (+ seqno 1) #xFFFFFFFF))
@@ -363,7 +400,8 @@
                [ctx-buf (cipher-state-ctx cipher)]
                [enc-len (ssh-crypto-aes256-ctr-process ctx-buf plain (bytevector-length plain) enc-buf)])
           (when (< enc-len 0)
-            (error 'send-packet-aes256-ctr "encryption failed"))
+            (raise-ssh-error 'ssh-transport-send-packet
+              "AES-256-CTR encryption failed"))
           (ssh-tcp-write-all (transport-state-fd ts) enc-buf)
           (when (cipher-state-mac-key cipher)
             (ssh-tcp-write-all (transport-state-fd ts) mac-out))
@@ -382,17 +420,25 @@
            [enc-first (ssh-tcp-read-exact fd 16)]
            [dec-first (make-bytevector 16)]
            [_ (let ([rc (ssh-crypto-aes256-ctr-process ctx-buf enc-first 16 dec-first)])
-                (when (< rc 0) (error 'recv-packet-aes256-ctr "decrypt failed")))]
+                (when (< rc 0)
+                  (raise-ssh-protocol-error 'ssh-transport-recv-packet
+                    "decryptable data" "decryption failure"
+                    "AES-256-CTR first-block decryption failed")))]
            [pkt-len (car (ssh-read-uint32 dec-first 0))])
       (when (or (< pkt-len 2) (> pkt-len MAX-PACKET-SIZE))
-        (error 'recv-packet-aes256-ctr "invalid packet length" pkt-len))
+        (raise-ssh-protocol-error 'ssh-transport-recv-packet
+          "valid packet length" pkt-len
+          "invalid AES-256-CTR packet length"))
       (let* ([total-encrypted (+ 4 pkt-len)]
              [remaining (- total-encrypted 16)])
         (let* ([dec-rest (if (> remaining 0)
                            (let* ([enc-rest (ssh-tcp-read-exact fd remaining)]
                                   [dec-buf (make-bytevector remaining)]
                                   [rc (ssh-crypto-aes256-ctr-process ctx-buf enc-rest remaining dec-buf)])
-                             (when (< rc 0) (error 'recv-packet-aes256-ctr "decrypt failed"))
+                             (when (< rc 0)
+                               (raise-ssh-protocol-error 'ssh-transport-recv-packet
+                                 "decryptable data" "decryption failure"
+                                 "AES-256-CTR rest decryption failed"))
                              dec-buf)
                            (make-bytevector 0))]
                [full (make-bytevector total-encrypted)]
@@ -412,12 +458,16 @@
               (ssh-crypto-hmac-sha256 mac-key (bytevector-length mac-key)
                              mac-data mac-data-len mac-expected)
               (unless (bytevector=? mac-received mac-expected)
-                (error 'recv-packet-aes256-ctr "MAC verification failed"))))
+                (raise-ssh-protocol-error 'ssh-transport-recv-packet
+                  "valid MAC" "MAC mismatch"
+                  "HMAC-SHA2-256 verification failed"))))
           (let* ([pad-len (bytevector-u8-ref full 4)]
                  [payload-len (- pkt-len 1 pad-len)]
                  [payload (make-bytevector payload-len)])
             (when (< payload-len 0)
-              (error 'recv-packet-aes256-ctr "invalid padding"))
+              (raise-ssh-protocol-error 'ssh-transport-recv-packet
+                "valid padding" "invalid padding"
+                "invalid padding in decrypted AES packet"))
             (bytevector-copy! full 5 payload 0 payload-len)
             (transport-state-recv-seqno-set! ts
               (bitwise-and (+ seqno 1) #xFFFFFFFF))

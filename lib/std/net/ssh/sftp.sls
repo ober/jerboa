@@ -3,6 +3,9 @@
 ;;;
 ;;; File/directory operations over an SSH subsystem channel.
 ;;; Pure protocol logic — no FFI.
+;;;
+;;; Uses (std net ssh conditions) for structured error hierarchy.
+;;; Uses (std contract) for argument validation on public API.
 
 (library (std net ssh sftp)
   (export
@@ -58,7 +61,9 @@
           (std net ssh wire)
           (std net ssh transport)
           (std net ssh channel)
-          (std net ssh session))
+          (std net ssh session)
+          (std net ssh conditions)
+          (std contract))
 
   ;; ---- Helpers ----
 
@@ -168,7 +173,8 @@
           (bytevector-concat (reverse collected) n)
           (let ([data (ssh-channel-read ts table ch)])
             (if (not data)
-              (error 'sftp-channel-read-exact "unexpected EOF")
+              (raise-ssh-sftp-error 'sftp-read SSH_FX_EOF #f
+                "unexpected EOF on SFTP channel")
               (let ([got (bytevector-length data)])
                 (if (> got remaining)
                   (let ([needed (make-bytevector remaining)]
@@ -252,7 +258,8 @@
 
   (define (ssh-read-uint64 bv offset)
     (when (> (+ offset 8) (bytevector-length bv))
-      (error 'ssh-read-uint64 "buffer underflow" offset))
+      (raise-ssh-protocol-error 'ssh-sftp "enough data" offset
+        "buffer underflow in uint64 read"))
     (let ([n (bitwise-ior
                (bitwise-arithmetic-shift-left (bytevector-u8-ref bv offset) 56)
                (bitwise-arithmetic-shift-left (bytevector-u8-ref bv (+ offset 1)) 48)
@@ -278,7 +285,8 @@
         (let* ([reply (sftp-recv sftp)]
                [type (bytevector-u8-ref reply 0)])
           (unless (= type SSH_FXP_VERSION)
-            (error 'ssh-sftp-open-session "expected SFTP VERSION" type))
+            (raise-ssh-sftp-error 'ssh-sftp-open-session type #f
+              "expected SFTP VERSION reply"))
           sftp))))
 
   (define (ssh-sftp-close-session ts table sftp)
@@ -287,7 +295,7 @@
 
   ;; ---- Check status response ----
 
-  (define (sftp-check-status reply expected-id operation)
+  (define (sftp-check-status reply expected-id operation path)
     (let ([type (bytevector-u8-ref reply 0)])
       (when (= type SSH_FXP_STATUS)
         (let* ([off 1]
@@ -298,7 +306,7 @@
           (unless (= code SSH_FX_OK)
             (let* ([r3 (ssh-read-string reply off)]
                    [msg (utf8->string (car r3))])
-              (error operation msg code)))))))
+              (raise-ssh-sftp-error operation code path msg)))))))
 
   ;; ---- File operations ----
 
@@ -306,6 +314,9 @@
     (case-lambda
       [(sftp path flags) (ssh-sftp-open sftp path flags #o644)]
       [(sftp path flags mode)
+       (check-argument sftp-session? sftp 'ssh-sftp-open)
+       (check-argument string? path 'ssh-sftp-open)
+       (check-argument integer? flags 'ssh-sftp-open)
        (let ([id (sftp-next-id sftp)])
          (sftp-send sftp
            (bytevector-append
@@ -324,10 +335,11 @@
                      [r2 (ssh-read-string reply off)])
                 (car r2))]
              [else
-              (sftp-check-status reply id 'ssh-sftp-open)
+              (sftp-check-status reply id 'ssh-sftp-open path)
               #f])))]))
 
   (define (ssh-sftp-close-handle sftp handle)
+    (check-argument sftp-session? sftp 'ssh-sftp-close-handle)
     (let ([id (sftp-next-id sftp)])
       (sftp-send sftp
         (bytevector-append
@@ -335,9 +347,10 @@
           (ssh-write-uint32 id)
           (ssh-write-string handle)))
       (let ([reply (sftp-recv sftp)])
-        (sftp-check-status reply id 'ssh-sftp-close-handle))))
+        (sftp-check-status reply id 'ssh-sftp-close-handle #f))))
 
   (define (ssh-sftp-read sftp handle offset length)
+    (check-argument sftp-session? sftp 'ssh-sftp-read)
     (let ([id (sftp-next-id sftp)])
       (sftp-send sftp
         (bytevector-append
@@ -362,10 +375,12 @@
                   [r2 (ssh-read-uint32 reply off)]
                   [code (car r2)])
              (if (= code SSH_FX_EOF) #f
-               (error 'ssh-sftp-read "read failed" code)))]
+               (raise-ssh-sftp-error 'ssh-sftp-read code #f
+                 "SFTP read failed")))]
           [else #f]))))
 
   (define (ssh-sftp-write sftp handle offset data)
+    (check-argument sftp-session? sftp 'ssh-sftp-write)
     (let ([id (sftp-next-id sftp)])
       (sftp-send sftp
         (bytevector-append
@@ -375,9 +390,11 @@
           (ssh-write-uint64 offset)
           (ssh-write-string data)))
       (let ([reply (sftp-recv sftp)])
-        (sftp-check-status reply id 'ssh-sftp-write))))
+        (sftp-check-status reply id 'ssh-sftp-write #f))))
 
   (define (ssh-sftp-stat sftp path)
+    (check-argument sftp-session? sftp 'ssh-sftp-stat)
+    (check-argument string? path 'ssh-sftp-stat)
     (let ([id (sftp-next-id sftp)])
       (sftp-send sftp
         (bytevector-append
@@ -395,6 +412,7 @@
           [else #f]))))
 
   (define (ssh-sftp-fstat sftp handle)
+    (check-argument sftp-session? sftp 'ssh-sftp-fstat)
     (let ([id (sftp-next-id sftp)])
       (sftp-send sftp
         (bytevector-append
@@ -412,6 +430,8 @@
           [else #f]))))
 
   (define (ssh-sftp-setstat sftp path attrs)
+    (check-argument sftp-session? sftp 'ssh-sftp-setstat)
+    (check-argument string? path 'ssh-sftp-setstat)
     (let ([id (sftp-next-id sftp)])
       (sftp-send sftp
         (bytevector-append
@@ -420,9 +440,11 @@
           (ssh-write-string path)
           (encode-attrs attrs)))
       (let ([reply (sftp-recv sftp)])
-        (sftp-check-status reply id 'ssh-sftp-setstat))))
+        (sftp-check-status reply id 'ssh-sftp-setstat path))))
 
   (define (ssh-sftp-remove sftp path)
+    (check-argument sftp-session? sftp 'ssh-sftp-remove)
+    (check-argument string? path 'ssh-sftp-remove)
     (let ([id (sftp-next-id sftp)])
       (sftp-send sftp
         (bytevector-append
@@ -430,9 +452,12 @@
           (ssh-write-uint32 id)
           (ssh-write-string path)))
       (let ([reply (sftp-recv sftp)])
-        (sftp-check-status reply id 'ssh-sftp-remove))))
+        (sftp-check-status reply id 'ssh-sftp-remove path))))
 
   (define (ssh-sftp-rename sftp old-path new-path)
+    (check-argument sftp-session? sftp 'ssh-sftp-rename)
+    (check-argument string? old-path 'ssh-sftp-rename)
+    (check-argument string? new-path 'ssh-sftp-rename)
     (let ([id (sftp-next-id sftp)])
       (sftp-send sftp
         (bytevector-append
@@ -441,7 +466,7 @@
           (ssh-write-string old-path)
           (ssh-write-string new-path)))
       (let ([reply (sftp-recv sftp)])
-        (sftp-check-status reply id 'ssh-sftp-rename))))
+        (sftp-check-status reply id 'ssh-sftp-rename old-path))))
 
   ;; ---- Directory operations ----
 
@@ -449,6 +474,8 @@
     (case-lambda
       [(sftp path) (ssh-sftp-mkdir sftp path #o755)]
       [(sftp path mode)
+       (check-argument sftp-session? sftp 'ssh-sftp-mkdir)
+       (check-argument string? path 'ssh-sftp-mkdir)
        (let ([id (sftp-next-id sftp)])
          (sftp-send sftp
            (bytevector-append
@@ -457,9 +484,11 @@
              (ssh-write-string path)
              (encode-attrs (make-sftp-attrs #f #f #f mode #f #f))))
          (let ([reply (sftp-recv sftp)])
-           (sftp-check-status reply id 'ssh-sftp-mkdir)))]))
+           (sftp-check-status reply id 'ssh-sftp-mkdir path)))]))
 
   (define (ssh-sftp-rmdir sftp path)
+    (check-argument sftp-session? sftp 'ssh-sftp-rmdir)
+    (check-argument string? path 'ssh-sftp-rmdir)
     (let ([id (sftp-next-id sftp)])
       (sftp-send sftp
         (bytevector-append
@@ -467,9 +496,11 @@
           (ssh-write-uint32 id)
           (ssh-write-string path)))
       (let ([reply (sftp-recv sftp)])
-        (sftp-check-status reply id 'ssh-sftp-rmdir))))
+        (sftp-check-status reply id 'ssh-sftp-rmdir path))))
 
   (define (ssh-sftp-opendir sftp path)
+    (check-argument sftp-session? sftp 'ssh-sftp-opendir)
+    (check-argument string? path 'ssh-sftp-opendir)
     (let ([id (sftp-next-id sftp)])
       (sftp-send sftp
         (bytevector-append
@@ -486,10 +517,11 @@
                   [r2 (ssh-read-string reply off)])
              (car r2))]
           [else
-           (sftp-check-status reply id 'ssh-sftp-opendir)
+           (sftp-check-status reply id 'ssh-sftp-opendir path)
            #f]))))
 
   (define (ssh-sftp-readdir sftp handle)
+    (check-argument sftp-session? sftp 'ssh-sftp-readdir)
     (let ([id (sftp-next-id sftp)])
       (sftp-send sftp
         (bytevector-append
@@ -523,10 +555,13 @@
                   [r2 (ssh-read-uint32 reply off)]
                   [code (car r2)])
              (if (= code SSH_FX_EOF) #f
-               (error 'ssh-sftp-readdir "readdir failed" code)))]
+               (raise-ssh-sftp-error 'ssh-sftp-readdir code #f
+                 "SFTP readdir failed")))]
           [else #f]))))
 
   (define (ssh-sftp-list-directory sftp path)
+    (check-argument sftp-session? sftp 'ssh-sftp-list-directory)
+    (check-argument string? path 'ssh-sftp-list-directory)
     (let ([handle (ssh-sftp-opendir sftp path)])
       (let loop ([all-entries '()])
         (let ([entries (ssh-sftp-readdir sftp handle)])
@@ -539,6 +574,8 @@
   ;; ---- Path operations ----
 
   (define (ssh-sftp-realpath sftp path)
+    (check-argument sftp-session? sftp 'ssh-sftp-realpath)
+    (check-argument string? path 'ssh-sftp-realpath)
     (let ([id (sftp-next-id sftp)])
       (sftp-send sftp
         (bytevector-append
@@ -558,12 +595,15 @@
                   [resolved (utf8->string (car r3))])
              resolved)]
           [else
-           (sftp-check-status reply id 'ssh-sftp-realpath)
+           (sftp-check-status reply id 'ssh-sftp-realpath path)
            #f]))))
 
   ;; ---- High-level file transfer ----
 
   (define (ssh-sftp-get sftp remote-path local-path)
+    (check-argument sftp-session? sftp 'ssh-sftp-get)
+    (check-argument string? remote-path 'ssh-sftp-get)
+    (check-argument string? local-path 'ssh-sftp-get)
     (let* ([handle (ssh-sftp-open sftp remote-path SSH_FXF_READ)]
            [out-port (open-file-output-port local-path
                        (file-options no-fail)
@@ -577,6 +617,9 @@
       (ssh-sftp-close-handle sftp handle)))
 
   (define (ssh-sftp-put sftp local-path remote-path)
+    (check-argument sftp-session? sftp 'ssh-sftp-put)
+    (check-argument string? local-path 'ssh-sftp-put)
+    (check-argument string? remote-path 'ssh-sftp-put)
     (let* ([in-port (open-file-input-port local-path)]
            [handle (ssh-sftp-open sftp remote-path
                      (bitwise-ior SSH_FXF_WRITE SSH_FXF_CREAT SSH_FXF_TRUNC))])

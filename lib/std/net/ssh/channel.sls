@@ -4,6 +4,9 @@
 ;;; Channel open/close, data transfer, window management,
 ;;; and packet dispatch loop.
 ;;; Pure protocol logic — no FFI.
+;;;
+;;; Uses (std net ssh conditions) for structured error hierarchy.
+;;; Uses (std misc event) for composable channel data events.
 
 (library (std net ssh channel)
   (export
@@ -52,11 +55,17 @@
     ;; Dispatch
     ssh-channel-dispatch
     ssh-channel-dispatch-until
+
+    ;; Event integration — composable channel data events
+    ssh-channel-data-event
+    ssh-channel-stderr-event
     )
 
   (import (chezscheme)
           (std net ssh wire)
-          (std net ssh transport))
+          (std net ssh transport)
+          (std net ssh conditions)
+          (std misc event))
 
   ;; ---- Constants ----
   (define INITIAL-WINDOW-SIZE (* 2 1024 1024))   ;; 2 MB
@@ -128,7 +137,8 @@
       (ssh-channel-dispatch-until ts table
         (lambda () (or (ssh-channel-remote-id ch) (ssh-channel-closed? ch))))
       (when (ssh-channel-closed? ch)
-        (error 'ssh-channel-open-session "channel open failed"))
+        (raise-ssh-channel-error 'ssh-channel-open-session local-id
+          "session channel open failed"))
       ch))
 
   (define (ssh-channel-open-direct-tcpip ts table host port orig-host orig-port)
@@ -148,7 +158,8 @@
       (ssh-channel-dispatch-until ts table
         (lambda () (or (ssh-channel-remote-id ch) (ssh-channel-closed? ch))))
       (when (ssh-channel-closed? ch)
-        (error 'ssh-channel-open-direct-tcpip "channel open failed"))
+        (raise-ssh-channel-error 'ssh-channel-open-direct-tcpip local-id
+          "direct-tcpip channel open failed"))
       ch))
 
   ;; ---- Channel data ----
@@ -162,7 +173,9 @@
                                  (ssh-channel-remote-max-packet ch)
                                  (ssh-channel-remote-window ch))])
             (when (<= send-size 0)
-              (error 'ssh-channel-send-data "remote window exhausted"))
+              (raise-ssh-channel-error 'ssh-channel-send-data
+                (ssh-channel-local-id ch)
+                "remote window exhausted"))
             (let ([chunk (make-bytevector send-size)])
               (bytevector-copy! bv off chunk 0 send-size)
               (ssh-transport-send-packet ts
@@ -219,6 +232,36 @@
         [else
          (ssh-channel-dispatch ts table)
          (loop)])))
+
+  ;; ---- Event integration ----
+  ;; These create composable events for non-blocking channel data polling.
+  ;; Use with (sync (choice (ssh-channel-data-event ch) (timer-event 5000)))
+  ;; to wait for data with a timeout.
+  ;;
+  ;; Note: events only fire on already-buffered data. The caller must ensure
+  ;; data is being pumped into the queue via ssh-channel-dispatch.
+
+  (define (ssh-channel-data-event ch)
+    (make-event
+      (lambda ()
+        (cond
+          [(pair? (ssh-channel-data-queue ch))
+           (values #t (car (ssh-channel-data-queue ch)))]
+          [(or (ssh-channel-eof? ch) (ssh-channel-closed? ch))
+           (values #t #f)]
+          [else
+           (values #f #f)]))))
+
+  (define (ssh-channel-stderr-event ch)
+    (make-event
+      (lambda ()
+        (cond
+          [(pair? (ssh-channel-stderr-queue ch))
+           (values #t (car (ssh-channel-stderr-queue ch)))]
+          [(or (ssh-channel-eof? ch) (ssh-channel-closed? ch))
+           (values #t #f)]
+          [else
+           (values #f #f)]))))
 
   ;; ---- Dispatch ----
 
@@ -355,7 +398,7 @@
          (void)]
 
         [(1)   ;; SSH_MSG_DISCONNECT
-         (error 'ssh-channel-dispatch "server disconnected")]
+         (raise-ssh-error 'ssh-channel-dispatch "server sent disconnect")]
 
         [else
          (void)])))

@@ -5,6 +5,7 @@
 ;;; algorithm negotiation, and key derivation (RFC 4253 §7.2).
 ;;;
 ;;; FFI operations imported from (chez-ssh crypto).
+;;; Uses (std net ssh conditions) for structured error hierarchy.
 
 (library (std net ssh kex)
   (export
@@ -19,6 +20,7 @@
   (import (chezscheme)
           (std net ssh wire)
           (std net ssh transport)
+          (std net ssh conditions)
           (chez-ssh crypto))
 
   ;; ---- Helpers ----
@@ -102,9 +104,9 @@
     (let loop ([cl client-list])
       (cond
         [(null? cl)
-         (error 'ssh-kex-negotiate
-                (string-append "no common " name " algorithm")
-                client-list server-list)]
+         (raise-ssh-kex-error 'ssh-kex-negotiate 'negotiate
+           (string-append "no common " name " algorithm")
+           client-list server-list)]
         [(member (car cl) server-list) (car cl)]
         [else (loop (cdr cl))])))
 
@@ -204,10 +206,12 @@
        (let ([ctx-buf (make-bytevector 512)])
          (let ([rc (ssh-crypto-aes256-ctr-init key iv ctx-buf 512)])
            (when (< rc 0)
-             (error 'make-cipher-for "AES-256-CTR init failed"))
+             (raise-ssh-kex-error 'ssh-kex-activate-keys 'ecdh
+               "AES-256-CTR cipher init failed"))
            (make-cipher-state cipher-name key mac-key iv ctx-buf)))]
       [else
-       (error 'make-cipher-for "unsupported cipher" cipher-name)]))
+       (raise-ssh-kex-error 'ssh-kex-activate-keys 'negotiate
+         (string-append "unsupported cipher: " cipher-name))]))
 
   ;; ---- Exchange hash computation ----
 
@@ -237,20 +241,24 @@
            [key-type (utf8->string (car r1))]
            [off1 (cdr r1)])
       (unless (string=? key-type "ssh-ed25519")
-        (error 'verify-host-key "unsupported host key type" key-type))
+        (raise-ssh-host-key-error 'verify-host-key 'unsupported #f
+          (string-append "unsupported host key type: " key-type)))
       (let* ([r2 (ssh-read-string host-key-blob off1)]
              [pubkey (car r2)]
              [r3 (ssh-read-string signature-blob 0)]
              [sig-type (utf8->string (car r3))]
              [off3 (cdr r3)])
         (unless (string=? sig-type "ssh-ed25519")
-          (error 'verify-host-key "signature type mismatch" sig-type))
+          (raise-ssh-host-key-error 'verify-host-key 'unsupported #f
+            (string-append "signature type mismatch: " sig-type)))
         (let* ([r4 (ssh-read-string signature-blob off3)]
                [sig (car r4)])
           (when (not (= (bytevector-length pubkey) 32))
-            (error 'verify-host-key "invalid pubkey length"))
+            (raise-ssh-host-key-error 'verify-host-key 'unsupported #f
+              "invalid pubkey length (expected 32)"))
           (when (not (= (bytevector-length sig) 64))
-            (error 'verify-host-key "invalid signature length"))
+            (raise-ssh-host-key-error 'verify-host-key 'unsupported #f
+              "invalid signature length (expected 64)"))
           (let ([rc (ssh-crypto-ed25519-verify pubkey exchange-hash
                                       (bytevector-length exchange-hash) sig)])
             (= rc 0))))))
@@ -264,7 +272,9 @@
 
       (let ([server-kexinit (ssh-transport-recv-packet ts)])
         (unless (= (bytevector-u8-ref server-kexinit 0) SSH_MSG_KEXINIT)
-          (error 'ssh-kex-perform "expected KEXINIT" (bytevector-u8-ref server-kexinit 0)))
+          (raise-ssh-protocol-error 'ssh-kex-perform
+            SSH_MSG_KEXINIT (bytevector-u8-ref server-kexinit 0)
+            "expected KEXINIT from server"))
         (transport-state-server-kexinit-set! ts server-kexinit)
 
         (let* ([server-parsed (ssh-kex-parse-kexinit server-kexinit)]
@@ -275,7 +285,8 @@
                 [client-pub (make-bytevector 32)])
             (let ([rc (ssh-crypto-curve25519-keygen client-priv client-pub)])
               (when (< rc 0)
-                (error 'ssh-kex-perform "keygen failed"))
+                (raise-ssh-kex-error 'ssh-kex-perform 'ecdh
+                  "Curve25519 keygen failed"))
 
               (ssh-transport-send-packet ts
                 (ssh-make-payload SSH_MSG_KEX_ECDH_INIT
@@ -283,8 +294,9 @@
 
               (let ([reply (ssh-transport-recv-packet ts)])
                 (unless (= (bytevector-u8-ref reply 0) SSH_MSG_KEX_ECDH_REPLY)
-                  (error 'ssh-kex-perform "expected KEX_ECDH_REPLY"
-                         (bytevector-u8-ref reply 0)))
+                  (raise-ssh-protocol-error 'ssh-kex-perform
+                    SSH_MSG_KEX_ECDH_REPLY (bytevector-u8-ref reply 0)
+                    "expected KEX_ECDH_REPLY from server"))
 
                 (let* ([off 1]
                        [r1 (ssh-read-string reply off)]
@@ -299,7 +311,8 @@
                     (let ([rc (ssh-crypto-curve25519-shared-secret client-priv server-pub
                                                           secret-buf secret-len-buf)])
                       (when (< rc 0)
-                        (error 'ssh-kex-perform "ECDH failed"))
+                        (raise-ssh-kex-error 'ssh-kex-perform 'ecdh
+                          "ECDH shared secret computation failed"))
 
                       (let ([H (compute-exchange-hash
                                  (transport-state-client-version ts)
@@ -310,10 +323,14 @@
                                  secret-buf)])
 
                         (unless (host-key-verifier host-key-blob)
-                          (error 'ssh-kex-perform "host key rejected"))
+                          (raise-ssh-host-key-error 'ssh-kex-perform 'rejected
+                            (ssh-host-key-fingerprint* host-key-blob)
+                            "host key rejected by verifier"))
 
                         (unless (verify-host-key-signature host-key-blob H signature)
-                          (error 'ssh-kex-perform "host key signature verification failed"))
+                          (raise-ssh-host-key-error 'ssh-kex-perform 'rejected
+                            (ssh-host-key-fingerprint* host-key-blob)
+                            "host key signature verification failed"))
 
                         (unless (transport-state-session-id ts)
                           (transport-state-session-id-set! ts H))
@@ -323,7 +340,9 @@
 
                         (let ([newkeys (ssh-transport-recv-packet ts)])
                           (unless (= (bytevector-u8-ref newkeys 0) SSH_MSG_NEWKEYS)
-                            (error 'ssh-kex-perform "expected NEWKEYS"))
+                            (raise-ssh-protocol-error 'ssh-kex-perform
+                              SSH_MSG_NEWKEYS (bytevector-u8-ref newkeys 0)
+                              "expected NEWKEYS from server"))
 
                           (let-values ([(iv-c2s iv-s2c key-c2s key-s2c mac-c2s mac-s2c)
                                         (ssh-kex-derive-keys secret-buf H
@@ -335,5 +354,20 @@
                           (bytevector-fill! secret-buf 0)
 
                           H))))))))))))
+
+  ;; Simple SHA-256 fingerprint for condition reporting (no base64 needed)
+  (define (ssh-host-key-fingerprint* host-key-blob)
+    (let ([hash (make-bytevector 32)])
+      (ssh-crypto-sha256 host-key-blob (bytevector-length host-key-blob) hash)
+      (let loop ([i 0] [acc '()])
+        (if (>= i (min 8 (bytevector-length hash)))
+          (apply string-append (reverse acc))
+          (let ([b (bytevector-u8-ref hash i)])
+            (loop (+ i 1)
+                  (cons (string-append
+                          (if (null? acc) "" ":")
+                          (if (< b 16) "0" "")
+                          (number->string b 16))
+                        acc)))))))
 
   ) ;; end library

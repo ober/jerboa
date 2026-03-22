@@ -16,7 +16,8 @@
   (import (chezscheme)
           (std net ssh wire)
           (std net ssh transport)
-          (std net ssh channel))
+          (std net ssh channel)
+          (std net ssh conditions))
 
   ;; ---- Helpers ----
 

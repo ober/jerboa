@@ -4,6 +4,7 @@
 ;;; Supports: publickey (ed25519), password, keyboard-interactive
 ;;;
 ;;; FFI operations imported from (chez-ssh crypto).
+;;; Uses (std net ssh conditions) for structured error hierarchy.
 
 (library (std net ssh auth)
   (export
@@ -16,6 +17,7 @@
   (import (chezscheme)
           (std net ssh wire)
           (std net ssh transport)
+          (std net ssh conditions)
           (chez-ssh crypto))
 
   ;; ---- Helpers ----
@@ -38,8 +40,8 @@
         (ssh-write-string "ssh-userauth")))
     (let ([reply (ssh-transport-recv-packet ts)])
       (unless (= (bytevector-u8-ref reply 0) SSH_MSG_SERVICE_ACCEPT)
-        (error 'ssh-userauth-request "service request denied"
-               (bytevector-u8-ref reply 0)))
+        (raise-ssh-auth-error 'ssh-userauth-request 'none '()
+          "ssh-userauth service request denied"))
       #t))
 
   ;; ---- Public key authentication ----
@@ -66,7 +68,8 @@
                [sig (make-bytevector 64)]
                [rc (ssh-crypto-ed25519-sign seed-bv sig-data (bytevector-length sig-data) sig)])
           (when (< rc 0)
-            (error 'ssh-auth-publickey "signing failed"))
+            (raise-ssh-auth-error 'ssh-auth-publickey 'publickey '()
+              "Ed25519 signing failed"))
 
           (let ([sig-blob (bytevector-append
                             (ssh-write-string key-type)
@@ -112,7 +115,8 @@
         (case (bytevector-u8-ref reply 0)
           [(52) #t]  ;; SSH_MSG_USERAUTH_SUCCESS
           [(51)      ;; SSH_MSG_USERAUTH_FAILURE
-           (error 'ssh-auth-interactive "authentication failed")]
+           (raise-ssh-auth-error 'ssh-auth-interactive 'keyboard-interactive '()
+             "keyboard-interactive authentication failed")]
           [(60)      ;; SSH_MSG_USERAUTH_INFO_REQUEST
            (let* ([off 1]
                   [r1 (ssh-read-string reply off)]
@@ -140,8 +144,9 @@
                    (prompt-loop (+ i 1) off
                      (cons (cons prompt-text echo?) prompts))))))]
           [else
-           (error 'ssh-auth-interactive "unexpected message"
-                  (bytevector-u8-ref reply 0))]))))
+           (raise-ssh-protocol-error 'ssh-auth-interactive
+             "userauth response" (bytevector-u8-ref reply 0)
+             "unexpected message during keyboard-interactive auth")]))))
 
   ;; ---- Response handler ----
 
@@ -153,16 +158,11 @@
          (let* ([off 1]
                 [r (ssh-read-name-list reply off)]
                 [methods (car r)])
-           (error 'ssh-auth (string-append (symbol->string method)
-                              " authentication failed; try: "
-                              (apply string-append
-                                (let loop ([ms methods] [acc '()])
-                                  (cond
-                                    [(null? ms) (reverse acc)]
-                                    [(null? (cdr ms)) (reverse (cons (car ms) acc))]
-                                    [else (loop (cdr ms)
-                                                (cons ", " (cons (car ms) acc)))]))))))]
+           (raise-ssh-auth-error 'ssh-auth method methods
+             (string-append (symbol->string method) " authentication failed")))]
         [else
-         (error 'ssh-auth "unexpected response" (bytevector-u8-ref reply 0))])))
+         (raise-ssh-protocol-error 'ssh-auth
+           "success or failure" (bytevector-u8-ref reply 0)
+           "unexpected auth response")])))
 
   ) ;; end library

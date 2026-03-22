@@ -16,6 +16,7 @@
 
   (import (chezscheme)
           (std net ssh wire)
+          (std net ssh conditions)
           (chez-ssh crypto))
 
   ;; ---- Base64 encode ----

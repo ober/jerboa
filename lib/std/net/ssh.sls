@@ -13,6 +13,7 @@
 ;;;   (std net ssh known-hosts) — host key verification
 ;;;   (std net ssh forward)    — port forwarding
 ;;;   (std net ssh client)     — high-level client API
+;;;   (std net ssh conditions) — SSH error condition hierarchy
 
 (library (std net ssh)
   (export
@@ -22,6 +23,7 @@
     ssh-connection?
     ssh-connection-transport
     ssh-connection-channel-table
+    ssh-connection-state
 
     ;; Command execution
     ssh-run
@@ -80,11 +82,38 @@
     ssh-known-hosts-add
     ssh-known-hosts-verifier
     ssh-host-key-fingerprint
+
+    ;; Custodian integration
+    with-ssh-connection
+    ssh-connection-custodian
+
+    ;; Connection pooling
+    make-ssh-pool
+    with-pooled-ssh
+    ssh-pool-drain
+    ssh-pool-stats
+
+    ;; Error conditions (re-exported for callers to catch)
+    &ssh-error ssh-error? ssh-error-operation
+    &ssh-connection-error ssh-connection-error?
+    &ssh-auth-error ssh-auth-error?
+    &ssh-kex-error ssh-kex-error?
+    &ssh-protocol-error ssh-protocol-error?
+    &ssh-host-key-error ssh-host-key-error?
+    &ssh-channel-error ssh-channel-error?
+    &ssh-sftp-error ssh-sftp-error?
+    &ssh-timeout-error ssh-timeout-error?
+
+    ;; Channel events (for composable async patterns)
+    ssh-channel-data-event
+    ssh-channel-stderr-event
     )
 
   (import (std net ssh client)
           (std net ssh sftp)
           (std net ssh forward)
-          (std net ssh known-hosts))
+          (std net ssh known-hosts)
+          (std net ssh conditions)
+          (std net ssh channel))
 
   ) ;; end library
