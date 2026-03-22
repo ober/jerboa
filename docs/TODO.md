@@ -45,47 +45,14 @@ or completed in the March 2026 sprint. Remaining items are genuinely open.
 - [x] **Import conflict reference** — `docs/import-conflicts.md`
 - [x] **API reference generator** — `tools/gen-api-docs.ss`
 
+- [x] **Struct patterns in prelude match** — `(jerboa prelude)` now re-exports `(std match2)`'s `match` with struct patterns, sealed hierarchies, active patterns, and `match/strict`
+- [x] **Package registry** — `(jerboa registry)` with GitHub-based install/uninstall/update; `bin/jerboa install/uninstall/update/list` CLI commands
+- [x] **LSP server** — `(std lsp server)` + `(std lsp symbols)` with JSON-RPC over stdio; `tools/jerboa-lsp.ss` entry point; completion, hover, go-to-definition, diagnostics
+- [x] **Protocol Buffers** — `(std protobuf)` wire format encoder/decoder (proto3); varint, fixed32/64, length-delimited, zigzag, embedded messages
+
 ---
 
 ## Remaining
-
-### 2.2 Struct Patterns in Core Match (Decision Needed)
-
-**Severity: Medium | Effort: Small**
-
-`(std match2)` has full struct matching but is separate from the prelude's
-core `match`. Options:
-
-1. Re-export `match2`'s `match` from the prelude (breaking change — needs assessment)
-2. Upgrade core `match` with struct support
-3. Keep as-is and document prominently (current state — docs/quickstart.md covers this)
-
-Decision: currently documented in quickstart. May upgrade prelude later.
-
-### 4.1 Package Registry
-
-**Severity: Medium | Effort: Large**
-
-`(jerboa pkg)` and `(jerboa lock)` handle versioning and lockfiles, but
-there is no **registry** — no way to discover or install packages by name.
-Options:
-
-- GitHub-based (like early Go): `jerboa install github.com/user/pkg`
-- Central registry (like crates.io): more discovery, more infrastructure
-- Git-submodule approach: zero infrastructure needed
-
-### 4.3 Editor Integration / LSP
-
-**Severity: Medium | Effort: Large**
-
-No LSP server exists. A basic one providing:
-- Go-to-definition (using `(std doc)` data)
-- Completion from module exports
-- Hover documentation
-- Error diagnostics
-
-Would significantly improve the development experience. Could be written
-in Jerboa itself using the REPL server infrastructure.
 
 ### Networking Polish
 
@@ -93,8 +60,3 @@ in Jerboa itself using the REPL server infrastructure.
 - **HTTP client API compat** — header format differences vs Gerbil
   (dotted pairs vs triples). `(std net request)` works but Gerbil
   ports need header conversion.
-
-### Protocol Buffers
-
-`(std protobuf)` — Google's serialization format. Lower priority than
-TOML/MessagePack/CBOR (which are now done) but useful for gRPC interop.

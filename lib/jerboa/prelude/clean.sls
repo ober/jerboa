@@ -18,7 +18,8 @@
     ;; ---- Core macros ----
     def def* defrule defrules
     defstruct defclass defmethod
-    match
+    match match/strict
+    define-match-type define-sealed-hierarchy define-active-pattern
     try catch finally
     while until
     hash-literal hash-eq-literal
@@ -93,11 +94,13 @@
     (only (jerboa core)
       def def* defrule defrules
       defstruct defclass defmethod
-      match
       try catch finally
       while until
       hash-literal hash-eq-literal
       let-hash)
+    (only (std match2)
+      match match/strict
+      define-match-type define-sealed-hierarchy define-active-pattern)
     (only (jerboa runtime)
       ~ bind-method! call-method
       make-hash-table-eq

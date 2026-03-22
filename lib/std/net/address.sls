@@ -50,7 +50,7 @@
              (unless port
                (error 'parse-address "invalid port" str))
              (make-address host port))
-           (make-address str 0)))]))
+           (make-address str 0)))])) ;; close if, let, else-bracket, cond, define
 
   (define (address->string addr)
     (let ([host (address-host addr)]

@@ -12,7 +12,8 @@
     ;; ---- Core macros ----
     def def* defrule defrules
     defstruct defclass defmethod
-    match
+    match match/strict
+    define-match-type define-sealed-hierarchy define-active-pattern
     try catch finally
     while until
 
@@ -95,7 +96,17 @@
             path-extension path-absolute?
             with-input-from-string with-output-to-string
             iota 1+ 1-)
-    (jerboa core)
+    (only (jerboa core)
+      def def* defrule defrules
+      defstruct defclass defmethod
+      try catch finally
+      while until
+      hash-literal hash-eq-literal
+      let-hash)
+    (only (std match2)
+      match match/strict
+      define-match-type define-sealed-hierarchy define-active-pattern)
+    (jerboa runtime)
     (jerboa ffi)
     (std sort)
     (std format)

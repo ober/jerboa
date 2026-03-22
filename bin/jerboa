@@ -34,6 +34,10 @@ Commands:
   eval '<expr>'      Evaluate a single expression
   test [dir]         Discover and run test files (default: tests/)
   build              Run make build in the project directory
+  install <gh-url>   Install a package (e.g. github.com/user/repo)
+  uninstall <name>   Uninstall a package by name
+  update [name]      Update one or all installed packages
+  list               List installed packages
   version            Print version info
   help               Print this help message
 
@@ -121,6 +125,90 @@ cmd_build() {
     exec make -C "$JERBOA_HOME" build
 }
 
+cmd_install() {
+    if [ $# -eq 0 ]; then
+        echo "Error: jerboa install requires a GitHub path" >&2
+        echo "Usage: jerboa install github.com/user/repo" >&2
+        exit 1
+    fi
+    local gh_path="$1"
+    "$SCHEME" --libdirs "$LIBDIRS" --program <(cat <<INSTALL
+(import (jerboa registry))
+(let ([entry (package-install! "$gh_path")])
+  (display "Installed: ")
+  (display "$gh_path")
+  (newline))
+INSTALL
+    )
+}
+
+cmd_uninstall() {
+    if [ $# -eq 0 ]; then
+        echo "Error: jerboa uninstall requires a package name" >&2
+        echo "Usage: jerboa uninstall <package-name>" >&2
+        exit 1
+    fi
+    local name="$1"
+    "$SCHEME" --libdirs "$LIBDIRS" --program <(cat <<UNINSTALL
+(import (jerboa registry))
+(package-uninstall! "$name")
+(display "Uninstalled: ")
+(display "$name")
+(newline)
+UNINSTALL
+    )
+}
+
+cmd_update() {
+    if [ $# -eq 0 ]; then
+        # Update all packages
+        "$SCHEME" --libdirs "$LIBDIRS" --program <(cat <<'UPDATEALL'
+(import (except (chezscheme) make-hash-table hash-table? iota 1+ 1-)
+        (jerboa runtime)
+        (jerboa registry))
+(let ([pkgs (installed-packages)])
+  (if (null? pkgs)
+    (display "No packages installed.\n")
+    (for-each
+      (lambda (e)
+        (let ([name (hash-ref e "name" "")])
+          (display (string-append "Updating " name "...\n"))
+          (package-update! name)))
+      pkgs)))
+UPDATEALL
+        )
+    else
+        local name="$1"
+        "$SCHEME" --libdirs "$LIBDIRS" --program <(cat <<UPDATE
+(import (jerboa registry))
+(package-update! "$name")
+(display "Updated: ")
+(display "$name")
+(newline)
+UPDATE
+        )
+    fi
+}
+
+cmd_list() {
+    "$SCHEME" --libdirs "$LIBDIRS" --program <(cat <<'LIST'
+(import (except (chezscheme) make-hash-table hash-table? iota 1+ 1-)
+        (jerboa runtime)
+        (jerboa registry))
+(let ([pkgs (installed-packages)])
+  (if (null? pkgs)
+    (display "No packages installed.\n")
+    (for-each
+      (lambda (e)
+        (let ([name (hash-ref e "name" "")]
+              [ver  (hash-ref e "version" "?")]
+              [url  (hash-ref e "url" "")])
+          (display (string-append "  " name " (" ver ") — " url "\n"))))
+      pkgs)))
+LIST
+    )
+}
+
 cmd_version() {
     echo "jerboa $VERSION"
     echo "home: $JERBOA_HOME"
@@ -147,6 +235,21 @@ case "${1:-}" in
         ;;
     build)
         cmd_build
+        ;;
+    install)
+        shift
+        cmd_install "$@"
+        ;;
+    uninstall)
+        shift
+        cmd_uninstall "$@"
+        ;;
+    update)
+        shift
+        cmd_update "$@"
+        ;;
+    list)
+        cmd_list
         ;;
     version|--version|-v)
         cmd_version
