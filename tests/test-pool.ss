@@ -1,209 +1,267 @@
+#!/usr/bin/env scheme-script
 #!chezscheme
-(import (chezscheme) (std net pool))
+(import (chezscheme)
+        (std misc pool))
 
-(define pass 0)
-(define fail 0)
+(define test-count 0)
+(define pass-count 0)
 
-(define-syntax test
-  (syntax-rules ()
-    [(_ name expr expected)
-     (guard (exn [#t (set! fail (+ fail 1))
-                     (printf "FAIL ~a: ~a~%" name
-                       (if (message-condition? exn) (condition-message exn) exn))])
-       (let ([got expr])
-         (if (equal? got expected)
-           (begin (set! pass (+ pass 1)) (printf "  ok ~a~%" name))
-           (begin (set! fail (+ fail 1))
-                  (printf "FAIL ~a: got ~s expected ~s~%" name got expected)))))]))
+(define (test name thunk)
+  (set! test-count (+ test-count 1))
+  (guard (e [#t (display "FAIL: ") (display name) (newline)
+              (display "  Error: ")
+              (display (if (message-condition? e) (condition-message e) e))
+              (newline)])
+    (thunk)
+    (set! pass-count (+ pass-count 1))
+    (display "PASS: ") (display name) (newline)))
 
-(printf "--- Phase 2d: Connection Pool ---~%~%")
+(define (assert-equal actual expected msg)
+  (unless (equal? actual expected)
+    (error 'assert-equal
+           (string-append msg ": expected " (format "~s" expected)
+                          " got " (format "~s" actual)))))
 
-;; Helpers: simple "connection" = a box (vector) with state
-(define (make-test-factory)
-  (let ([counter (make-vector 1 0)])
+(define (assert-true val msg)
+  (unless val
+    (error 'assert-true (string-append msg ": expected true"))))
+
+;; Helper: simple resource = a gensym-tagged vector
+(define (make-factory)
+  (let ([counter 0])
     (lambda ()
-      (vector-set! counter 0 (+ (vector-ref counter 0) 1))
-      (vector (vector-ref counter 0)))))
+      (set! counter (+ counter 1))
+      (vector 'resource counter))))
 
-(define (test-closer conn)
-  (vector-set! conn 0 'closed))
+(define (resource-id r) (vector-ref r 1))
 
-(define (test-checker conn)
-  (not (equal? (vector-ref conn 0) 'closed)))
+(define destroyed '())
+(define (tracking-destroyer r)
+  (set! destroyed (cons (resource-id r) destroyed)))
 
-;; Test 1: make-connection-pool
-(let ([pool (make-connection-pool
-              (lambda () (vector 'conn))
-              (lambda (c) (void))
-              #f
-              1 5)])
-  (test "pool-created" (connection-pool? pool) #t)
-  (test "pool-initial-size" (pool-size pool) 1)
-  (test "pool-initial-available" (pool-available pool) 1))
+(define (reset-destroyed!) (set! destroyed '()))
 
-;; Test 2: pool-acquire! returns a connection
-(let ([pool (make-connection-pool
-              (lambda () (vector 'conn))
-              (lambda (c) (void))
-              #f
-              1 5)])
-  (let ([conn (pool-acquire! pool)])
-    (test "acquire-returns-connection"
-      (vector? conn)
-      #t)
-    (pool-release! pool conn)))
+;; ----- Tests -----
 
-;; Test 3: acquire reduces available count
-(let ([pool (make-connection-pool
-              (lambda () (vector 'conn))
-              (lambda (c) (void))
-              #f
-              2 5)])
-  (let ([c1 (pool-acquire! pool)])
-    (test "available-after-acquire"
-      (pool-available pool)
-      1)
-    (let ([c2 (pool-acquire! pool)])
-      (test "available-after-two-acquire"
-        (pool-available pool)
-        0)
-      (pool-release! pool c1)
-      (pool-release! pool c2))))
+;; Test 1: pool? predicate
+(test "pool? recognizes pools"
+  (lambda ()
+    (let ([p (make-pool (make-factory) (lambda (r) (void)) 5)])
+      (assert-true (pool? p) "pool?")
+      (assert-true (not (pool? 42)) "not pool?"))))
 
-;; Test 4: release returns connection to pool
-(let ([pool (make-connection-pool
-              (lambda () (vector 'conn))
-              (lambda (c) (void))
-              #f
-              1 5)])
-  (let ([conn (pool-acquire! pool)])
-    (pool-release! pool conn)
-    (test "available-after-release"
-      (pool-available pool)
-      1)))
+;; Test 2: acquire creates a resource
+(test "acquire creates a new resource"
+  (lambda ()
+    (let ([p (make-pool (make-factory) (lambda (r) (void)) 5)])
+      (let ([r (pool-acquire p)])
+        (assert-equal (vector-ref r 0) 'resource "is a resource")
+        (pool-release p r)))))
 
-;; Test 5: pool-stats
-(let ([pool (make-connection-pool
-              (lambda () (vector 'conn))
-              (lambda (c) (void))
-              #f
-              2 5)])
-  (let ([c (pool-acquire! pool)])
-    (pool-release! pool c)
-    (let ([stats (pool-stats pool)])
-      (test "stats-acquired" (cdr (assq 'acquired stats)) 1)
-      (test "stats-released" (cdr (assq 'released stats)) 1)
-      (test "stats-created" (>= (cdr (assq 'created stats)) 1) #t))))
+;; Test 3: pool-stats after acquire
+(test "pool-stats reflects acquire"
+  (lambda ()
+    (let ([p (make-pool (make-factory) (lambda (r) (void)) 5)])
+      (let ([r (pool-acquire p)])
+        (let ([s (pool-stats p)])
+          (assert-equal (cdr (assq 'total s)) 1 "total")
+          (assert-equal (cdr (assq 'in-use s)) 1 "in-use")
+          (assert-equal (cdr (assq 'idle s)) 0 "idle"))
+        (pool-release p r)))))
 
-;; Test 6: with-connection acquires and releases
-(let ([pool (make-connection-pool
-              (lambda () (vector 'conn))
-              (lambda (c) (void))
-              #f
-              1 5)])
-  (let ([result #f])
-    (with-connection pool
-      (lambda (conn)
-        (set! result (vector-ref conn 0))
-        (test "available-in-with-connection"
-          (pool-available pool)
-          0)))
-    (test "with-connection-saw-conn" result 'conn)
-    (test "available-after-with-connection"
-      (pool-available pool)
-      1)))
+;; Test 4: pool-stats after release
+(test "pool-stats reflects release"
+  (lambda ()
+    (let ([p (make-pool (make-factory) (lambda (r) (void)) 5)])
+      (let ([r (pool-acquire p)])
+        (pool-release p r)
+        (let ([s (pool-stats p)])
+          (assert-equal (cdr (assq 'total s)) 1 "total")
+          (assert-equal (cdr (assq 'in-use s)) 0 "in-use")
+          (assert-equal (cdr (assq 'idle s)) 1 "idle"))))))
 
-;; Test 7: with-connection releases on exception
-(let ([pool (make-connection-pool
-              (lambda () (vector 'conn))
-              (lambda (c) (void))
-              #f
-              1 3)])
-  (guard (exn [#t (void)])
-    (with-connection pool
-      (lambda (conn)
-        (error 'test "deliberate"))))
-  (test "available-after-with-exception"
-    (pool-available pool)
-    1))
+;; Test 5: reuses idle resources
+(test "acquire reuses idle resource"
+  (lambda ()
+    (let ([p (make-pool (make-factory) (lambda (r) (void)) 5)])
+      (let ([r1 (pool-acquire p)])
+        (let ([id1 (resource-id r1)])
+          (pool-release p r1)
+          (let ([r2 (pool-acquire p)])
+            (assert-equal (resource-id r2) id1 "same resource reused")
+            (pool-release p r2)))))))
 
-;; Test 8: pool-close! closes all idle connections
-(let ([closed-count (make-vector 1 0)])
-  (let ([pool (make-connection-pool
-                (lambda () (vector 'conn))
-                (lambda (c) (vector-set! closed-count 0
-                               (+ (vector-ref closed-count 0) 1)))
-                #f
-                2 5)])
-    (pool-close! pool)
-    (test "pool-closed"
-      (pool-size pool)
-      0)
-    (test "connections-closed"
-      (>= (vector-ref closed-count 0) 2)
-      #t)))
+;; Test 6: multiple resources
+(test "multiple acquires create separate resources"
+  (lambda ()
+    (let ([p (make-pool (make-factory) (lambda (r) (void)) 5)])
+      (let ([r1 (pool-acquire p)]
+            [r2 (pool-acquire p)])
+        (assert-true (not (equal? (resource-id r1) (resource-id r2)))
+                     "different resources")
+        (let ([s (pool-stats p)])
+          (assert-equal (cdr (assq 'total s)) 2 "total=2")
+          (assert-equal (cdr (assq 'in-use s)) 2 "in-use=2"))
+        (pool-release p r1)
+        (pool-release p r2)))))
 
-;; Test 9: pool-health-check! removes bad connections
-(let ([health-vec (make-vector 1 #t)])
-  (let ([pool (make-connection-pool
-                (lambda () (vector 'conn))
-                (lambda (c) (void))
-                (lambda (c) (vector-ref health-vec 0))
-                2 5)])
-    ;; Make health check fail
-    (vector-set! health-vec 0 #f)
-    (pool-health-check! pool)
-    (test "health-check-removes-bad"
-      (pool-available pool)
-      0)))
+;; Test 7: with-resource macro
+(test "with-resource acquires and releases"
+  (lambda ()
+    (let ([p (make-pool (make-factory) (lambda (r) (void)) 5)]
+          [captured-id #f])
+      (with-resource p (r)
+        (set! captured-id (resource-id r)))
+      (assert-true captured-id "got a resource")
+      (let ([s (pool-stats p)])
+        (assert-equal (cdr (assq 'in-use s)) 0 "released after body")
+        (assert-equal (cdr (assq 'idle s)) 1 "back in idle")))))
 
-;; Test 10: pool grows up to max-size
-(let ([pool (make-connection-pool
-              (lambda () (vector 'conn))
-              (lambda (c) (void))
-              #f
-              1 3)])
-  (let ([c1 (pool-acquire! pool)]
-        [c2 (pool-acquire! pool)]
-        [c3 (pool-acquire! pool)])
-    (test "pool-grew-to-max"
-      (pool-size pool)
-      3)
-    (pool-release! pool c1)
-    (pool-release! pool c2)
-    (pool-release! pool c3)))
+;; Test 8: with-resource releases on exception
+(test "with-resource releases on exception"
+  (lambda ()
+    (let ([p (make-pool (make-factory) (lambda (r) (void)) 5)])
+      (guard (e [#t (void)])
+        (with-resource p (r)
+          (error 'test "deliberate error")))
+      (let ([s (pool-stats p)])
+        (assert-equal (cdr (assq 'in-use s)) 0 "released after error")
+        (assert-equal (cdr (assq 'idle s)) 1 "idle after error")))))
 
-;; Test 11: pool-acquire! with timeout when at max
-(let ([pool (make-connection-pool
-              (lambda () (vector 'conn))
-              (lambda (c) (void))
-              #f
-              1 1)])
-  (let ([c (pool-acquire! pool)])
-    ;; Pool is now empty and at max. Acquire with short timeout should fail.
-    (guard (exn [#t
-                 (test "acquire-timeout-raises" #t #t)])
-      (pool-acquire! pool 10)  ;; 10ms timeout
-      (test "acquire-should-have-timed-out" #f #t))
-    (pool-release! pool c)))
+;; Test 9: pool-drain destroys idle resources
+(test "pool-drain destroys idle resources"
+  (lambda ()
+    (reset-destroyed!)
+    (let ([p (make-pool (make-factory) tracking-destroyer 5)])
+      (let ([r1 (pool-acquire p)]
+            [r2 (pool-acquire p)])
+        (pool-release p r1)
+        (pool-release p r2)
+        ;; Both are now idle
+        (pool-drain p)
+        (assert-equal (length destroyed) 2 "two destroyed")
+        (let ([s (pool-stats p)])
+          (assert-equal (cdr (assq 'idle s)) 0 "no idle after drain")
+          (assert-equal (cdr (assq 'total s)) 0 "total zero after drain"))))))
 
-;; Test 12: factory called for each new connection
-(let ([create-count (make-vector 1 0)])
-  (let ([pool (make-connection-pool
-                (lambda ()
-                  (vector-set! create-count 0
-                    (+ (vector-ref create-count 0) 1))
-                  (vector 'conn))
-                (lambda (c) (void))
-                #f
-                0 5)])
-    (let ([c1 (pool-acquire! pool)]
-          [c2 (pool-acquire! pool)])
-      (test "factory-called-twice"
-        (vector-ref create-count 0)
-        2)
-      (pool-release! pool c1)
-      (pool-release! pool c2))))
+;; Test 10: pool-drain does not affect in-use resources
+(test "pool-drain leaves in-use resources alone"
+  (lambda ()
+    (reset-destroyed!)
+    (let ([p (make-pool (make-factory) tracking-destroyer 5)])
+      (let ([r1 (pool-acquire p)]
+            [r2 (pool-acquire p)])
+        (pool-release p r1)
+        ;; r1 idle, r2 in-use
+        (pool-drain p)
+        (assert-equal (length destroyed) 1 "only idle destroyed")
+        (let ([s (pool-stats p)])
+          (assert-equal (cdr (assq 'in-use s)) 1 "in-use intact")
+          (assert-equal (cdr (assq 'idle s)) 0 "idle drained"))
+        (pool-release p r2)))))
 
-(printf "~%Results: ~a passed, ~a failed~%" pass fail)
-(when (> fail 0) (exit 1))
+;; Test 11: acquire with timeout returns #f when pool full
+(test "acquire with timeout returns #f at max"
+  (lambda ()
+    (let ([p (make-pool (make-factory) (lambda (r) (void)) 1)])
+      (let ([r (pool-acquire p)])
+        ;; Pool is at max (1), acquire with short timeout
+        (let ([result (pool-acquire p 0.01)])
+          (assert-equal result #f "timed out")
+          ;; Stats: 1 in-use, 0 idle
+          (let ([s (pool-stats p)])
+            (assert-equal (cdr (assq 'in-use s)) 1 "still 1 in-use"))
+          (pool-release p r))))))
+
+;; Test 12: acquire without timeout blocks then succeeds (thread test)
+(test "acquire blocks until resource freed"
+  (lambda ()
+    (let ([p (make-pool (make-factory) (lambda (r) (void)) 1)]
+          [acquired-in-thread #f])
+      (let ([r (pool-acquire p)])
+        ;; Spawn thread that will acquire (blocks until we release)
+        (let ([t (fork-thread
+                   (lambda ()
+                     (let ([r2 (pool-acquire p)])
+                       (set! acquired-in-thread (resource-id r2))
+                       (pool-release p r2))))])
+          ;; Give thread time to start and block
+          (sleep (make-time 'time-duration 20000000 0))  ;; 20ms
+          ;; Release so thread can proceed
+          (pool-release p r)
+          ;; Wait for thread
+          (sleep (make-time 'time-duration 50000000 0))  ;; 50ms
+          (assert-true acquired-in-thread "thread acquired resource"))))))
+
+;; Test 13: max-size limits total resources
+(test "max-size limits total resources"
+  (lambda ()
+    (let ([create-count 0])
+      (let ([p (make-pool
+                 (lambda ()
+                   (set! create-count (+ create-count 1))
+                   (vector 'r create-count))
+                 (lambda (r) (void))
+                 2)])
+        (let ([r1 (pool-acquire p)]
+              [r2 (pool-acquire p)])
+          (assert-equal create-count 2 "created 2")
+          ;; Third acquire with timeout should fail
+          (let ([r3 (pool-acquire p 0.01)])
+            (assert-equal r3 #f "max reached, timed out")
+            (assert-equal create-count 2 "still only 2 created"))
+          (pool-release p r1)
+          (pool-release p r2))))))
+
+;; Test 14: with-resource returns body value
+(test "with-resource returns body value"
+  (lambda ()
+    (let ([p (make-pool (make-factory) (lambda (r) (void)) 5)])
+      (let ([result (with-resource p (r) (* 6 7))])
+        (assert-equal result 42 "body value returned")))))
+
+;; Test 15: idle timeout evicts expired resources
+(test "idle-timeout evicts expired resources"
+  (lambda ()
+    (reset-destroyed!)
+    (let ([p (make-pool (make-factory) tracking-destroyer 5 0.05)])
+      ;; 50ms idle timeout
+      (let ([r (pool-acquire p)])
+        (pool-release p r)
+        ;; Wait for it to expire
+        (sleep (make-time 'time-duration 80000000 0))  ;; 80ms
+        ;; Next acquire triggers eviction and creates new
+        (let ([r2 (pool-acquire p)])
+          (assert-true (> (length destroyed) 0) "old resource destroyed")
+          (pool-release p r2))))))
+
+;; Test 16: pool-stats is consistent
+(test "pool-stats consistent across operations"
+  (lambda ()
+    (let ([p (make-pool (make-factory) (lambda (r) (void)) 10)])
+      ;; Empty pool
+      (let ([s (pool-stats p)])
+        (assert-equal (cdr (assq 'total s)) 0 "initial total=0"))
+      ;; Acquire 3
+      (let ([r1 (pool-acquire p)]
+            [r2 (pool-acquire p)]
+            [r3 (pool-acquire p)])
+        (let ([s (pool-stats p)])
+          (assert-equal (cdr (assq 'total s)) 3 "total=3")
+          (assert-equal (cdr (assq 'in-use s)) 3 "in-use=3")
+          (assert-equal (cdr (assq 'idle s)) 0 "idle=0"))
+        ;; Release 2
+        (pool-release p r1)
+        (pool-release p r2)
+        (let ([s (pool-stats p)])
+          (assert-equal (cdr (assq 'total s)) 3 "total still 3")
+          (assert-equal (cdr (assq 'in-use s)) 1 "in-use=1")
+          (assert-equal (cdr (assq 'idle s)) 2 "idle=2"))
+        (pool-release p r3)))))
+
+(newline)
+(display "=========================================") (newline)
+(display (format "Results: ~a/~a passed" pass-count test-count)) (newline)
+(display "=========================================") (newline)
+(when (< pass-count test-count)
+  (exit 1))
