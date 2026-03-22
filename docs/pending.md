@@ -4,7 +4,7 @@ Last updated: 2026-03-22.
 
 ## Current State
 
-489 modules, ~120K lines, 2,900+ tests, 13 fuzz harnesses. Full Gerbil API surface on stock Chez Scheme. 15 chez-* companion libraries. A complete editor (jerboa-emacs) with TUI + Qt, Org-mode, LSP, Git.
+500 modules, ~123K lines, 2,900+ tests, 13 fuzz harnesses. Full Gerbil API surface on stock Chez Scheme. 15 chez-* companion libraries. A complete editor (jerboa-emacs) with TUI + Qt, Org-mode, LSP, Git.
 
 ---
 
@@ -27,16 +27,15 @@ Jerboa keeps thin `(std srfi srfi-N)` re-export wrappers for namespace/conflict 
 
 ### Integrate Remaining chez-* Libraries
 
-Four chez-* libraries are built and tested but not in jerboa's Makefile:
+Three chez-* libraries are built and tested but not in jerboa's Makefile:
 
 | Library | Integration |
 |---------|------------|
 | **chez-qt** | Add to `CHEZ_EXT_LIBDIRS`, create `(std gui qt)` wrapper |
-| **chez-ssh** | Add to `CHEZ_EXT_LIBDIRS`, create `(std net ssh)` wrapper |
 | **chez-scintilla** | Already used by jerboa-emacs; expose via `(std gui scintilla)` |
 | **chez-r7rs** | Add to library path for `(scheme base)` etc. |
 
-All small — integration and wrappers only.
+`chez-ssh` is done — protocol logic split into `(std net ssh ...)` (10 modules, 3,132 lines), FFI stays in `(chez-ssh crypto)`.
 
 ### Web Framework
 

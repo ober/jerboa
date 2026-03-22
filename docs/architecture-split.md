@@ -66,13 +66,16 @@ These are pure C glue — no logic beyond marshaling:
 | chez-yaml | Pure parser — no concurrency, no resource management, just string → data |
 | chez-r7rs | Standards compliance layer — must be stock Chez by definition |
 
-### Should migrate logic to jerboa
+### Migrated to jerboa (completed)
 
-These have significant application logic that would benefit from jerboa's stdlib:
+| Library | FFI shim in chez-* | Logic in jerboa |
+|---------|-------------------|----------------|
+| **chez-ssh** | `(chez-ssh crypto)` — 21 FFI bindings for TCP, SHA-256, HMAC, Curve25519, ChaCha20-Poly1305, AES-256-CTR, Ed25519. `(chez-ssh)` — agent key management FFI | `(std net ssh)` — 10 modules: wire format, transport, kex, auth, channel, session, SFTP, known-hosts, port forwarding, high-level client (3,132 lines) |
+
+### Should migrate logic to jerboa
 
 | Library | FFI shim stays in chez-* | Logic moves to jerboa |
 |---------|-------------------------|----------------------|
-| **chez-ssh** | `chez_ssh_shim.c` + `chez_ssh_crypto.c` (Ed25519, key derivation, socket I/O) → stays as `chez-ssh` | SSH session management, SFTP client, channel multiplexing, key management, agent protocol → `(std net ssh)` using actors, custodians, channels, contracts |
 | **chez-https** | Could stay as-is (it's already pure Scheme over chez-ssl) — but connection pooling, retry, redirect following would benefit from jerboa | HTTP client with connection reuse, redirect following, retry → `(std net http)` using `(std misc pool)`, `(std misc retry)`, error conditions |
 
 ### Future libraries: where to put them

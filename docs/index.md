@@ -28,6 +28,10 @@ Updated 2026-03-22.
 - [protocols.md](protocols.md) — 9P2000 filesystem protocol, MessagePack serialization
 - [fiber.md](fiber.md) — Green threads / fibers with M:N scheduling
 
+## Networking
+
+- `(std net ssh)` — Full SSH client: connect, exec, shell, SFTP, port forwarding (10 modules, 3,132 lines)
+
 ## Language Features
 
 - [typing.md](typing.md) — Gradual type system: inference, refinements, GADTs, HKTs
