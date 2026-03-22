@@ -136,7 +136,28 @@ scheme --libdirs lib --script your-file.ss
 | `(jerboa wasm codegen)` | Scheme→WASM compiler (pure i32 subset) |
 | `(jerboa wasm runtime)` | Stack-based WASM interpreter |
 
-### External Library Wrappers (require [chez-*](https://github.com/ober) libraries)
+### Rust Native Backend (`libjerboa_native.so`)
+
+Jerboa includes a unified Rust shared library that replaces most C dependencies with memory-safe implementations. Build with `make native` (requires Rust toolchain).
+
+| Module | Rust Crate | Provides |
+|--------|------------|----------|
+| `(std crypto native-rust)` | ring | SHA-1/256/384/512, HMAC-SHA256, AES-256-GCM, PBKDF2, CSPRNG, constant-time compare |
+| `(std crypto secure-mem)` | libc (mmap/mlock) | `secure-alloc`, `secure-free`, `secure-wipe` — guard-paged, mlock'd memory outside GC |
+| `(std compress native-rust)` | flate2 | `deflate-bytevector`, `inflate-bytevector`, `gzip-bytevector`, `gunzip-bytevector` with size limits |
+| `(std regex-native)` | regex (NFA) | `regex-compile`, `regex-match?`, `regex-find`, `regex-replace-all` — ReDoS-immune |
+| `(std db sqlite-native)` | rusqlite (bundled) | `sqlite-open`, `sqlite-exec`, `sqlite-prepare`, parameterized queries |
+| `(std db postgresql-native)` | rust-postgres | `pg-connect`, `pg-exec`, `pg-query`, parameterized queries |
+| `(std os epoll-native)` | libc | `epoll-create`, `epoll-ctl`, `epoll-wait` |
+| `(std os inotify-native)` | libc | `inotify-init`, `inotify-add-watch`, `inotify-read-events` |
+| `(std os landlock-native)` | libc (syscalls) | Landlock LSM ABI v1-v7 — filesystem and network sandboxing |
+
+See [docs/native-rust.md](docs/native-rust.md) for architecture, C ABI design, and migration details.
+
+### Legacy C Library Wrappers (require [chez-*](https://github.com/ober) libraries)
+
+These modules use external C libraries via chez-* FFI shims. They remain functional but are being superseded by the Rust native backend above.
+
 | Module | Wraps | Provides |
 |--------|-------|----------|
 | `(std net request)` | [chez-https](https://github.com/ober/chez-https) | `http-get`, `http-post`, `http-put`, `http-delete`, `url-encode` |
@@ -175,16 +196,18 @@ One import for everything:
 ```bash
 make test          # Core tests (289 tests)
 make test-features # Phase 2+3 feature tests (637 tests)
-make test-wrappers # External library wrapper tests (27 tests)
+make test-native   # Rust native backend tests (requires `make native` first)
+make test-wrappers # Legacy chez-* library wrapper tests (27 tests)
 make test-all      # Everything (953+ tests)
 ```
 
-Runs 289 core tests across reader, core macros, runtime, standard library, FFI, module paths, and expanded stdlib. Feature tests add 637 more for Phase 2 and Phase 3 libraries. Wrapper tests add 27 more for chez-* library integrations.
+Runs 289 core tests across reader, core macros, runtime, standard library, FFI, module paths, and expanded stdlib. Feature tests add 637 more for Phase 2 and Phase 3 libraries. Native tests cover the Rust backend (crypto, compression, regex, databases, OS). Wrapper tests cover the legacy chez-* C library integrations.
 
 ## Requirements
 
 - [Chez Scheme](https://cisco.github.io/ChezScheme/) 10.x (stock, unmodified)
-- Optional: [chez-*](https://github.com/ober) libraries for networking, compression, PCRE2, LevelDB, SQLite, PostgreSQL, epoll, inotify, crypto
+- Optional: [Rust toolchain](https://rustup.rs/) for building `libjerboa_native.so` (crypto, compression, regex, databases, OS integration)
+- Optional (legacy): [chez-*](https://github.com/ober) libraries for networking, compression, PCRE2, LevelDB, SQLite, PostgreSQL, epoll, inotify, crypto
 
 ## Project Structure
 
@@ -234,25 +257,36 @@ lib/
       temporaries.sls  # :std/os/temporaries
       signal.sls       # :std/os/signal
       fdio.sls         # :std/os/fdio
-      epoll.sls        # :std/os/epoll (wraps chez-epoll)
-      inotify.sls      # :std/os/inotify (wraps chez-inotify)
+      epoll.sls        # :std/os/epoll (wraps chez-epoll — legacy)
+      epoll-native.sls # :std/os/epoll-native (Rust via libjerboa_native.so)
+      inotify.sls      # :std/os/inotify (wraps chez-inotify — legacy)
+      inotify-native.sls # :std/os/inotify-native (Rust via libjerboa_native.so)
+      landlock-native.sls # :std/os/landlock-native (Rust via libjerboa_native.so)
     net/
-      request.sls      # :std/net/request (wraps chez-https)
-      httpd.sls        # :std/net/httpd (wraps chez-https)
-      ssl.sls          # :std/net/ssl (wraps chez-ssl)
+      request.sls      # :std/net/request (wraps chez-https — legacy)
+      httpd.sls        # :std/net/httpd (wraps chez-https — legacy)
+      ssl.sls          # :std/net/ssl (wraps chez-ssl — legacy)
     compress/
-      zlib.sls         # :std/compress/zlib (wraps chez-zlib)
+      zlib.sls         # :std/compress/zlib (wraps chez-zlib — legacy)
+      native-rust.sls  # :std/compress/native-rust (flate2 via libjerboa_native.so)
     db/
-      leveldb.sls      # :std/db/leveldb (wraps chez-leveldb)
-      sqlite.sls       # :std/db/sqlite (wraps chez-sqlite)
-      postgresql.sls   # :std/db/postgresql (wraps chez-postgresql)
+      leveldb.sls      # :std/db/leveldb (wraps chez-leveldb — legacy)
+      sqlite.sls       # :std/db/sqlite (wraps chez-sqlite — legacy)
+      sqlite-native.sls # :std/db/sqlite-native (rusqlite via libjerboa_native.so)
+      postgresql.sls   # :std/db/postgresql (wraps chez-postgresql — legacy)
+      postgresql-native.sls # :std/db/postgresql-native (rust-postgres via libjerboa_native.so)
     crypto/
       digest.sls       # :std/crypto/digest
-      cipher.sls       # :std/crypto/cipher (wraps chez-crypto)
-      hmac.sls         # :std/crypto/hmac (wraps chez-crypto)
-      pkey.sls         # :std/crypto/pkey (wraps chez-crypto)
-      kdf.sls          # :std/crypto/kdf (wraps chez-crypto)
-      etc.sls          # :std/crypto/etc (wraps chez-crypto)
+      native.sls       # :std/crypto/native (direct OpenSSL FFI — legacy)
+      native-rust.sls  # :std/crypto/native-rust (ring via libjerboa_native.so)
+      secure-mem.sls   # :std/crypto/secure-mem (mlock'd memory via Rust)
+      cipher.sls       # :std/crypto/cipher (wraps chez-crypto — legacy)
+      hmac.sls         # :std/crypto/hmac (wraps chez-crypto — legacy)
+      pkey.sls         # :std/crypto/pkey (wraps chez-crypto — legacy)
+      kdf.sls          # :std/crypto/kdf (wraps chez-crypto — legacy)
+      etc.sls          # :std/crypto/etc (wraps chez-crypto — legacy)
+    native.sls         # :std/native — Rust native library loader
+    regex-native.sls   # :std/regex-native (Rust NFA regex via libjerboa_native.so)
     foreign.sls        # :std/foreign — FFI DSL
     cli/
       getopt.sls       # :std/cli/getopt
@@ -260,9 +294,23 @@ lib/
       srfi-13.sls      # :std/srfi/13
       srfi-19.sls      # :std/srfi/19
     pregexp.sls        # :std/pregexp
-    pcre2.sls          # :std/pcre2 (wraps chez-pcre2)
+    pcre2.sls          # :std/pcre2 (wraps chez-pcre2 — legacy)
     test.sls           # :std/test
     logger.sls         # :std/logger
+jerboa-native-rs/        # Rust native library project
+  Cargo.toml             # ring, flate2, regex, rusqlite, postgres, inotify, libc
+  src/
+    lib.rs               # top-level: module declarations, init
+    crypto.rs            # ring: digest, hmac, aead, csprng, pbkdf2, scrypt
+    compress.rs          # flate2: deflate, inflate, gzip, gunzip
+    regex_native.rs      # regex crate: compile, match, find, replace
+    sqlite.rs            # rusqlite: open, prepare, bind, step, finalize
+    postgres_native.rs   # rust-postgres: connect, query, execute
+    epoll.rs             # epoll: create, ctl, wait
+    inotify_native.rs    # inotify: init, add_watch, read_events
+    landlock.rs          # landlock: ABI v1-v7, filesystem + network rules
+    secure_mem.rs        # mlock, guard pages, explicit_bzero
+    panic.rs             # catch_unwind wrapper for all extern "C" functions
 tests/
   test-reader.ss       # 65 reader tests
   test-core.ss         # 68 core macro tests

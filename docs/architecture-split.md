@@ -41,21 +41,27 @@ Examples of what belongs here:
 
 ## Current Inventory
 
-### Correctly placed in chez-* (FFI shims)
+### Replaced by Rust native backend (`libjerboa_native.so`)
 
-These are pure C glue — no logic beyond marshaling:
+These chez-* C FFI shims have Rust replacements in `jerboa-native-rs/`. The Rust modules are the recommended backend; the chez-* modules remain as legacy fallbacks.
+
+| chez-* (legacy) | Rust replacement | Jerboa module |
+|------------------|-----------------|---------------|
+| chez-crypto (OpenSSL) | ring | `(std crypto native-rust)` |
+| chez-zlib (libz) | flate2 | `(std compress native-rust)` |
+| chez-pcre2 (libpcre2) | regex (NFA, ReDoS-immune) | `(std regex-native)` |
+| chez-sqlite (libsqlite3) | rusqlite (bundled) | `(std db sqlite-native)` |
+| chez-postgresql (libpq) | rust-postgres | `(std db postgresql-native)` |
+| chez-epoll (syscalls) | libc (Rust) | `(std os epoll-native)` |
+| chez-inotify (syscalls) | libc (Rust) | `(std os inotify-native)` |
+| — (landlock-shim.c) | libc (Rust) | `(std os landlock-native)` |
+
+### Still chez-* only (no Rust replacement yet)
 
 | Library | C Library | What It Does |
 |---------|-----------|-------------|
-| chez-ssl | OpenSSL | `ssl-connect`, `ssl-read`, `ssl-write` — direct SSL_* calls |
-| chez-zlib | zlib | `gzip-bytevector`, `gunzip-bytevector` — direct compress/uncompress |
-| chez-crypto | OpenSSL libcrypto | Hash, HMAC, cipher, Ed25519 — direct EVP_* calls |
-| chez-sqlite | SQLite3 | `sqlite-open`, `sqlite-exec`, `sqlite-prepare` — direct sqlite3_* calls |
-| chez-postgresql | libpq | `pg-connect`, `pg-exec` — direct PQ* calls |
+| chez-ssl | OpenSSL | `ssl-connect`, `ssl-read`, `ssl-write` — direct SSL_* calls (rustls-ffi planned) |
 | chez-leveldb | LevelDB | `leveldb-open`, `leveldb-put`, `leveldb-get` — direct C API |
-| chez-pcre2 | PCRE2 | `pcre2-compile`, `pcre2-match` — direct pcre2_* calls |
-| chez-epoll | Linux kernel | `epoll-create`, `epoll-wait` — direct syscalls |
-| chez-inotify | Linux kernel | `inotify-init`, `inotify-add-watch` — direct syscalls |
 | chez-scintilla | Scintilla | Editor widget message passing — direct Scintilla API |
 | chez-qt | Qt6 | Widget creation, signals/slots — direct Qt C++ shim |
 

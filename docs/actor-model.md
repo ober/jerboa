@@ -222,7 +222,7 @@ To convert a time object to a float without SRFI-19:
 │  (std misc channel)  — bounded channels + select     │
 │  (std misc thread)   — Gambit thread API             │
 │  (std task)          — task groups + futures         │
-│  (std net ssl)       — TCP+TLS via chez-ssl          │
+│  (std net ssl)       — TCP+TLS via chez-ssl (legacy)  │
 │  (jerboa core)       — match, def, defstruct         │
 └──────────────────────────────────────────────────────┘
 ```
@@ -3426,7 +3426,7 @@ Implementation checklist:
 
 **File**: `lib/std/actor/transport.sls`
 **Test**: `tests/test-actor-transport.ss`
-**Dependencies**: `core.sls`, `(std net ssl)` (chez-ssl fd-based TCP)
+**Dependencies**: `core.sls`, `(std net ssl)` (chez-ssl fd-based TCP — legacy, no Rust replacement yet)
 
 Implementation checklist:
 - [x] `message->bytes` serializes to 4-byte-length-prefixed fasl bytevector
@@ -3451,7 +3451,7 @@ Implementation checklist:
 remote `(id node)` branches took 2 args. Fixed remote to take 3 args `(id node 'remote)`
 so `case-lambda` dispatch works correctly.
 
-**Note**: TCP integration uses `(std net ssl)` / `chez-ssl` fd-based API:
+**Note**: TCP integration uses `(std net ssl)` / `chez-ssl` fd-based API (legacy — no Rust replacement yet):
 `tcp-connect`, `tcp-listen`, `tcp-accept`, `tcp-read`, `tcp-write`, `tcp-close`.
 Run tests from the `chez-ssl` directory (or with full .so path) so `chez_ssl_shim.so` loads.
 
@@ -3547,7 +3547,7 @@ JSON would require explicit conversion for every message type.
 ### Why cookie authentication instead of TLS client certs?
 
 Cookie auth (shared secret) is simpler to set up and sufficient for a trusted
-private network. TLS with chez-ssl can be layered on top for encryption without
+private network. TLS via chez-ssl (legacy) can be layered on top for encryption without
 changing the authentication model.
 
 ### Why monitors instead of links for supervision?

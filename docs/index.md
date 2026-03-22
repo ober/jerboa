@@ -8,7 +8,8 @@ Updated 2026-03-22.
 - [whats-new.md](whats-new.md) — What's new: 33 modules added in latest push
 - [whatsnew.md](whatsnew.md) — Earlier additions: translator enhancements and initial stdlib
 - [pending.md](pending.md) — Roadmap: what's left to make Jerboa better
-- [architecture-split.md](architecture-split.md) — Design: chez-* (FFI shims) vs jerboa (application logic)
+- [architecture-split.md](architecture-split.md) — Design: Rust native / chez-* (FFI backends) vs jerboa (application logic)
+- [native-rust.md](native-rust.md) — Rust native library: architecture, migration status, C ABI design
 - [rocks.md](rocks.md) — Distribution and packaging
 
 ## Security

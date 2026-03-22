@@ -4,7 +4,7 @@ Last updated: 2026-03-22.
 
 ## Current State
 
-500 modules, ~123K lines, 2,900+ tests, 13 fuzz harnesses. Full Gerbil API surface on stock Chez Scheme. 15 chez-* companion libraries. A complete editor (jerboa-emacs) with TUI + Qt, Org-mode, LSP, Git.
+500 modules, ~123K lines, 2,900+ tests, 13 fuzz harnesses. Full Gerbil API surface on stock Chez Scheme. Rust native backend (`libjerboa_native.so`) for crypto, compression, regex, databases, and OS integration. Legacy chez-* C FFI shims still available as fallbacks. A complete editor (jerboa-emacs) with TUI + Qt, Org-mode, LSP, Git.
 
 ---
 
@@ -27,7 +27,7 @@ Jerboa keeps thin `(std srfi srfi-N)` re-export wrappers for namespace/conflict 
 
 ### Integrate Remaining chez-* Libraries
 
-Three chez-* libraries are built and tested but not in jerboa's Makefile:
+Most chez-* C FFI libraries have been superseded by the Rust native backend (see `docs/native-rust.md`). The remaining chez-* libraries that still need integration:
 
 | Library | Integration |
 |---------|------------|
@@ -36,6 +36,13 @@ Three chez-* libraries are built and tested but not in jerboa's Makefile:
 | **chez-r7rs** | Add to library path for `(scheme base)` etc. |
 
 `chez-ssh` is done — protocol logic split into `(std net ssh ...)` (10 modules, 3,132 lines), FFI stays in `(chez-ssh crypto)`.
+
+### Complete Rust Native Migration
+
+Move remaining modules from chez-* to Rust native:
+- **TLS**: `(std net ssl)` still uses chez-ssl / OpenSSL — need rustls-ffi integration
+- **LevelDB**: `(std db leveldb)` still uses chez-leveldb — need rusty-leveldb or sled
+- **Default imports**: Main modules (e.g., `(std db sqlite)`) still import from chez-* — need to rewire to `-native` modules
 
 ### Web Framework
 
@@ -49,7 +56,7 @@ Three chez-* libraries are built and tested but not in jerboa's Makefile:
 
 ### Database Migrations
 
-`(std db migrate)` — numbered migration files, up/down, tracking table. Works with both chez-sqlite and chez-postgresql.
+`(std db migrate)` — numbered migration files, up/down, tracking table. Works with both SQLite and PostgreSQL (via Rust native or legacy chez-* backends).
 
 ---
 
@@ -84,7 +91,7 @@ Instrument mutex/hashtable operations, detect happens-before violations, report 
 The current CLAUDE.md is oriented toward Gerbil MCP tools. It should also have:
 - Jerboa-specific patterns and idioms
 - Common R6RS gotchas (definition context, phase separation)
-- Which chez-* library to use for what
+- Which backend to use (Rust native vs legacy chez-*) for what
 - How jerboa's module namespace maps to Gerbil's
 - Testing conventions
 
@@ -107,4 +114,4 @@ Things that would be cool but aren't blocking anything:
 - **Windows graceful degradation** — security modules warn instead of crash on non-Linux
 - **WASM Chez** — run jerboa in the browser (experimental territory)
 - **jemacs inline eval** — evaluate expression in buffer, show result inline (REPL-driven development)
-- **jemacs package browser** — browse chez-* libraries from the editor
+- **jemacs package browser** — browse available libraries (Rust native + chez-*) from the editor

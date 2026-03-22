@@ -349,19 +349,19 @@ Reads directly from `/dev/urandom`. Never uses Chez's `(random N)` for security 
 
 ### Digests -- `(std crypto digest)` and `(std crypto native)`
 
-Via OpenSSL libcrypto FFI: MD5, SHA-1, SHA-256, SHA-384, SHA-512.
+Via OpenSSL libcrypto FFI (legacy) or Rust ring (recommended): MD5, SHA-1, SHA-256, SHA-384, SHA-512.
 
 ### HMAC -- `(std crypto hmac)` and `(std crypto native)`
 
-HMAC-SHA256 via OpenSSL EVP interface.
+HMAC-SHA256 via OpenSSL EVP interface (legacy) or Rust ring (recommended).
 
 ### AEAD -- `(std crypto aead)`
 
-AES-256-GCM via OpenSSL EVP: `aead-encrypt`, `aead-decrypt`, `aead-key-generate`. 12-byte IV, 16-byte tag.
+AES-256-GCM via OpenSSL EVP (legacy) or Rust ring (recommended): `aead-encrypt`, `aead-decrypt`, `aead-key-generate`. 12-byte IV, 16-byte tag.
 
-### Rust-backed crypto -- `(std crypto native-rust)`
+### Rust-backed crypto (recommended) -- `(std crypto native-rust)`
 
-Drop-in replacement using `ring` via `libjerboa_native.so` (Rust). No OpenSSL dependency.
+Recommended backend using `ring` via `libjerboa_native.so` (Rust). No OpenSSL dependency. Build with `make native`.
 
 | Function | Description |
 |----------|-------------|
@@ -380,11 +380,11 @@ Available via `(std crypto native-rust)`. Useful when AES-NI hardware is unavail
 
 ### scrypt KDF
 
-Available via both `(std crypto kdf)` (wraps `chez-crypto`) and `(std crypto native-rust)` (`rust-scrypt`).
+Available via both `(std crypto kdf)` (wraps `chez-crypto` — legacy) and `(std crypto native-rust)` (`rust-scrypt` — recommended).
 
 ### Password hashing -- `(std crypto password)`
 
-PBKDF2-HMAC-SHA256 via OpenSSL. 600,000 iterations default (OWASP 2023 recommendation).
+PBKDF2-HMAC-SHA256 via OpenSSL (legacy) or Rust ring (recommended). 600,000 iterations default (OWASP 2023 recommendation).
 
 - `password-hash` -- derive hash from password + salt
 - `password-verify` -- constant-time verification
@@ -442,7 +442,7 @@ These modules are implemented but not covered in depth above.
 These are known gaps. They are not on any roadmap in this document -- just honest statements about what does not exist.
 
 - **No formal verification.** The security modules are tested but not formally proved. No Coq/Isabelle/ACL2 proofs exist.
-- **No FIPS 140-3 validation.** The crypto uses OpenSSL or ring, which can be FIPS-validated, but Jerboa itself has not undergone FIPS evaluation.
+- **No FIPS 140-3 validation.** The crypto uses ring (recommended) or OpenSSL (legacy), which can be FIPS-validated, but Jerboa itself has not undergone FIPS evaluation.
 - **No covert channel analysis.** Chez Scheme's GC is a timing side channel. No mitigation exists for timing, storage, or resource-exhaustion covert channels.
 - **No Common Criteria evaluation.** No Protection Profile, Security Target, or EAL evaluation has been performed.
 - **Seccomp is x86_64 only.** The BPF bytecode generator hardcodes `AUDIT_ARCH_X86_64` and x86_64 syscall numbers.
@@ -452,7 +452,7 @@ These are known gaps. They are not on any roadmap in this document -- just hones
 - **No TOCTOU-safe path checking.** `canonicalize-path` uses `realpath(3)` before access, not `O_NOFOLLOW` + `/proc/self/fd/N` after open.
 - **`define-syntax` remains in the sandbox allowlist.** Macro definition in sandboxed code is possible. Whether this is a risk depends on the use case.
 - **No max-output-size for sandboxes.** A sandboxed expression can produce unbounded output via `display`/`write`.
-- **No Argon2id.** Password hashing uses PBKDF2 (universally available via OpenSSL) rather than Argon2id (requires separate library).
+- **No Argon2id.** Password hashing uses PBKDF2 (via OpenSSL or Rust ring) rather than Argon2id (requires separate library).
 - **FFI audit (Phase 5 of parser hardening) is not started.** Null return checks, type validation, and SQL injection lint rules are unimplemented.
 - **No red team evaluation.** No independent adversarial testing has been performed.
 - **Secure memory is outside GC.** The `with-secure-region` API requires manual pointer arithmetic via `foreign-ref`/`foreign-set!`. There is no high-level typed interface.

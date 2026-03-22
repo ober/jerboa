@@ -1,6 +1,6 @@
 # Replacing C Dependencies with a Unified Rust Native Library
 
-Replace Jerboa's 10+ C library dependencies with a single Rust shared library. Every C library Jerboa currently links becomes a Rust crate with memory safety, no backtracking, and audited implementations — callable from Chez Scheme via the same `foreign-procedure` FFI.
+Jerboa's C library dependencies are being replaced with a single Rust shared library (`libjerboa_native.so`). Rust implementations are complete for crypto, compression, regex, databases, and OS integration. TLS (rustls) and LevelDB are still pending. The legacy chez-* C wrappers remain available as fallbacks. Every Rust module is callable from Chez Scheme via the same `foreign-procedure` FFI.
 
 ---
 
@@ -753,27 +753,29 @@ The result is a single binary with zero runtime dependencies beyond libc — Che
 
 ## Migration Strategy
 
-### Phase 1: Parallel Installation
+### Current Status
 
-Both C libraries and the Rust library are available. Jerboa modules detect which is present and choose:
+We are in **Phase 1** (parallel installation). The Rust implementations are complete for crypto, compression, regex, databases (SQLite, PostgreSQL), and OS integration (epoll, inotify, landlock). However, the "default" modules (e.g., `(std db sqlite)`, `(std crypto cipher)`) still import from chez-* C libraries. The Rust-backed modules are available as separate imports (e.g., `(std db sqlite-native)`, `(std crypto native-rust)`).
+
+**TLS is deferred** — `(std net ssl)` still requires chez-ssl / OpenSSL. The rustls-ffi integration is planned but not yet implemented due to the complexity of stateful TLS session management.
+
+### Phase 1: Parallel Installation (CURRENT)
+
+Both C libraries and the Rust library are available as separate modules. New code should prefer the `-native` / `native-rust` modules:
 
 ```scheme
-(define use-native-crypto?
-  (guard (e [#t #f])
-    (load-shared-object "libjerboa_native.so")
-    #t))
+;; Preferred — uses Rust ring via libjerboa_native.so
+(import (std crypto native-rust))
 
-(define sha256
-  (if use-native-crypto?
-    jerboa-native-sha256    ;; Rust ring
-    openssl-sha256))        ;; C libcrypto
+;; Legacy — uses OpenSSL via chez-crypto
+(import (std crypto cipher))
 ```
 
 This allows incremental testing — run the full test suite against both backends and compare results.
 
 ### Phase 2: Native-First
 
-The Rust library becomes the default. C libraries are the fallback for platforms where Rust isn't available (rare — Rust supports all major platforms).
+The Rust library becomes the default import for all modules that have Rust replacements. The chez-* modules become explicitly legacy.
 
 ### Phase 3: C Removal
 
