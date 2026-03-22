@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+#
+# jerboa — CLI entry point for the Jerboa Scheme environment
+#
+
+set -euo pipefail
+
+# Auto-detect JERBOA_HOME as the parent of this script's directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+JERBOA_HOME="${JERBOA_HOME:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+
+SCHEME="${SCHEME:-scheme}"
+LIBDIRS="$JERBOA_HOME/lib"
+VERSION="0.1.0"
+
+# Colors for test output (disabled if not a terminal)
+if [ -t 1 ]; then
+    GREEN='\033[0;32m'
+    RED='\033[0;31m'
+    BOLD='\033[1m'
+    RESET='\033[0m'
+else
+    GREEN='' RED='' BOLD='' RESET=''
+fi
+
+usage() {
+    cat <<EOF
+Usage: jerboa [command] [args...]
+
+Commands:
+  (no args)          Launch the Jerboa REPL
+  repl               Launch the Jerboa REPL
+  run <file>         Run a Scheme script
+  eval '<expr>'      Evaluate a single expression
+  test [dir]         Discover and run test files (default: tests/)
+  build              Run make build in the project directory
+  version            Print version info
+  help               Print this help message
+
+Environment:
+  JERBOA_HOME        Project root (auto-detected from script location)
+  SCHEME             Chez Scheme binary (default: scheme)
+EOF
+}
+
+cmd_repl() {
+    exec "$SCHEME" --libdirs "$LIBDIRS" --program <(cat <<'REPL'
+(import (jerboa prelude) (std repl))
+(jerboa-repl)
+REPL
+    )
+}
+
+cmd_run() {
+    if [ $# -eq 0 ]; then
+        echo "Error: jerboa run requires a file argument" >&2
+        echo "Usage: jerboa run <file>" >&2
+        exit 1
+    fi
+    local file="$1"
+    if [ ! -f "$file" ]; then
+        echo "Error: file not found: $file" >&2
+        exit 1
+    fi
+    exec "$SCHEME" --libdirs "$LIBDIRS" --script "$file"
+}
+
+cmd_eval() {
+    if [ $# -eq 0 ]; then
+        echo "Error: jerboa eval requires an expression" >&2
+        echo "Usage: jerboa eval '<expr>'" >&2
+        exit 1
+    fi
+    local expr="$1"
+    "$SCHEME" --libdirs "$LIBDIRS" --program <(cat <<EVAL
+(import (jerboa prelude))
+$expr
+EVAL
+    )
+}
+
+cmd_test() {
+    local test_dir="${1:-$JERBOA_HOME/tests}"
+    if [ ! -d "$test_dir" ]; then
+        echo "Error: test directory not found: $test_dir" >&2
+        exit 1
+    fi
+
+    local files=()
+    while IFS= read -r -d '' f; do
+        files+=("$f")
+    done < <(find "$test_dir" -name 'test-*.ss' -type f -print0 | sort -z)
+
+    if [ ${#files[@]} -eq 0 ]; then
+        echo "No test files (test-*.ss) found in $test_dir"
+        exit 0
+    fi
+
+    local passed=0 failed=0 total=${#files[@]}
+    echo -e "${BOLD}Running $total test file(s) from $test_dir${RESET}"
+    echo ""
+
+    for f in "${files[@]}"; do
+        local name
+        name="$(basename "$f")"
+        if "$SCHEME" --libdirs "$LIBDIRS" --script "$f" 2>&1; then
+            echo -e "  ${GREEN}PASS${RESET}  $name"
+            ((passed++))
+        else
+            echo -e "  ${RED}FAIL${RESET}  $name"
+            ((failed++))
+        fi
+    done
+
+    echo ""
+    echo -e "${BOLD}Results: $passed passed, $failed failed, $total total${RESET}"
+    [ "$failed" -eq 0 ]
+}
+
+cmd_build() {
+    exec make -C "$JERBOA_HOME" build
+}
+
+cmd_version() {
+    echo "jerboa $VERSION"
+    echo "home: $JERBOA_HOME"
+    "$SCHEME" --version 2>&1 || true
+}
+
+# --- Main dispatch ---
+
+case "${1:-}" in
+    ""|repl)
+        cmd_repl
+        ;;
+    run)
+        shift
+        cmd_run "$@"
+        ;;
+    eval)
+        shift
+        cmd_eval "$@"
+        ;;
+    test)
+        shift
+        cmd_test "$@"
+        ;;
+    build)
+        cmd_build
+        ;;
+    version|--version|-v)
+        cmd_version
+        ;;
+    help|--help|-h)
+        usage
+        ;;
+    *)
+        echo "Error: unknown command '$1'" >&2
+        echo "" >&2
+        usage >&2
+        exit 1
+        ;;
+esac
