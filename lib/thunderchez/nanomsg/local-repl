@@ -1,0 +1,73 @@
+#! /usr/bin/env scheme-script
+;; -*- mode: scheme -*-
+;;
+;; Copyright 2016 Aldo Nicolas Bruno
+;;
+;; Licensed under the Apache License, Version 2.0 (the "License");
+;; you may not use this file except in compliance with the License.
+;; You may obtain a copy of the License at
+;;
+;;     http://www.apache.org/licenses/LICENSE-2.0
+;;
+;; Unless required by applicable law or agreed to in writing, software
+;; distributed under the License is distributed on an "AS IS" BASIS,
+;; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+;; See the License for the specific language governing permissions and
+;; limitations under the License.
+
+;
+; example of remote REPL
+; you can use any transport, tcp:// ipc:// websocket inproc
+; see http://nanomsg.org/v1.0.0/nanomsg.7.html
+; and nanomsg.sls for details
+;
+; ./local-repl tcp://127.0.0.1:12345
+; ABC
+;
+; meanwhile in another terminal...
+; ./remote-repl tcp://127.0.0.1:12345
+; > (+ 1 2)
+; 3
+; > (printf "ABC~n") --> will print ABC on the local repl process
+;
+; The nice thing is that you can scale to any protocol and
+; that it can be integrated in an event/main loop
+; it uses non-blocking (read) and you invoke (my-local-repl) until => #f
+;
+; TODO: add a command for local exit. #!eof object will only close the remote 
+; connection....
+
+#!chezscheme
+
+(import (chezscheme) (nanomsg))
+(nanomsg-library-init)
+
+(define argv (command-line-arguments))
+
+(define sock (nn-socket AF_SP NN_REP))
+(define eid (nn-bind sock (car argv)))
+
+(define (my-local-repl)
+  (call/cc 
+   (lambda (return)
+     (let* ([buf (box #t)]
+	    [r (nn-recv sock buf NN_MSG NN_DONTWAIT)])
+       (when r
+	     (guard (e [else (printf "error in eval ~d~n" e)])
+		    (with-input-from-string (utf8->string (unbox buf))
+		      (lambda ()
+			(let ([pr (call-with-string-output-port
+				   (lambda (p)
+				     (let ([token (read)])
+				       (if #f;(eof-object? token) 
+					   (return #f)
+					   (pretty-print 
+					    (eval token 
+						  (interaction-environment)) p)))))])
+			  (nn-send sock (string->utf8 pr) 0)))))))
+     #t)))
+
+(let loop () 
+  (when (my-local-repl)
+	(sleep (make-time 'time-duration 1000000 0))
+	(loop)))

@@ -1,0 +1,13 @@
+# Codegen data files (large, not needed at runtime)
+*.sexp
+*.json
+# Test images
+*.png
+*.bmp
+# Codegen scripts
+parse-json.ss
+parse-sdl-json.ss
+# Test files
+mtest.ss
+# TTF shim C source (pre-built)
+ttf-shim/

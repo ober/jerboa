@@ -1,0 +1,51 @@
+#! /usr/bin/env scheme-script
+; -*- mode: scheme -*-
+
+; Getting Started with 'nanomsg'
+; Pipeline (A One-Way Pipe)
+; from https://github.com/dysinger/nanomsg-examples#pipeline
+
+#!chezscheme
+
+(import (nanomsg) (chezscheme))
+
+(nanomsg-library-init)
+
+(define node0-name "node0")
+(define node1-name "node1")
+
+(define (node0 url)
+  (define sock (nn-socket AF_SP NN_PULL))
+  (nn-bind sock url)
+  (let loop ()
+    (let ([buf (box #t)])
+      (define bytes (nn-recv sock buf NN_MSG 0))
+      (printf "NODE0: RECEIVED '~d'~n" (utf8->string (unbox buf))))
+    (loop)))
+
+
+(define (node1 url msg)
+  (define sock (nn-socket AF_SP NN_PUSH))
+  (define eid (nn-connect sock url))
+  (printf "NODE1: SENDING '~d'~n" msg)
+  (let ([bytes (nn-send sock (string->utf8 msg) 0)])
+    (nn-shutdown sock eid)))
+
+(define argv (command-line-arguments))
+(define argc (length argv))
+
+(cond
+ [(and (> argc 1) (string=? node0-name (car argv)))
+  (node0 (cadr argv))]
+ [(and (> argc 2) (string=? node1-name (car argv)))
+  (node1 (cadr argv) (caddr argv))]
+ [else
+  (printf "Usage: pipeline ~d|~d <URL> <ARG> ...'~n" node0-name node1-name)])
+
+
+#!eof
+
+./pipeline node0 ipc:///tmp/pipeline.ipc & node0=$! && sleep 1
+./pipeline node1 ipc:///tmp/pipeline.ipc "Hello, World!"
+./pipeline node1 ipc:///tmp/pipeline.ipc "Goodbye."
+kill $node0

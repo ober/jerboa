@@ -1,0 +1,51 @@
+#!chezscheme
+;;; (std ffi sdl2 ttf) -- Re-export of (thunderchez sdl2 ttf) bindings
+(library (std ffi sdl2 ttf)
+  (export
+    ttf-init
+    ttf-was-init
+    ttf-quit
+    ttf-linked-version
+    ttf-open-font
+    ttf-open-font-rw
+    ttf-open-font-index
+    ttf-open-font-index-rw
+    ttf-close-font
+    ttf-byte-swapped-unicode
+    ttf-get-font-style
+    ttf-set-font-style
+    ttf-get-font-outline
+    ttf-set-font-outline
+    ttf-get-font-hinting
+    ttf-set-font-hinting
+    ttf-get-font-kerning
+    ttf-set-font-kerning
+    ttf-font-height
+    ttf-font-ascent
+    ttf-font-descent
+    ttf-font-line-skip
+    ttf-font-faces
+    ttf-font-face-is-fixed-width
+    ttf-font-face-family-name
+    ttf-font-face-style-name
+    ttf-glyph-is-provided
+    ttf-glyph-metrics
+    ttf-size-text
+    ttf-size-ut-f8
+    ttf-size-unicode
+    sttf-render-text-solid
+    sttf-render-ut-f8-solid
+    sttf-render-unicode-solid
+    sttf-render-glyph-solid
+    sttf-render-text-shaded
+    sttf-render-ut-f8-shaded
+    sttf-render-unicode-shaded
+    sttf-render-glyph-shaded
+    sttf-render-text-blended
+    sttf-render-ut-f8-blended
+    sttf-render-unicode-blended
+    sttf-render-glyph-blended
+    sdl-ttf-library-init
+    sdl-shim-ttf-init)
+  (import (thunderchez sdl2 ttf))
+) ;; end library
