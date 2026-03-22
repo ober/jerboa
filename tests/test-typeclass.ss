@@ -232,11 +232,13 @@
 
 (test "user-defined typeclass with superclass: inherits Show"
   (lambda ()
+    ;; Printable number should have ->string from Show
     (assert-equal (tc-apply 'Printable '->string 'number 7) "7"
                   "inherited ->string")))
 
 (test "user-defined typeclass with superclass: own method"
   (lambda ()
+    ;; print! should work
     (let ([proc (tc-ref 'Printable 'number 'print!)])
       (assert-true (procedure? proc) "print! is procedure"))))
 
