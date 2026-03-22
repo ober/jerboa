@@ -158,100 +158,165 @@
           (%sandbox-config-landlock cfg)
           (%sandbox-config-capabilities cfg)))))
 
+  ;; FFI pipe(2) — creates a pair of connected file descriptors
+  (define c-pipe
+    (guard (exn [#t #f])
+      (foreign-procedure "pipe" (u8*) int)))
+
+  (define c-read
+    (guard (exn [#t #f])
+      (foreign-procedure "read" (int u8* size_t) ssize_t)))
+
+  (define c-write
+    (guard (exn [#t #f])
+      (foreign-procedure "write" (int u8* size_t) ssize_t)))
+
+  (define c-close
+    (guard (exn [#t #f])
+      (foreign-procedure "close" (int) int)))
+
+  (define (make-pipe)
+    ;; Returns (values read-fd write-fd) or raises error
+    (let ([buf (make-bytevector 8 0)])  ;; 2 ints
+      (let ([rc (if c-pipe (c-pipe buf) -1)])
+        (when (< rc 0)
+          (error 'make-pipe "pipe(2) failed"))
+        (values (bytevector-s32-native-ref buf 0)
+                (bytevector-s32-native-ref buf 4)))))
+
+  (define (fd-write-all fd bv)
+    ;; Write entire bytevector to fd
+    (let ([len (bytevector-length bv)])
+      (let loop ([offset 0])
+        (when (< offset len)
+          (let ([n (c-write fd (subbytevector bv offset len) (- len offset))])
+            (when (<= n 0)
+              (error 'fd-write-all "write failed"))
+            (loop (+ offset n)))))))
+
+  (define (subbytevector bv start end)
+    (let* ([len (- end start)]
+           [result (make-bytevector len)])
+      (bytevector-copy! bv start result 0 len)
+      result))
+
+  (define (fd-read-all fd max-size)
+    ;; Read up to max-size bytes from fd until EOF
+    (let ([buf (make-bytevector 4096)])
+      (let loop ([chunks '()] [total 0])
+        (let ([n (c-read fd buf 4096)])
+          (cond
+            [(<= n 0)
+             ;; EOF or error — assemble result
+             (let ([result (make-bytevector total)])
+               (let copy-loop ([chunks (reverse chunks)] [offset 0])
+                 (if (null? chunks) result
+                   (let ([chunk (car chunks)])
+                     (bytevector-copy! chunk 0 result offset (bytevector-length chunk))
+                     (copy-loop (cdr chunks) (+ offset (bytevector-length chunk)))))))]
+            [(> (+ total n) max-size)
+             (error 'fd-read-all "data exceeds maximum size" max-size)]
+            [else
+             (let ([chunk (make-bytevector n)])
+               (bytevector-copy! buf 0 chunk 0 n)
+               (loop (cons chunk chunks) (+ total n)))])))))
+
   (define (run-safe-internal thunk timeout seccomp-filter landlock-rules capabilities)
-    ;; Communication via temp file: child writes result, parent reads it.
-    ;; This avoids FFI pipe() dependency while keeping fork-based isolation.
-    (let* ([tmp-file (format "/tmp/jerboa-sandbox-~a" (random 1000000000))]
-           [pid (fork-process)])
-      (if (= pid 0)
-        ;; === CHILD PROCESS ===
-        (guard (exn
-                 [#t
-                  ;; Send error to parent via temp file
-                  (guard (exn2 [#t (exit 2)])
-                    (call-with-output-file tmp-file
-                      (lambda (port)
-                        (write (list 'error
-                                     (cond
-                                       [(sandbox-error? exn)
-                                        (let ([phase (sandbox-error-phase exn)]
-                                              [detail (sandbox-error-detail exn)])
-                                          (format "~a: ~a" phase detail))]
-                                       [(message-condition? exn)
-                                        (condition-message exn)]
-                                       [else "unknown sandbox error"]))
-                               port))
-                      'replace))
-                  (exit 1)])
+    ;; Communication via pipe: child writes result, parent reads it.
+    ;; HARDENED: Uses pipe(2) instead of temp files to prevent symlink attacks,
+    ;; TOCTOU races, and read-eval injection.
+    (let-values ([(read-fd write-fd) (make-pipe)])
+      (let ([pid (fork-process)])
+        (if (= pid 0)
+          ;; === CHILD PROCESS ===
+          (begin
+            ;; Close read end — child only writes
+            (c-close read-fd)
+            (guard (exn
+                     [#t
+                      ;; Send error to parent via pipe
+                      (guard (exn2 [#t (c-close write-fd) (exit 2)])
+                        (let ([msg (cond
+                                     [(sandbox-error? exn)
+                                      (format "~a: ~a"
+                                        (sandbox-error-phase exn)
+                                        (sandbox-error-detail exn))]
+                                     [(message-condition? exn)
+                                      (condition-message exn)]
+                                     [else "unknown sandbox error"])])
+                          (let ([data (string->utf8 (format "(error ~s)" msg))])
+                            (fd-write-all write-fd data)
+                            (c-close write-fd))))
+                      (exit 1)])
 
-          ;; Step 1: Install Landlock
-          (when (and landlock-rules (landlock-available?))
-            (landlock-install! landlock-rules))
+              ;; Step 1: Install Landlock
+              (when (and landlock-rules (landlock-available?))
+                (landlock-install! landlock-rules))
 
-          ;; Step 2: Install seccomp (after file write setup, since seccomp may block writes)
-          ;; Note: we defer seccomp install to after computing result if using strict filters,
-          ;; because we need to write the result file. For io-only filter this works fine.
-          (when (and seccomp-filter (seccomp-available?))
-            (seccomp-install! seccomp-filter))
+              ;; Step 2: Install seccomp AFTER setting up pipe
+              ;; Pipe fd is already open, so even compute-only filter works
+              (when (and seccomp-filter (seccomp-available?))
+                (seccomp-install! seccomp-filter))
 
-          ;; Step 3: Set capabilities
-          (unless (null? capabilities)
-            (current-capabilities capabilities))
+              ;; Step 3: Set capabilities
+              (unless (null? capabilities)
+                (current-capabilities capabilities))
 
-          ;; Step 4: Run thunk with timeout
-          (let ([result
-                  (if timeout
-                    (let ([completed #f]
-                          [value (void)])
-                      (let ([engine (make-engine (lambda () (thunk)))])
-                        (engine (* timeout 10000000)  ;; ~10M ticks/sec
-                          (lambda (ticks val)
-                            (set! completed #t)
-                            (set! value val))
-                          (lambda (new-engine)
-                            (set! completed #f))))
-                      (unless completed
-                        (raise (make-sandbox-error
-                                 "sandbox"
-                                 'timeout
-                                 (format "execution exceeded ~a second timeout"
-                                         timeout))))
-                      value)
-                    (thunk))])
+              ;; Step 4: Run thunk with timeout
+              (let ([result
+                      (if timeout
+                        (let ([completed #f]
+                              [value (void)])
+                          (let ([engine (make-engine (lambda () (thunk)))])
+                            (engine (* timeout 10000000)
+                              (lambda (ticks val)
+                                (set! completed #t)
+                                (set! value val))
+                              (lambda (new-engine)
+                                (set! completed #f))))
+                          (unless completed
+                            (raise (make-sandbox-error
+                                     "sandbox"
+                                     'timeout
+                                     (format "execution exceeded ~a second timeout"
+                                             timeout))))
+                          value)
+                        (thunk))])
 
-            ;; Step 5: Send result to parent
-            (call-with-output-file tmp-file
-              (lambda (port) (write (list 'ok result) port))
-              'replace)
-            (exit 0)))
+                ;; Step 5: Send result to parent via pipe
+                (let ([data (string->utf8 (format "(ok ~s)" result))])
+                  (fd-write-all write-fd data)
+                  (c-close write-fd)
+                  (exit 0)))))
 
-        ;; === PARENT PROCESS ===
-        (begin
-          ;; Wait for child to exit
-          (let-values ([(wpid status) (waitpid pid)])
-            (let ([result-sexp
-                    (guard (exn [#t (list 'error "failed to read child result")])
-                      (if (file-exists? tmp-file)
-                        (let ([sexp (call-with-input-file tmp-file read)])
-                          (delete-file tmp-file)
-                          sexp)
-                        (list 'error (format "child exited with status ~a, no result file"
-                                             status))))])
-              ;; Clean up temp file if still present
-              (when (file-exists? tmp-file) (delete-file tmp-file))
-              (cond
-                [(and (pair? result-sexp) (eq? (car result-sexp) 'ok))
-                 (cadr result-sexp)]
-                [(and (pair? result-sexp) (eq? (car result-sexp) 'error))
-                 (raise (make-sandbox-error
-                          "sandbox"
-                          'eval
-                          (cadr result-sexp)))]
-                [else
-                 (raise (make-sandbox-error
-                          "sandbox"
-                          'fork
-                          (format "child exited with status ~a" status)))])))))))
+          ;; === PARENT PROCESS ===
+          (begin
+            ;; Close write end — parent only reads
+            (c-close write-fd)
+            (let-values ([(wpid status) (waitpid pid)])
+              (let* ([raw-data (guard (exn [#t (make-bytevector 0)])
+                                 (fd-read-all read-fd (* 1 1024 1024)))] ;; 1MB max
+                     [_ (c-close read-fd)]
+                     [result-sexp
+                       (if (> (bytevector-length raw-data) 0)
+                         (guard (exn [#t (list 'error "failed to parse child result")])
+                           (let ([str (utf8->string raw-data)])
+                             (read (open-input-string str))))
+                         (list 'error (format "child exited with status ~a, no output"
+                                              status)))])
+                (cond
+                  [(and (pair? result-sexp) (eq? (car result-sexp) 'ok))
+                   (cadr result-sexp)]
+                  [(and (pair? result-sexp) (eq? (car result-sexp) 'error))
+                   (raise (make-sandbox-error
+                            "sandbox"
+                            'eval
+                            (cadr result-sexp)))]
+                  [else
+                   (raise (make-sandbox-error
+                            "sandbox"
+                            'fork
+                            (format "child exited with status ~a" status)))]))))))))
 
   ;; ========== FFI Initialization ==========
 

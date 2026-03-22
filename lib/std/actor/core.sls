@@ -260,9 +260,17 @@
     (let ([parent (current-actor)]
           [child  (spawn-actor-impl behavior name)])
       (when parent
-        (actor-ref-links-set! parent (cons child (actor-ref-links parent)))
-        (actor-ref-links-set! child  (cons parent (actor-ref-links child))))
+        ;; Synchronize link list modifications under the sched-mutex
+        ;; to prevent concurrent link corruption.
+        (with-mutex (actor-ref-sched-mutex parent)
+          (actor-ref-links-set! parent (cons child (actor-ref-links parent))))
+        (with-mutex (actor-ref-sched-mutex child)
+          (actor-ref-links-set! child  (cons parent (actor-ref-links child)))))
       child))
+
+  ;; Maximum mailbox size. When exceeded, send logs a warning to stderr.
+  ;; Set to #f to disable the warning. Default: 10000.
+  (define *actor-max-mailbox-size* (make-parameter 10000))
 
   (define (send actor msg)
     (cond
@@ -276,6 +284,17 @@
            (error 'send "remote send not configured; call set-remote-send-handler!" actor)))]
       ;; Local, alive
       [(actor-alive? actor)
+       ;; Backpressure warning: log if mailbox is growing too large
+       (let ([max-size (*actor-max-mailbox-size*)])
+         (when max-size
+           (let ([mbox-size (mpsc-length (actor-ref-mailbox actor))])
+             (when (and (fx> mbox-size max-size)
+                        (fx= (fxmod mbox-size max-size) 0))
+               (fprintf (current-error-port)
+                 "WARNING: actor #~a (~a) mailbox at ~a messages (exceeds ~a)~%"
+                 (actor-ref-id actor)
+                 (or (actor-ref-name actor) "?")
+                 mbox-size max-size)))))
        (mpsc-enqueue! (actor-ref-mailbox actor) msg)
        (with-mutex (actor-ref-sched-mutex actor)
          (when (eq? (actor-ref-state actor) 'idle)

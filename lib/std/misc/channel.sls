@@ -212,16 +212,18 @@
             (loop (cdr chs) (cdr hs)))))))
 
   ;; Blocking select with optional timeout
-  ;; Strategy: shared condition variable that all channels signal
+  ;; Strategy: shared condition + stop flag so watcher threads terminate cleanly
   (define (channel-select-wait channels handlers timeout-secs timeout-thunk)
     ;; First, try non-blocking
     (let try-loop ([chs channels] [hs handlers])
       (if (null? chs)
         ;; None ready — block
         (let ([shared-cond (make-condition)]
-              [shared-mutex (make-mutex)])
+              [shared-mutex (make-mutex)]
+              [stop-box (box #f)])  ;; signal watchers to stop
           ;; Install watchers: for each channel, spawn a thread that waits
-          ;; and signals the shared condition when data arrives
+          ;; and signals the shared condition when data arrives.
+          ;; Watchers check stop-box to terminate cleanly.
           (let ([watchers
                  (map (lambda (ch)
                         (fork-thread
@@ -229,8 +231,9 @@
                             (with-mutex (channel-mutex ch)
                               (let loop ()
                                 (cond
+                                  ;; Stop flag set — another watcher found data, exit
+                                  [(unbox stop-box) (void)]
                                   [(fx> (channel-count ch) 0)
-                                   ;; Data available — signal main
                                    (mutex-acquire shared-mutex)
                                    (condition-signal shared-cond)
                                    (mutex-release shared-mutex)]
@@ -239,26 +242,34 @@
                                    (condition-signal shared-cond)
                                    (mutex-release shared-mutex)]
                                   [else
+                                   ;; Use timed wait so we can check stop-box periodically
                                    (condition-wait (channel-not-empty ch)
-                                                   (channel-mutex ch))
+                                                   (channel-mutex ch)
+                                                   (make-time 'time-duration 100000000 0)) ;; 100ms
                                    (loop)]))))))
                       channels)])
             ;; Wait on shared condition
             (mutex-acquire shared-mutex)
             (if timeout-secs
-              (let ([ns (exact (floor (* timeout-secs 1000000000)))]
-                    [s  (exact (floor timeout-secs))])
-                (let ([ns-part (exact (floor (* (- timeout-secs s) 1000000000)))])
-                  (condition-wait shared-cond shared-mutex
-                                 (make-time 'time-duration ns-part s))))
+              (let ([s  (exact (floor timeout-secs))]
+                    [ns-part (exact (floor (* (- timeout-secs (floor timeout-secs)) 1000000000)))])
+                (condition-wait shared-cond shared-mutex
+                                (make-time 'time-duration ns-part s)))
               (condition-wait shared-cond shared-mutex))
             (mutex-release shared-mutex)
+            ;; Signal all watchers to stop
+            (set-box! stop-box #t)
+            ;; Wake all channel conditions so watchers can see the stop flag
+            (for-each (lambda (ch)
+                        (with-mutex (channel-mutex ch)
+                          (condition-broadcast (channel-not-empty ch))))
+                      channels)
             ;; Try again non-blocking
             (let select-loop ([chs channels] [hs handlers])
               (if (null? chs)
                 (if (and timeout-secs timeout-thunk)
                   (timeout-thunk)
-                  ;; Spurious wake — retry
+                  ;; Spurious wake — retry (watchers already stopped)
                   (channel-select-wait channels handlers timeout-secs timeout-thunk))
                 (let-values ([(val ok) (channel-try-get (car chs))])
                   (if ok

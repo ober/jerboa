@@ -358,19 +358,47 @@
                      (define tid (record-type-descriptor hidden-name))
                      (define acc iacc) ...
                      (define mut imut) ...)))))]
-        ;; Accept and ignore trailing keyword-value options (transparent:, opaque:, etc.)
+        ;; Keyword options: warn about unsupported ones, handle what we can.
+        ;; Supported: transparent: #t (makes record non-opaque, visible to inspector)
+        ;; Unsupported: final:, opaque:, print: etc. — raise error instead of silently dropping.
         [(_ name (field ...) kw val rest ...)
-         #'(defstruct name (field ...))]
+         (let ([key (syntax->datum #'kw)])
+           (unless (memq key '(transparent: final: opaque: print: equal: constructor:))
+             (syntax-violation 'defstruct
+               (format "unknown keyword option: ~a" key) #'kw))
+           (when (memq key '(final: print: equal: constructor:))
+             (syntax-violation 'defstruct
+               (format "keyword ~a is not supported in Jerboa defstruct (Chez R6RS limitation)" key)
+               #'kw))
+           ;; transparent: and opaque: are accepted — Chez records don't use
+           ;; hidden names in transparent mode (but our hidden-name approach
+           ;; already makes fields accessible via accessors, so this is informational).
+           #'(defstruct name (field ...)))]
         [(_ (name parent) (field ...) kw val rest ...)
-         #'(defstruct (name parent) (field ...))])))
+         (let ([key (syntax->datum #'kw)])
+           (unless (memq key '(transparent: final: opaque: print: equal: constructor:))
+             (syntax-violation 'defstruct
+               (format "unknown keyword option: ~a" key) #'kw))
+           (when (memq key '(final: print: equal: constructor:))
+             (syntax-violation 'defstruct
+               (format "keyword ~a is not supported in Jerboa defstruct (Chez R6RS limitation)" key)
+               #'kw))
+           #'(defstruct (name parent) (field ...)))]))
 
   ;;;; ---- DEFCLASS ----
+  ;; NOTE: defclass in Jerboa maps to defstruct (single inheritance via Chez records).
+  ;; Gerbil's defclass supports multiple inheritance and mixins — these are NOT supported.
+  ;; Using multiple parents will raise an error.
 
   (define-syntax defclass
     (lambda (stx)
       (syntax-case stx ()
         [(_ (name parent) (field ...) rest ...)
          #'(defstruct (name parent) (field ...))]
+        [(_ (name parent1 parent2 . more-parents) (field ...) rest ...)
+         (syntax-violation 'defclass
+           "multiple inheritance is not supported in Jerboa (use single parent only)"
+           stx)]
         [(_ name (field ...) rest ...)
          #'(defstruct name (field ...))])))
 

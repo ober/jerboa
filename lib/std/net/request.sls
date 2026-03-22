@@ -13,10 +13,20 @@
     url-encode build-query-string
     flatten-request-headers
     headers->alist
-    alist->headers)
+    alist->headers
+    *http-max-header-size* *http-max-header-count*
+    *http-max-body-size* *http-max-line-length*)
 
   (import (chezscheme)
           (std net tcp))
+
+  ;; ========== Safety Limits ==========
+  ;; These prevent denial-of-service from malicious servers.
+
+  (define *http-max-header-size* (make-parameter (* 8 1024)))        ;; 8KB per header line
+  (define *http-max-header-count* (make-parameter 100))              ;; max 100 headers
+  (define *http-max-body-size* (make-parameter (* 10 1024 1024)))    ;; 10MB max body
+  (define *http-max-line-length* (make-parameter (* 8 1024)))        ;; 8KB per line
 
   ;; ========== URL Parsing ==========
 
@@ -149,18 +159,28 @@
         (dynamic-wind
           (lambda () (void))
           (lambda ()
-            ;; Send request line
+            ;; Send request line — validate path has no CRLF
+            (when (or (string-find path #\return) (string-find path #\newline))
+              (error 'http-request "path contains CRLF (possible injection)" path))
             (put-string out (string-append method " " path " HTTP/1.1\r\n"))
+            ;; Validate host has no CRLF
+            (when (or (string-find host #\return) (string-find host #\newline))
+              (error 'http-request "host contains CRLF (possible injection)" host))
             (put-string out (string-append "Host: " host "\r\n"))
             (put-string out "Connection: close\r\n")
-            ;; Send custom headers
+            ;; Send custom headers — validate no CRLF injection
             (for-each (lambda (h)
+                        (when (or (string-find (car h) #\return) (string-find (car h) #\newline)
+                                  (string-find (cdr h) #\return) (string-find (cdr h) #\newline))
+                          (error 'http-request "header contains CRLF (possible injection)" (car h)))
                         (put-string out (string-append (car h) ": " (cdr h) "\r\n")))
                       headers)
             ;; Send body if present
+            ;; Use byte length (UTF-8) not character length for Content-Length
             (when data
-              (put-string out (string-append "Content-Length: "
-                               (number->string (string-length data)) "\r\n")))
+              (let ([byte-len (bytevector-length (string->utf8 data))])
+                (put-string out (string-append "Content-Length: "
+                                 (number->string byte-len) "\r\n"))))
             (put-string out "\r\n")
             (when data (put-string out data))
             (flush-output-port out)
@@ -184,9 +204,12 @@
       0))
 
   (define (read-line-crlf port)
-    ;; Read until \r\n
-    (let ([out (open-output-string)])
-      (let loop ()
+    ;; Read until \r\n, with max line length to prevent DoS
+    (let ([out (open-output-string)]
+          [max-len (*http-max-line-length*)])
+      (let loop ([len 0])
+        (when (> len max-len)
+          (error 'http-request "HTTP line too long (possible DoS)" len))
         (let ([c (read-char port)])
           (cond
             [(eof-object? c) (get-output-string out)]
@@ -196,39 +219,58 @@
                  (get-output-string out)
                  (begin (write-char c out)
                         (unless (eof-object? next) (write-char next out))
-                        (loop))))]
-            [else (write-char c out) (loop)])))))
+                        (loop (+ len 2)))))]
+            [else (write-char c out) (loop (+ len 1))])))))
 
   (define (read-headers port)
-    ;; Read headers until empty line, return alist
-    (let loop ([headers '()])
-      (let ([line (read-line-crlf port)])
-        (if (or (string=? line "") (eof-object? line))
-          (reverse headers)
-          (let ([colon-pos (string-find line #\:)])
-            (if colon-pos
-              (let ([key (string-downcase (substring line 0 colon-pos))]
-                    [val (string-trim-left
-                           (substring line (+ colon-pos 1) (string-length line)))])
-                (loop (cons (cons key val) headers)))
-              (loop headers)))))))
+    ;; Read headers until empty line, return alist.
+    ;; Enforces max header count and size limits to prevent DoS.
+    (let ([max-count (*http-max-header-count*)]
+          [max-size (*http-max-header-size*)])
+      (let loop ([headers '()] [count 0])
+        (when (> count max-count)
+          (error 'http-request "too many response headers (possible DoS)" count))
+        (let ([line (read-line-crlf port)])
+          (when (and (string? line) (> (string-length line) max-size))
+            (error 'http-request "response header too long (possible DoS)"
+              (string-length line)))
+          (if (or (string=? line "") (eof-object? line))
+            (reverse headers)
+            (let ([colon-pos (string-find line #\:)])
+              (if colon-pos
+                (let ([key (string-downcase (substring line 0 colon-pos))]
+                      [val (string-trim-left
+                             (substring line (+ colon-pos 1) (string-length line)))])
+                  (loop (cons (cons key val) headers) (+ count 1)))
+                (loop headers count))))))))
 
   (define (read-body port headers)
-    ;; Read body based on Content-Length or until EOF
-    (let ([cl (assoc "content-length" headers)])
+    ;; Read body based on Content-Length or until EOF.
+    ;; Enforces max body size to prevent OOM from malicious servers.
+    (let ([max-body (*http-max-body-size*)]
+          [cl (assoc "content-length" headers)])
       (if cl
         (let ([len (string->number (cdr cl))])
-          (if (and len (> len 0))
-            (let ([buf (get-string-n port len)])
-              (if (eof-object? buf) "" buf))
-            ""))
-        ;; No content-length — read until EOF
+          (cond
+            [(not len) ""]
+            [(<= len 0) ""]
+            [(> len max-body)
+             (error 'http-request
+               "Content-Length exceeds maximum body size"
+               len max-body)]
+            [else
+             (let ([buf (get-string-n port len)])
+               (if (eof-object? buf) "" buf))]))
+        ;; No content-length — read until EOF with size limit
         (let ([out (open-output-string)])
-          (let loop ()
+          (let loop ([total 0])
+            (when (> total max-body)
+              (error 'http-request
+                "response body exceeds maximum size (no Content-Length)" max-body))
             (let ([c (read-char port)])
               (if (eof-object? c)
                 (get-output-string out)
-                (begin (write-char c out) (loop)))))))))
+                (begin (write-char c out) (loop (+ total 1))))))))))
 
   ;; ========== Helpers ==========
 

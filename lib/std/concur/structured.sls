@@ -67,24 +67,38 @@
     (let ([scope (*current-scope*)])
       (unless scope
         (error 'scope-spawn "not inside with-task-scope"))
-      (let* ([t #f]
+      ;; Create the task record BEFORE forking the thread, so the thread
+      ;; always has a valid task reference. Use a gate (mutex+cond) to
+      ;; ensure the thread doesn't start work until the task is ready.
+      (let* ([gate-mutex (make-mutex)]
+             [gate-cond (make-condition)]
+             [gate-open? #f]
+             [t #f]
              [thread (fork-thread
                        (lambda ()
+                         ;; Wait for task record to be initialized
+                         (with-mutex gate-mutex
+                           (let loop ()
+                             (unless gate-open?
+                               (condition-wait gate-cond gate-mutex)
+                               (loop))))
                          (guard (exn
-                                 [#t (when t
-                                       (task-error-set! t exn)
-                                       (task-done?-set! t #t)
-                                       (with-mutex (task-mutex t)
-                                         (condition-broadcast (task-condvar t))))])
+                                 [#t (task-error-set! t exn)
+                                     (task-done?-set! t #t)
+                                     (with-mutex (task-mutex t)
+                                       (condition-broadcast (task-condvar t)))])
                            (let ([result (thunk)])
-                             (when t
-                               (task-result-set! t result)
-                               (task-done?-set! t #t)
-                               (with-mutex (task-mutex t)
-                                 (condition-broadcast (task-condvar t))))))))])
+                             (task-result-set! t result)
+                             (task-done?-set! t #t)
+                             (with-mutex (task-mutex t)
+                               (condition-broadcast (task-condvar t)))))))])
         (set! t (make-task name thread))
         (task-done?-set! t #f)
         (scope-add-task! scope t)
+        ;; Open the gate — thread can now proceed
+        (with-mutex gate-mutex
+          (set! gate-open? #t)
+          (condition-broadcast gate-cond))
         t)))
 
   ;; ========== Await ==========
@@ -101,7 +115,11 @@
       (task-result task)))
 
   (define (task-cancel task)
-    ;; Mark as done with a cancellation error
+    ;; Mark as done with a cancellation error.
+    ;; NOTE: This does NOT stop the underlying thread — Chez Scheme has no
+    ;; safe thread interruption. The thread continues executing but its result
+    ;; is ignored. Callers should use cooperative cancellation (check a flag
+    ;; periodically) for long-running tasks.
     (unless (task-done? task)
       (task-error-set! task (make-message-condition "task cancelled"))
       (task-done?-set! task #t)
@@ -114,10 +132,23 @@
     (for-each task-cancel (task-scope-tasks scope)))
 
   (define (await-all-tasks! scope)
+    ;; Wait for all tasks, but don't block forever on cancelled tasks
+    ;; whose threads are still running. Use a 5-second timeout per
+    ;; cancelled task to prevent with-task-scope from hanging.
     (for-each
       (lambda (t)
         (guard (exn [#t (void)])  ;; ignore errors from cancelled tasks
-          (task-await t)))
+          (if (task-done? t)
+            ;; Already done — just retrieve (may re-raise error)
+            (task-await t)
+            ;; Not done — wait with timeout
+            (let loop ([attempts 0])
+              (with-mutex (task-mutex t)
+                (unless (task-done? t)
+                  (condition-wait (task-condvar t) (task-mutex t)
+                    (make-time 'time-duration 0 5))))  ;; 5 second timeout
+              (unless (or (task-done? t) (> attempts 0))
+                (loop (+ attempts 1)))))))
       (task-scope-tasks scope)))
 
   (define (with-task-scope thunk)

@@ -92,11 +92,21 @@
          (cdr (assq 'execute (capability-permissions cap)))))
 
   (define (fs-allowed-path? cap path)
-    ;; Check if path is under one of the allowed paths
+    ;; Check if path is under one of the allowed paths.
+    ;; HARDENED: Requires directory boundary — /tmp/safe does NOT match /tmp/safety.
+    ;; The allowed path must be either an exact match or followed by '/'.
     (and (eq? (capability-type cap) 'filesystem)
          (let ([allowed (cdr (assq 'paths (capability-permissions cap)))]
                [canonical (canonicalize-path path)])
-           (exists (lambda (p) (string-prefix? p canonical)) allowed))))
+           (exists (lambda (p)
+                     (or (string=? p canonical)  ;; exact match
+                         (string=? p "/")        ;; root allows everything
+                         (and (string-prefix? p canonical)
+                              ;; Must be at a directory boundary
+                              (let ([plen (string-length p)])
+                                (or (char=? (string-ref canonical plen) #\/)
+                                    (char=? (string-ref p (- plen 1)) #\/))))))
+                   allowed))))
 
   ;; FFI binding for realpath(3) — resolves symlinks and . / ..
   (define c-realpath
