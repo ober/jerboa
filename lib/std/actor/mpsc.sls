@@ -13,6 +13,7 @@
     mpsc-dequeue!       ;; consumer: remove from head (blocks if empty)
     mpsc-try-dequeue!   ;; consumer: remove or return (values #f #f) immediately
     mpsc-empty?         ;; approximate — safe only from consumer thread
+    mpsc-length         ;; approximate count — safe from consumer thread
     mpsc-close!         ;; signal no more messages; wakes blocked consumers
     mpsc-closed?)
   (import (chezscheme))
@@ -110,6 +111,14 @@
     ;; Wake all blocked consumers
     (with-mutex (mpsc-queue-head-mutex q)
       (condition-broadcast (mpsc-queue-not-empty q))))
+
+  ;; Approximate length — walks the linked list from head.
+  ;; Safe to call from the consumer thread.
+  (define (mpsc-length q)
+    (let loop ([node (mpsc-node-next (mpsc-queue-head q))] [n 0])
+      (if node
+        (loop (mpsc-node-next node) (+ n 1))
+        n)))
 
   ;; Public predicate — wraps the record field accessor
   (define (mpsc-closed? q) (mpsc-queue-closed? q))

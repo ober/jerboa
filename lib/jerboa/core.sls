@@ -383,7 +383,7 @@
              (syntax-violation 'defstruct
                (format "keyword ~a is not supported in Jerboa defstruct (Chez R6RS limitation)" key)
                #'kw))
-           #'(defstruct (name parent) (field ...)))]))
+           #'(defstruct (name parent) (field ...)))])))
 
   ;;;; ---- DEFCLASS ----
   ;; NOTE: defclass in Jerboa maps to defstruct (single inheritance via Chez records).

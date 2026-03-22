@@ -3,9 +3,8 @@
 
 (library (std sugar)
   (export
-    ;; NOTE: try/catch/finally, while/until, hash-literal/hash-eq-literal,
-    ;; let-hash, defrule/defrules are defined in (jerboa core) and
-    ;; re-exported from there. Import (jerboa core) to use them.
+    ;; Re-exported from (jerboa core):
+    try catch finally
     unwind-protect
     chain chain-and with-id
     assert!
