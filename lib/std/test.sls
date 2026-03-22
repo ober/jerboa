@@ -11,7 +11,8 @@
     check-predicate check-exception
     check-output
     run-tests! run-test-suite!
-    test-begin! test-result test-report-summary!)
+    test-begin! test-result test-report-summary!
+    assert!)
 
   (import (chezscheme))
 
@@ -220,5 +221,60 @@
     (fprintf (current-error-port)
              "~n~a: ~a checks, ~a failures, ~a errors~n"
              (test-result) *total-checks* *total-failures* *total-errors*))
+
+  ;; --- assert! macro ---
+  ;; On failure, displays the expression and each sub-expression's value.
+  ;; Handles the common case: (assert! (op arg1 arg2 ...))
+  ;; where each arg is evaluated, and on failure all arg values are shown.
+  ;; Also handles simple: (assert! expr) for non-compound expressions.
+
+  (define (assert-fail! expr-str sub-exprs sub-vals)
+    (set! *total-checks* (+ *total-checks* 1))
+    (set! *total-failures* (+ *total-failures* 1))
+    (when *current-case*
+      (test-case-rec-checks-set! *current-case*
+        (+ (test-case-rec-checks *current-case*) 1))
+      (test-case-rec-fail-set! *current-case*
+        (format "assert! failed: ~a" expr-str)))
+    (when *test-verbose*
+      (fprintf (current-error-port) "  FAIL: ~a~n" expr-str)
+      (for-each
+        (lambda (se sv)
+          (fprintf (current-error-port) "    ~a => ~s~n" se sv))
+        sub-exprs sub-vals)))
+
+  (define (assert-pass!)
+    (set! *total-checks* (+ *total-checks* 1))
+    (when *current-case*
+      (test-case-rec-checks-set! *current-case*
+        (+ (test-case-rec-checks *current-case*) 1))))
+
+  (define-syntax assert!
+    (lambda (stx)
+      (syntax-case stx ()
+        ;; Compound expression: (assert! (op arg1 arg2 ...))
+        ;; We evaluate each argument, then apply the operator.
+        [(_ (op arg ...))
+         (with-syntax ([(tmp ...) (generate-temporaries #'(arg ...))]
+                       [(arg-str ...) (map (lambda (a)
+                                             (datum->syntax #'op
+                                               (format "~s" (syntax->datum a))))
+                                           #'(arg ...))])
+           #'(let ([tmp arg] ...)
+               (if (op tmp ...)
+                 (assert-pass!)
+                 (assert-fail!
+                   (format "~s" '(op arg ...))
+                   (list arg-str ...)
+                   (list tmp ...)))))]
+        ;; Simple expression: (assert! expr)
+        [(_ expr)
+         #'(let ([val expr])
+             (if val
+               (assert-pass!)
+               (assert-fail!
+                 (format "~s" 'expr)
+                 '()
+                 '())))])))
 
   ) ;; end library
