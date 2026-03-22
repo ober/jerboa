@@ -7,7 +7,8 @@ Updated 2026-03-22.
 - [status.md](status.md) — Current project status, feature inventory, known limitations
 - [whats-new.md](whats-new.md) — What's new: 33 modules added in latest push
 - [whatsnew.md](whatsnew.md) — Earlier additions: translator enhancements and initial stdlib
-- [pending.md](pending.md) — Roadmap: what's left to make Jerboa awesome
+- [pending.md](pending.md) — Roadmap: what's left to make Jerboa better
+- [architecture-split.md](architecture-split.md) — Design: chez-* (FFI shims) vs jerboa (application logic)
 - [rocks.md](rocks.md) — Distribution and packaging
 
 ## Security
