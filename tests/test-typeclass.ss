@@ -1,209 +1,264 @@
+#!/usr/bin/env scheme-script
 #!chezscheme
-;;; Tests for (std typed typeclass) — Type class system
+(import (chezscheme)
+        (std misc typeclass))
 
-(import (chezscheme) (std typed typeclass))
+(define (string-contains haystack needle)
+  (let ([hlen (string-length haystack)]
+        [nlen (string-length needle)])
+    (let loop ([i 0])
+      (cond
+        [(> (+ i nlen) hlen) #f]
+        [(string=? (substring haystack i (+ i nlen)) needle) i]
+        [else (loop (+ i 1))]))))
 
-(define pass 0)
-(define fail 0)
+(define test-count 0)
+(define pass-count 0)
 
-(define-syntax test
-  (syntax-rules ()
-    [(_ name expr expected)
-     (guard (exn [#t (set! fail (+ fail 1))
-                     (printf "FAIL ~a: ~a~%" name
-                       (if (message-condition? exn) (condition-message exn) exn))])
-       (let ([got expr])
-         (if (equal? got expected)
-           (begin (set! pass (+ pass 1)) (printf "  ok ~a~%" name))
-           (begin (set! fail (+ fail 1))
-                  (printf "FAIL ~a: got ~s expected ~s~%" name got expected)))))]))
+(define (test name thunk)
+  (set! test-count (+ test-count 1))
+  (guard (e [#t (display "FAIL: ") (display name) (newline)
+              (display "  Error: ") (display (condition-message e)) (newline)])
+    (thunk)
+    (set! pass-count (+ pass-count 1))
+    (display "PASS: ") (display name) (newline)))
 
-(printf "--- Phase 2c: Type Classes ---~%~%")
+(define (assert-equal actual expected msg)
+  (unless (equal? actual expected)
+    (error 'assert-equal
+           (string-append msg ": expected " (format "~s" expected)
+                          " got " (format "~s" actual)))))
 
-;; ========== Basic class definition ==========
+(define (assert-true val msg)
+  (unless val
+    (error 'assert-true (string-append msg ": expected #t"))))
 
-(define-class Eq
-  (== a b)
-  (/= a b))
+(define (assert-false val msg)
+  (when val
+    (error 'assert-false (string-append msg ": expected #f"))))
 
-(test "class is a descriptor"
-  (vector? Eq)
-  #t)
+;; =============================================================
+;; Eq typeclass tests
+;; =============================================================
 
-;; ========== Instance registration ==========
+(test "Eq number: equal values"
+  (lambda ()
+    (assert-true (tc-apply 'Eq 'eq? 'number 1 1) "1 == 1")))
 
-(define-instance Eq fixnum
-  (== equal?)
-  (/= (lambda (a b) (not (equal? a b)))))
+(test "Eq number: unequal values"
+  (lambda ()
+    (assert-false (tc-apply 'Eq 'eq? 'number 1 2) "1 != 2")))
 
-(define-instance Eq string
-  (== string=?)
-  (/= (lambda (a b) (not (string=? a b)))))
+(test "Eq string: equal"
+  (lambda ()
+    (assert-true (tc-apply 'Eq 'eq? 'string "hello" "hello") "hello == hello")))
 
-(test "instance-of/fixnum returns hashtable"
-  (hashtable? (instance-of 'Eq 'fixnum))
-  #t)
+(test "Eq string: unequal"
+  (lambda ()
+    (assert-false (tc-apply 'Eq 'eq? 'string "hello" "world") "hello != world")))
 
-(test "instance-of/string returns hashtable"
-  (hashtable? (instance-of 'Eq 'string))
-  #t)
+(test "Eq symbol: equal"
+  (lambda ()
+    (assert-true (tc-apply 'Eq 'eq? 'symbol 'foo 'foo) "foo == foo")))
 
-(test "instance-of/unknown returns #f"
-  (instance-of 'Eq 'unknown-type)
-  #f)
+(test "Eq symbol: unequal"
+  (lambda ()
+    (assert-false (tc-apply 'Eq 'eq? 'symbol 'foo 'bar) "foo != bar")))
 
-;; ========== class-method ==========
+;; =============================================================
+;; Ord typeclass tests
+;; =============================================================
 
-(test "class-method/== for fixnum"
-  (let* ([inst (instance-of 'Eq 'fixnum)]
-         [proc (class-method inst '==)])
-    (proc 5 5))
-  #t)
+(test "Ord number: compare less"
+  (lambda ()
+    (assert-equal (tc-apply 'Ord 'compare 'number 1 2) -1 "1 < 2")))
 
-(test "class-method//= for fixnum"
-  (let* ([inst (instance-of 'Eq 'fixnum)]
-         [proc (class-method inst '/=)])
-    (proc 1 2))
-  #t)
+(test "Ord number: compare equal"
+  (lambda ()
+    (assert-equal (tc-apply 'Ord 'compare 'number 5 5) 0 "5 == 5")))
 
-(test "class-method/== for string"
-  (let* ([inst (instance-of 'Eq 'string)]
-         [proc (class-method inst '==)])
-    (proc "hello" "hello"))
-  #t)
+(test "Ord number: compare greater"
+  (lambda ()
+    (assert-equal (tc-apply 'Ord 'compare 'number 3 1) 1 "3 > 1")))
 
-(test "class-method//= for string"
-  (let* ([inst (instance-of 'Eq 'string)]
-         [proc (class-method inst '/=)])
-    (proc "a" "b"))
-  #t)
+(test "Ord number: lt?"
+  (lambda ()
+    (assert-true (tc-apply 'Ord 'lt? 'number 1 2) "1 < 2")
+    (assert-false (tc-apply 'Ord 'lt? 'number 2 1) "not 2 < 1")))
 
-(test "class-method/missing returns #f"
-  (let ([inst (instance-of 'Eq 'fixnum)])
-    (class-method inst 'nonexistent))
-  #f)
+(test "Ord number: gt?"
+  (lambda ()
+    (assert-true (tc-apply 'Ord 'gt? 'number 5 3) "5 > 3")
+    (assert-false (tc-apply 'Ord 'gt? 'number 3 5) "not 3 > 5")))
 
-;; ========== with-class ==========
+(test "Ord number: le?"
+  (lambda ()
+    (assert-true (tc-apply 'Ord 'le? 'number 1 2) "1 <= 2")
+    (assert-true (tc-apply 'Ord 'le? 'number 2 2) "2 <= 2")
+    (assert-false (tc-apply 'Ord 'le? 'number 3 2) "not 3 <= 2")))
 
-(test "with-class/== fixnum equal"
-  (with-class Eq
-    (Eq == 42 42))
-  #t)
+(test "Ord number: ge?"
+  (lambda ()
+    (assert-true (tc-apply 'Ord 'ge? 'number 5 3) "5 >= 3")
+    (assert-true (tc-apply 'Ord 'ge? 'number 3 3) "3 >= 3")
+    (assert-false (tc-apply 'Ord 'ge? 'number 2 3) "not 2 >= 3")))
 
-(test "with-class/== fixnum not equal"
-  (with-class Eq
-    (Eq == 1 2))
-  #f)
+(test "Ord string: compare"
+  (lambda ()
+    (assert-equal (tc-apply 'Ord 'compare 'string "apple" "banana") -1 "apple < banana")
+    (assert-equal (tc-apply 'Ord 'compare 'string "banana" "apple") 1 "banana > apple")
+    (assert-equal (tc-apply 'Ord 'compare 'string "same" "same") 0 "same == same")))
 
-(test "with-class//= fixnum"
-  (with-class Eq
-    (Eq /= 3 4))
-  #t)
+(test "Ord string: lt? gt?"
+  (lambda ()
+    (assert-true (tc-apply 'Ord 'lt? 'string "a" "b") "a < b")
+    (assert-true (tc-apply 'Ord 'gt? 'string "z" "a") "z > a")))
 
-(test "with-class/== string"
-  (with-class Eq
-    (Eq == "abc" "abc"))
-  #t)
+;; =============================================================
+;; Ord inherits Eq (superclass test)
+;; =============================================================
 
-(test "with-class//= string"
-  (with-class Eq
-    (Eq /= "x" "y"))
-  #t)
+(test "Ord number inherits Eq: eq? method available"
+  (lambda ()
+    (assert-true (tc-apply 'Ord 'eq? 'number 42 42) "Ord has eq? from Eq")
+    (assert-false (tc-apply 'Ord 'eq? 'number 42 43) "Ord eq? false")))
 
-(test "with-class/body has multiple exprs"
-  (with-class Eq
-    (Eq == 1 1)
-    (Eq /= 1 2))
-  #t)
+(test "Ord string inherits Eq: eq? method available"
+  (lambda ()
+    (assert-true (tc-apply 'Ord 'eq? 'string "x" "x") "Ord has eq? from Eq")))
 
-;; ========== Multiple classes ==========
+;; =============================================================
+;; Show typeclass tests
+;; =============================================================
 
-(define-class Show
-  (show v))
+(test "Show number"
+  (lambda ()
+    (assert-equal (tc-apply 'Show '->string 'number 42) "42" "show 42")))
 
-(define-instance Show fixnum
-  (show number->string))
+(test "Show string"
+  (lambda ()
+    (assert-equal (tc-apply 'Show '->string 'string "hello") "hello" "show hello")))
 
-(define-instance Show string
-  (show (lambda (s) (string-append "\"" s "\""))))
+(test "Show symbol"
+  (lambda ()
+    (assert-equal (tc-apply 'Show '->string 'symbol 'foo) "foo" "show foo")))
 
-(test "Show/fixnum"
-  (with-class Show
-    (Show show 42))
-  "42")
+;; =============================================================
+;; typeclass-dispatch / tc-ref
+;; =============================================================
 
-(test "Show/string"
-  (with-class Show
-    (Show show "hi"))
-  "\"hi\"")
+(test "typeclass-dispatch returns a procedure"
+  (lambda ()
+    (let ([proc (typeclass-dispatch 'Eq 'number 'eq?)])
+      (assert-true (procedure? proc) "is procedure")
+      (assert-true (proc 1 1) "1 == 1 via dispatch"))))
 
-;; ========== Type inference ==========
+(test "tc-ref is alias for typeclass-dispatch"
+  (lambda ()
+    (let ([proc (tc-ref 'Show 'number '->string)])
+      (assert-equal (proc 99) "99" "tc-ref works"))))
 
-;; infer-type-tag covers standard Scheme types
-(test "type inference: fixnum"
-  (let* ([inst (instance-of 'Eq 'fixnum)]
-         [proc (class-method inst '==)])
-    (procedure? proc))
-  #t)
+;; =============================================================
+;; typeclass-instance? / typeclass-instance-of?
+;; =============================================================
 
-(test "type inference: string"
-  (let* ([inst (instance-of 'Eq 'string)]
-         [proc (class-method inst '==)])
-    (procedure? proc))
-  #t)
+(test "typeclass-instance? positive"
+  (lambda ()
+    (assert-true (typeclass-instance? 'Eq 'number) "Eq number exists")
+    (assert-true (typeclass-instance? 'Ord 'string) "Ord string exists")
+    (assert-true (typeclass-instance? 'Show 'symbol) "Show symbol exists")))
 
-;; ========== Error cases ==========
+(test "typeclass-instance? negative"
+  (lambda ()
+    (assert-false (typeclass-instance? 'Eq 'list) "Eq list doesn't exist")
+    (assert-false (typeclass-instance? 'Ord 'symbol) "Ord symbol doesn't exist")))
 
-(test "define-instance/unknown class errors"
-  (guard (exn [#t (condition-message exn)])
-    (define-instance NonExistentClass foo
-      (method (lambda (x) x))))
-  "unknown class")
+(test "typeclass-instance-of? is alias"
+  (lambda ()
+    (assert-true (typeclass-instance-of? 'Show 'number) "alias works")))
 
-(test "with-class/no instance errors"
-  (guard (exn [#t (condition-message exn)])
-    (with-class Eq
-      (Eq == 'some-symbol 'other)))
-  "no instance for type")
+;; =============================================================
+;; Error cases
+;; =============================================================
 
-;; ========== Ord class with multiple methods ==========
+(test "dispatch missing instance raises error"
+  (lambda ()
+    (guard (e [#t (assert-true (string-contains (condition-message e) "no instance")
+                               "error mentions 'no instance'")])
+      (typeclass-dispatch 'Eq 'list 'eq?)
+      (error 'test "should have raised"))))
 
-(define-class Ord
-  (< a b)
-  (> a b)
-  (<= a b)
-  (>= a b))
+(test "dispatch missing method raises error"
+  (lambda ()
+    (guard (e [#t (assert-true (string-contains (condition-message e) "no method")
+                               "error mentions 'no method'")])
+      (typeclass-dispatch 'Eq 'number 'nonexistent)
+      (error 'test "should have raised"))))
 
-(define-instance Ord fixnum
-  (<  (lambda (a b) (fx<  a b)))
-  (>  (lambda (a b) (fx>  a b)))
-  (<= (lambda (a b) (fx<= a b)))
-  (>= (lambda (a b) (fx>= a b))))
+;; =============================================================
+;; User-defined typeclass and instance
+;; =============================================================
 
-(test "Ord/< true"
-  (with-class Ord
-    (Ord < 1 2))
-  #t)
+(define-typeclass (Hashable a)
+  (hash-code a -> integer))
 
-(test "Ord/< false"
-  (with-class Ord
-    (Ord < 2 1))
-  #f)
+(define-instance (Hashable number)
+  (hash-code (lambda (n) (modulo (abs (exact (truncate n))) 1000000007))))
 
-(test "Ord/> true"
-  (with-class Ord
-    (Ord > 5 3))
-  #t)
+(define-instance (Hashable string)
+  (hash-code (lambda (s) (string-hash s))))
 
-(test "Ord/<= equal"
-  (with-class Ord
-    (Ord <= 4 4))
-  #t)
+(test "user-defined typeclass: Hashable number"
+  (lambda ()
+    (let ([h (tc-apply 'Hashable 'hash-code 'number 42)])
+      (assert-true (integer? h) "hash is integer")
+      (assert-equal h 42 "hash of 42 is 42"))))
 
-(test "Ord/>= greater"
-  (with-class Ord
-    (Ord >= 10 5))
-  #t)
+(test "user-defined typeclass: Hashable string"
+  (lambda ()
+    (let ([h (tc-apply 'Hashable 'hash-code 'string "test")])
+      (assert-true (integer? h) "hash is integer")
+      (assert-equal h (tc-apply 'Hashable 'hash-code 'string "test") "deterministic"))))
 
-(printf "~%Results: ~a passed, ~a failed~%" pass fail)
-(when (> fail 0) (exit 1))
+;; =============================================================
+;; User-defined typeclass with superclass
+;; =============================================================
+
+(define-typeclass (Printable a) extends (Show a)
+  (print! a -> void))
+
+(define-instance (Printable number)
+  (print! (lambda (n) (display (number->string n)))))
+
+(test "user-defined typeclass with superclass: inherits Show"
+  (lambda ()
+    (assert-equal (tc-apply 'Printable '->string 'number 7) "7"
+                  "inherited ->string")))
+
+(test "user-defined typeclass with superclass: own method"
+  (lambda ()
+    (let ([proc (tc-ref 'Printable 'number 'print!)])
+      (assert-true (procedure? proc) "print! is procedure"))))
+
+;; =============================================================
+;; lookup-instance returns the dictionary
+;; =============================================================
+
+(test "lookup-instance returns hashtable"
+  (lambda ()
+    (let ([dict (lookup-instance 'Eq 'number)])
+      (assert-true (hashtable? dict) "is hashtable")
+      (assert-true (procedure? (hashtable-ref dict 'eq? #f)) "eq? is procedure"))))
+
+(test "lookup-instance returns #f for missing"
+  (lambda ()
+    (assert-false (lookup-instance 'Eq 'list) "no Eq for list")))
+
+;; =============================================================
+;; Summary
+;; =============================================================
+
+(newline)
+(display (format "~a/~a tests passed.~n" pass-count test-count))
+(unless (= pass-count test-count)
+  (exit 1))
