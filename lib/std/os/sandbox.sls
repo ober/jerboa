@@ -9,6 +9,7 @@
 ;;;   Linux:   Landlock filesystem access control
 ;;;   macOS:   Seatbelt sandbox profiles
 ;;;   FreeBSD: Capsicum capability mode
+;;;   OpenBSD: pledge(2) + unveil(2)
 ;;;
 ;;; This is the high-level API for sandboxed execution. It combines:
 ;;; - fork(2) to isolate the sandbox from the parent
@@ -40,6 +41,7 @@
     sandbox-run/command
     sandbox-run/profile
     sandbox-run/capsicum
+    sandbox-run/pledge
     sandbox-available?)
 
   (import (chezscheme)
@@ -51,6 +53,7 @@
     (let ([mt (symbol->string (machine-type))])
       (cond
         [(string-contains mt "osx") 'macos]
+        [(string-contains mt "ob")  'openbsd]
         [(string-contains mt "fb")  'freebsd]
         [(string-contains mt "le")  'linux]
         [else                       'unknown])))
@@ -150,6 +153,42 @@
         (lambda ()
           (foreign-free errptr)))))
 
+  ;; ========== OpenBSD pledge/unveil FFI ==========
+
+  (define c-pledge-available
+    (if (eq? *platform* 'openbsd)
+      (guard (e [#t (lambda () 0)])
+        (foreign-procedure "ffi_pledge_available" () int))
+      (lambda () 0)))
+
+  (define c-pledge
+    (if (eq? *platform* 'openbsd)
+      (guard (e [#t (lambda (p ep) -1)])
+        (foreign-procedure "ffi_pledge" (string string) int))
+      (lambda (p ep) -1)))
+
+  (define c-unveil
+    (if (eq? *platform* 'openbsd)
+      (guard (e [#t (lambda (p perms) -1)])
+        (foreign-procedure "ffi_unveil" (string string) int))
+      (lambda (p perms) -1)))
+
+  (define c-unveil-lock
+    (if (eq? *platform* 'openbsd)
+      (guard (e [#t (lambda () -1)])
+        (foreign-procedure "ffi_unveil" (void* void*) int))
+      (lambda () -1)))
+
+  (define c-openbsd-sandbox
+    (if (eq? *platform* 'openbsd)
+      (guard (e [#t (lambda args -1)])
+        (foreign-procedure "ffi_openbsd_sandbox" (string string string string string) int))
+      (lambda args -1)))
+
+  (define (pledge-available?)
+    (and (eq? *platform* 'openbsd)
+         (= 1 (c-pledge-available))))
+
   ;; Capsicum availability (delegates to the capsicum module)
   ;; capsicum-available?, capsicum-enter!, capsicum-limit-fd!,
   ;; capsicum-open-path, capsicum-apply-preset! imported from
@@ -185,6 +224,7 @@
     (case *platform*
       [(linux)   (landlock-available?)]
       [(macos)   (seatbelt-available?)]
+      [(openbsd) (pledge-available?)]
       [(freebsd) (capsicum-available?)]
       [else #f]))
 
@@ -229,6 +269,18 @@
             (when (seatbelt-available?)
               (let ([sbpl (paths->sbpl-profile read-paths write-paths exec-paths)])
                 (apply-seatbelt! sbpl)))]
+           [(openbsd)
+            ;; Apply unveil for path restrictions, then pledge for syscall restriction.
+            ;; unveil restricts filesystem visibility (like Landlock paths).
+            ;; pledge restricts syscall families (like seccomp profiles).
+            (when (pledge-available?)
+              (guard (e [#t
+                        (display "sandbox: OpenBSD pledge/unveil enforcement failed: "
+                                 (current-error-port))
+                        (display-condition e (current-error-port))
+                        (newline (current-error-port))
+                        (c-exit 126)])
+                (openbsd-sandbox-paths! read-paths write-paths exec-paths)))]
            [(freebsd)
             ;; Pre-open paths as restricted fds, then enter capability mode.
             ;; This gives Landlock-equivalent path-based restrictions via Capsicum.
@@ -300,6 +352,87 @@
                (capsicum-apply-preset! (car maybe-fd-rights))
                ;; Bare cap_enter
                (capsicum-enter!))))
+         (guard (e [#t
+                   (display "sandbox: " (current-error-port))
+                   (display-condition e (current-error-port))
+                   (newline (current-error-port))
+                   (c-exit 1)])
+           (thunk))
+         (c-exit 0))
+        (else
+         (wait-for-child pid)))))
+
+  ;; ========== OpenBSD pledge/unveil ==========
+
+  ;; Map Landlock-style path restrictions to unveil + pledge.
+  ;; 1. unveil each allowed path with appropriate permissions
+  ;; 2. unveil essential system paths for basic operation
+  ;; 3. Lock unveil (no more paths can be added)
+  ;; 4. Apply pledge to restrict syscall families
+  ;;
+  ;; Default pledge promises: stdio rpath proc exec
+  ;; With write paths: + wpath cpath
+  ;; With exec paths:  + exec (already included by default)
+  (define (openbsd-sandbox-paths! read-paths write-paths exec-paths)
+    ;; Unveil essential system paths for a functional shell
+    (c-unveil "/usr/lib"     "r")
+    (c-unveil "/usr/libexec" "r")
+    (c-unveil "/usr/share"   "r")
+    (c-unveil "/dev/null"    "rw")
+    (c-unveil "/dev/random"  "r")
+    (c-unveil "/dev/urandom" "r")
+    (c-unveil "/etc/resolv.conf" "r")
+    (c-unveil "/etc/ssl"     "r")
+    ;; User-specified read-only paths
+    (for-each (lambda (p) (c-unveil p "r"))
+      (if (list? read-paths) read-paths '()))
+    ;; User-specified read+write paths
+    (for-each (lambda (p) (c-unveil p "rwc"))
+      (if (list? write-paths) write-paths '()))
+    ;; User-specified execute paths — rx so the binaries can be read and exec'd
+    (for-each (lambda (p) (c-unveil p "rx"))
+      (if (list? exec-paths) exec-paths '()))
+    ;; Lock unveil — IRREVERSIBLE, no more paths can be added
+    (c-unveil-lock)
+    ;; Build pledge promises based on what's needed
+    (let* ([base "stdio rpath proc"]
+           [promises
+             (string-append base
+               (if (pair? write-paths) " wpath cpath fattr" "")
+               (if (pair? exec-paths) " exec" ""))])
+      (when (< (c-pledge promises #f) 0)
+        (error 'openbsd-sandbox-paths! "pledge failed"))))
+
+  ;; OpenBSD-specific: run a thunk under custom pledge promises.
+  ;; promises: string of space-separated promise names
+  ;; execpromises: promises for exec'd children (or #f for none)
+  ;; Optional unveil-specs: list of (path . permissions) pairs applied before pledge.
+  (define (sandbox-run/pledge promises thunk . maybe-unveils)
+    (let ((pid (c-fork)))
+      (cond
+        ((< pid 0)
+         (error 'sandbox-run/pledge "fork failed"))
+        ((= pid 0)
+         ;; CHILD: apply unveil restrictions then pledge
+         (guard (e [#t
+                   (display "sandbox: " (current-error-port))
+                   (display-condition e (current-error-port))
+                   (newline (current-error-port))
+                   (c-exit 1)])
+           (when (pledge-available?)
+             ;; Apply unveil specs if provided
+             (when (and (pair? maybe-unveils) (pair? (car maybe-unveils)))
+               (for-each
+                 (lambda (spec)
+                   (when (< (c-unveil (car spec) (cdr spec)) 0)
+                     (error 'sandbox-run/pledge
+                       (string-append "unveil failed for " (car spec)))))
+                 (car maybe-unveils))
+               ;; Lock unveil
+               (c-unveil-lock))
+             ;; Apply pledge
+             (when (< (c-pledge promises #f) 0)
+               (error 'sandbox-run/pledge "pledge failed"))))
          (guard (e [#t
                    (display "sandbox: " (current-error-port))
                    (display-condition e (current-error-port))
