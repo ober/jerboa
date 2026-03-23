@@ -60,6 +60,14 @@
 
   ;; ========== FFI ==========
 
+  ;; Load libsystem_sandbox on macOS (required for sandbox_init)
+  (define _libsandbox
+    (if (macos?)
+      (or (guard (e [#t #f]) (load-shared-object "libsandbox.dylib"))
+          (guard (e [#t #f]) (load-shared-object "/usr/lib/libsandbox.1.dylib"))
+          (guard (e [#t #f]) (load-shared-object "")))
+      #f))
+
   ;; sandbox_init(const char *profile, uint64_t flags, char **errorbuf) -> int
   ;; Returns 0 on success, -1 on failure (errorbuf set).
   (define c-sandbox-init

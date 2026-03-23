@@ -13,3 +13,13 @@ new.txt
 
 # External project stubs (belong in their own repos)
 lib/gerbil-litehtml/
+
+# VM test artifacts (large images, keys, ISOs)
+tests/vm/*.qcow2
+tests/vm/*.qcow2.xz
+tests/vm/*.iso
+tests/vm/vm_key
+tests/vm/vm_key.pub
+tests/vm/seed/
+tests/vm/*.log
+tests/vm/*.pid

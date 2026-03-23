@@ -57,6 +57,14 @@
 
   ;; ========== FFI ==========
 
+  ;; Load libc on FreeBSD (required for cap_enter, cap_getmode, etc.)
+  (define _libc
+    (if (freebsd?)
+      (or (guard (e [#t #f]) (load-shared-object "libc.so.7"))
+          (guard (e [#t #f]) (load-shared-object "libc.so"))
+          (guard (e [#t #f]) (load-shared-object "")))
+      #f))
+
   ;; cap_enter(void) -> int  (0 on success, -1 on error)
   (define c-cap-enter
     (if (freebsd?)
@@ -100,30 +108,41 @@
             (foreign-ref 'int loc 0)))))
 
   ;; ========== Capsicum Rights Constants ==========
-  ;; From sys/capsicum.h — these are bit positions in the rights bitmask
+  ;;
+  ;; From sys/capsicum.h:
+  ;;   #define CAPRIGHT(idx, bit) ((1ULL << (57 + (idx))) | (bit))
+  ;;   cap_rights_t = struct { uint64_t cr_rights[2]; }
+  ;;   cr_rights[0] = (1 << 57) | index-0-rights
+  ;;   cr_rights[1] = (1 << 58) | index-1-rights
+  ;;
+  ;; Each right has an index (0 or 1) and a bit value.
+  ;; We store them as (index . bit) pairs for correct packing.
 
-  ;; Index 0 rights (general operations)
-  (define capsicum-right-read       (bitwise-arithmetic-shift-left 1 57))   ;; CAP_READ
-  (define capsicum-right-write      (bitwise-arithmetic-shift-left 1 58))   ;; CAP_WRITE
-  (define capsicum-right-seek       (bitwise-arithmetic-shift-left 1 11))   ;; CAP_SEEK
-  (define capsicum-right-mmap       (bitwise-arithmetic-shift-left 1 24))   ;; CAP_MMAP
-  (define capsicum-right-fstat      (bitwise-arithmetic-shift-left 1 40))   ;; CAP_FSTAT
-  (define capsicum-right-ftruncate  (bitwise-arithmetic-shift-left 1 42))   ;; CAP_FTRUNCATE
-  (define capsicum-right-event      (bitwise-arithmetic-shift-left 1 46))   ;; CAP_EVENT
-  (define capsicum-right-lookup     (bitwise-arithmetic-shift-left 1 56))   ;; CAP_LOOKUP
+  ;; Index 0 rights — stored as raw bit values (no index marker)
+  (define capsicum-right-read       #x0000000000000001)  ;; CAP_READ
+  (define capsicum-right-write      #x0000000000000002)  ;; CAP_WRITE
+  (define capsicum-right-seek       #x000000000000000c)  ;; CAP_SEEK
+  (define capsicum-right-mmap       #x0000000000000010)  ;; CAP_MMAP
+  (define capsicum-right-fstat      #x0000000000080000)  ;; CAP_FSTAT
+  (define capsicum-right-ftruncate  #x0000000000000200)  ;; CAP_FTRUNCATE
+  (define capsicum-right-lookup     #x0000000000000400)  ;; CAP_LOOKUP
+
+  ;; Index 1 rights
+  (define capsicum-right-event      #x0000000000000020)  ;; CAP_EVENT (index 1)
 
   ;; ========== Rights Helpers ==========
 
-  (define (symbol->right sym)
+  ;; Returns (values bit-value index) for a right symbol.
+  (define (symbol->right+index sym)
     (case sym
-      [(read)      capsicum-right-read]
-      [(write)     capsicum-right-write]
-      [(seek)      capsicum-right-seek]
-      [(mmap)      capsicum-right-mmap]
-      [(fstat)     capsicum-right-fstat]
-      [(ftruncate) capsicum-right-ftruncate]
-      [(event)     capsicum-right-event]
-      [(lookup)    capsicum-right-lookup]
+      [(read)      (values capsicum-right-read       0)]
+      [(write)     (values capsicum-right-write      0)]
+      [(seek)      (values capsicum-right-seek       0)]
+      [(mmap)      (values capsicum-right-mmap       0)]
+      [(fstat)     (values capsicum-right-fstat      0)]
+      [(ftruncate) (values capsicum-right-ftruncate  0)]
+      [(lookup)    (values capsicum-right-lookup     0)]
+      [(event)     (values capsicum-right-event      1)]
       [else (error 'capsicum-limit-fd!
               "unknown right; expected read, write, seek, mmap, fstat, ftruncate, event, or lookup"
               sym)]))
@@ -131,20 +150,24 @@
   (define (pack-rights right-symbols)
     ;; Pack a list of right symbols into a cap_rights_t foreign structure.
     ;; Returns a foreign pointer that must be freed by the caller.
-    (let ([rights-mem (foreign-alloc CAP_RIGHTS_SIZE)]
-          [mask (fold-left
-                  (lambda (acc sym) (bitwise-ior acc (symbol->right sym)))
-                  0
-                  right-symbols)])
-      ;; cap_rights_t = { cr_rights[0] = version_and_rights, cr_rights[1] = 0 }
-      ;; cr_rights[0] bits 57..62 encode the version (CAP_RIGHTS_VERSION = 0)
-      ;; The actual rights are OR'd in
-      (foreign-set! 'unsigned-64 rights-mem 0
-        (bitwise-ior
-          (bitwise-arithmetic-shift-left (+ CAP_RIGHTS_VERSION 2) 57)
-          mask))
-      (foreign-set! 'unsigned-64 rights-mem 8 0)
-      rights-mem))
+    ;;
+    ;; cap_rights_t layout:
+    ;;   cr_rights[0] = (1 << 57) | all index-0 right bits
+    ;;   cr_rights[1] = (1 << 58) | all index-1 right bits
+    (let loop ([syms right-symbols] [idx0-bits 0] [idx1-bits 0])
+      (if (null? syms)
+        (let ([rights-mem (foreign-alloc CAP_RIGHTS_SIZE)])
+          ;; cr_rights[0]: version marker (1 << 57) | index-0 rights
+          (foreign-set! 'unsigned-64 rights-mem 0
+            (bitwise-ior (bitwise-arithmetic-shift-left 1 57) idx0-bits))
+          ;; cr_rights[1]: version marker (1 << 58) | index-1 rights
+          (foreign-set! 'unsigned-64 rights-mem 8
+            (bitwise-ior (bitwise-arithmetic-shift-left 1 58) idx1-bits))
+          rights-mem)
+        (let-values ([(bit idx) (symbol->right+index (car syms))])
+          (if (= idx 0)
+            (loop (cdr syms) (bitwise-ior idx0-bits bit) idx1-bits)
+            (loop (cdr syms) idx0-bits (bitwise-ior idx1-bits bit)))))))
 
   ;; ========== Availability ==========
 
