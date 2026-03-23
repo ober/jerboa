@@ -1,26 +1,42 @@
 #!chezscheme
 ;;; (std security sandbox) — One-call sandbox entry point
 ;;;
-;;; Combines Landlock (filesystem), seccomp (syscalls), capabilities
+;;; Combines platform-specific kernel protections, capabilities
 ;;; (runtime enforcement), restricted evaluation, and timeouts into
 ;;; a single `run-safe` call.
+;;;
+;;; Platform protections:
+;;;   Linux:   Landlock (filesystem) + seccomp (syscall filtering)
+;;;   macOS:   Seatbelt (sandbox_init profiles)
+;;;   FreeBSD: Capsicum (capability mode)
 ;;;
 ;;; Usage:
 ;;;   ;; Run untrusted thunk with all protections (uses defaults):
 ;;;   (run-safe (lambda () (+ 1 2)))
 ;;;
-;;;   ;; Run with custom config:
+;;;   ;; Run with custom config (platform-specific keys):
+;;;   ;; Linux:
 ;;;   (run-safe (lambda () (+ 1 2))
 ;;;     (make-sandbox-config
 ;;;       'timeout 10
 ;;;       'seccomp 'io-only
 ;;;       'landlock (make-readonly-ruleset "/usr/lib" "/lib")))
+;;;   ;; macOS:
+;;;   (run-safe (lambda () (+ 1 2))
+;;;     (make-sandbox-config
+;;;       'timeout 10
+;;;       'seatbelt 'pure-computation))
+;;;   ;; FreeBSD:
+;;;   (run-safe (lambda () (+ 1 2))
+;;;     (make-sandbox-config
+;;;       'timeout 10
+;;;       'capsicum #t))
 ;;;
 ;;;   ;; Evaluate a string in a fully sandboxed environment:
 ;;;   (run-safe-eval "(+ 1 2)")
 ;;;   (run-safe-eval "(+ 1 2)" (make-sandbox-config 'timeout 10))
 ;;;
-;;; All kernel protections (Landlock, seccomp) are IRREVERSIBLE.
+;;; All kernel protections are IRREVERSIBLE.
 ;;; run-safe forks a child process so the parent remains unrestricted.
 ;;; The child applies protections, runs the thunk, and sends the result
 ;;; back via a pipe.
@@ -34,11 +50,15 @@
     *sandbox-timeout*
     *sandbox-seccomp*
     *sandbox-landlock*
+    *sandbox-seatbelt*
+    *sandbox-capsicum*
 
     ;; Config accessors
     sandbox-config-timeout
     sandbox-config-seccomp
     sandbox-config-landlock
+    sandbox-config-seatbelt
+    sandbox-config-capsicum
     sandbox-config-capabilities
 
     ;; Condition type
@@ -48,16 +68,39 @@
   (import (chezscheme)
           (std security landlock)
           (std security seccomp)
+          (std security seatbelt)
+          (std security capsicum)
           (std security capability)
           (std security restrict)
           (std safe-timeout)
           (std error conditions))
 
+  ;; ========== Platform detection ==========
+
+  (define (detect-platform)
+    (let ([mt (symbol->string (machine-type))])
+      (cond
+        [(string-contains-ci mt "osx") 'macos]
+        [(string-contains-ci mt "fb")  'freebsd]
+        [(string-contains-ci mt "le")  'linux]
+        [else                          'unknown])))
+
+  (define (string-contains-ci str sub)
+    (let ([slen (string-length str)]
+          [sublen (string-length sub)])
+      (let lp ([i 0])
+        (cond
+          [(> (+ i sublen) slen) #f]
+          [(string=? (substring str i (+ i sublen)) sub) #t]
+          [else (lp (+ i 1))]))))
+
+  (define *current-platform* (detect-platform))
+
   ;; ========== Condition type ==========
 
   (define-condition-type &sandbox-error &jerboa
     make-sandbox-error sandbox-error?
-    (phase sandbox-error-phase)      ;; 'landlock | 'seccomp | 'capability | 'timeout | 'eval | 'fork
+    (phase sandbox-error-phase)      ;; 'landlock | 'seccomp | 'seatbelt | 'capsicum | 'capability | 'timeout | 'eval | 'fork
     (detail sandbox-error-detail))   ;; string or condition
 
   ;; ========== Default parameters ==========
@@ -65,38 +108,61 @@
   ;; Default timeout for sandboxed execution (seconds). #f = no timeout.
   (define *sandbox-timeout* (make-parameter 30))
 
-  ;; Default seccomp filter. Symbol or seccomp-filter object.
+  ;; Default seccomp filter (Linux). Symbol or seccomp-filter object.
   ;; 'compute-only, 'io-only, 'network-server, or a custom filter, or #f for none.
   (define *sandbox-seccomp* (make-parameter 'compute-only))
 
-  ;; Default Landlock ruleset, or #f for none.
+  ;; Default Landlock ruleset (Linux), or #f for none.
   (define *sandbox-landlock* (make-parameter #f))
+
+  ;; Default Seatbelt profile (macOS).
+  ;; Symbol ('pure-computation, 'no-write, 'no-network, etc.),
+  ;; SBPL string, or #f for none.
+  ;; Default: 'pure-computation on macOS, #f elsewhere.
+  (define *sandbox-seatbelt*
+    (make-parameter
+      (if (eq? *current-platform* 'macos) 'pure-computation #f)))
+
+  ;; Default Capsicum mode (FreeBSD).
+  ;; #t to enter capability mode, #f to skip.
+  ;; Default: #t on FreeBSD, #f elsewhere.
+  (define *sandbox-capsicum*
+    (make-parameter
+      (if (eq? *current-platform* 'freebsd) #t #f)))
 
   ;; ========== Sandbox config record ==========
 
   (define-record-type (%sandbox-config %make-sandbox-config sandbox-config?)
     (fields
-      (immutable timeout %sandbox-config-timeout)
-      (immutable seccomp %sandbox-config-seccomp)
-      (immutable landlock %sandbox-config-landlock)
+      (immutable timeout   %sandbox-config-timeout)
+      (immutable seccomp   %sandbox-config-seccomp)
+      (immutable landlock  %sandbox-config-landlock)
+      (immutable seatbelt  %sandbox-config-seatbelt)
+      (immutable capsicum  %sandbox-config-capsicum)
       (immutable capabilities %sandbox-config-capabilities)))
 
   ;; Public accessors
-  (define sandbox-config-timeout %sandbox-config-timeout)
-  (define sandbox-config-seccomp %sandbox-config-seccomp)
-  (define sandbox-config-landlock %sandbox-config-landlock)
+  (define sandbox-config-timeout      %sandbox-config-timeout)
+  (define sandbox-config-seccomp      %sandbox-config-seccomp)
+  (define sandbox-config-landlock     %sandbox-config-landlock)
+  (define sandbox-config-seatbelt     %sandbox-config-seatbelt)
+  (define sandbox-config-capsicum     %sandbox-config-capsicum)
   (define sandbox-config-capabilities %sandbox-config-capabilities)
 
   ;; make-sandbox-config: key-value pairs → sandbox-config record
   ;; (make-sandbox-config 'timeout 10 'seccomp 'io-only)
+  ;; (make-sandbox-config 'timeout 10 'seatbelt 'no-write)
+  ;; (make-sandbox-config 'timeout 10 'capsicum #t)
   (define (make-sandbox-config . args)
     (let loop ([rest args]
-               [timeout (*sandbox-timeout*)]
-               [seccomp (*sandbox-seccomp*)]
+               [timeout  (*sandbox-timeout*)]
+               [seccomp  (*sandbox-seccomp*)]
                [landlock (*sandbox-landlock*)]
+               [seatbelt (*sandbox-seatbelt*)]
+               [capsicum (*sandbox-capsicum*)]
                [caps '()])
       (if (null? rest)
-        (%make-sandbox-config timeout seccomp landlock caps)
+        (%make-sandbox-config timeout seccomp landlock seatbelt capsicum caps)
         (begin
           (when (null? (cdr rest))
             (error 'make-sandbox-config "key missing value" (car rest)))
@@ -105,19 +171,23 @@
                 [remaining (cddr rest)])
             (cond
               [(eq? key 'timeout)
-               (loop remaining val seccomp landlock caps)]
+               (loop remaining val seccomp landlock seatbelt capsicum caps)]
               [(eq? key 'seccomp)
-               (loop remaining timeout val landlock caps)]
+               (loop remaining timeout val landlock seatbelt capsicum caps)]
               [(eq? key 'landlock)
-               (loop remaining timeout seccomp val caps)]
+               (loop remaining timeout seccomp val seatbelt capsicum caps)]
+              [(eq? key 'seatbelt)
+               (loop remaining timeout seccomp landlock val capsicum caps)]
+              [(eq? key 'capsicum)
+               (loop remaining timeout seccomp landlock seatbelt val caps)]
               [(eq? key 'capabilities)
-               (loop remaining timeout seccomp landlock val)]
+               (loop remaining timeout seccomp landlock seatbelt capsicum val)]
               [else
                (error 'make-sandbox-config
-                 "unknown key; expected timeout, seccomp, landlock, or capabilities"
+                 "unknown key; expected timeout, seccomp, landlock, seatbelt, capsicum, or capabilities"
                  key)]))))))
 
-  ;; ========== Seccomp filter resolution ==========
+  ;; ========== Seccomp filter resolution (Linux) ==========
 
   (define (resolve-seccomp-filter spec)
     (cond
@@ -130,15 +200,28 @@
               "invalid seccomp spec; expected #f, 'compute-only, 'io-only, 'network-server, or seccomp-filter"
               spec)]))
 
+  ;; ========== Seatbelt profile resolution (macOS) ==========
+
+  (define (resolve-seatbelt-profile spec)
+    ;; Returns: #f, a named profile symbol, or a raw SBPL string.
+    (cond
+      [(eq? spec #f) #f]
+      [(string? spec) spec]  ;; raw SBPL string
+      [(memq spec '(pure-computation no-write no-write-except-temporary
+                    no-internet no-network))
+       spec]
+      [else (error 'run-safe
+              "invalid seatbelt spec; expected #f, a profile symbol, or an SBPL string"
+              spec)]))
+
   ;; ========== Core: fork-based sandbox ==========
   ;;
   ;; We fork a child process to apply irreversible kernel protections.
   ;; The child:
-  ;;   1. Installs Landlock (if provided)
-  ;;   2. Installs seccomp (if provided)
-  ;;   3. Sets capabilities (if provided)
-  ;;   4. Runs the thunk with timeout
-  ;;   5. Writes the result to a pipe
+  ;;   1. Installs platform-specific protections
+  ;;   2. Sets capabilities (if provided)
+  ;;   3. Runs the thunk with timeout
+  ;;   4. Writes the result to a pipe
   ;; The parent waits and reads the result.
   ;;
   ;; This design ensures the parent process is never restricted.
@@ -151,11 +234,15 @@
     (let ([cfg (if (null? maybe-config) (default-config) (car maybe-config))])
       (unless (sandbox-config? cfg)
         (error 'run-safe "expected sandbox-config" cfg))
-      (let ([seccomp-filter (resolve-seccomp-filter (%sandbox-config-seccomp cfg))])
+      (let ([seccomp-filter (resolve-seccomp-filter (%sandbox-config-seccomp cfg))]
+            [seatbelt-profile (resolve-seatbelt-profile (%sandbox-config-seatbelt cfg))]
+            [capsicum-mode (%sandbox-config-capsicum cfg)])
         (run-safe-internal thunk
           (%sandbox-config-timeout cfg)
           seccomp-filter
           (%sandbox-config-landlock cfg)
+          seatbelt-profile
+          capsicum-mode
           (%sandbox-config-capabilities cfg)))))
 
   ;; FFI pipe(2) — creates a pair of connected file descriptors
@@ -221,7 +308,41 @@
                (bytevector-copy! buf 0 chunk 0 n)
                (loop (cons chunk chunks) (+ total n)))])))))
 
-  (define (run-safe-internal thunk timeout seccomp-filter landlock-rules capabilities)
+  ;; ========== Platform-specific protection installation ==========
+
+  (define (install-linux-protections! landlock-rules seccomp-filter)
+    ;; Step 1: Install Landlock filesystem restrictions
+    (when (and landlock-rules (landlock-available?))
+      (landlock-install! landlock-rules))
+    ;; Step 2: Install seccomp syscall filter
+    (when (and seccomp-filter (seccomp-available?))
+      (seccomp-install! seccomp-filter)))
+
+  (define (install-macos-protections! seatbelt-profile)
+    ;; Install Seatbelt sandbox profile
+    (when seatbelt-profile
+      (if (seatbelt-available?)
+        (if (string? seatbelt-profile)
+          ;; Raw SBPL string
+          (seatbelt-install-profile! seatbelt-profile)
+          ;; Named profile symbol
+          (seatbelt-install! seatbelt-profile))
+        ;; Seatbelt not available — warn but don't fail
+        ;; (could be running on a very old macOS or in a container)
+        (void))))
+
+  (define (install-freebsd-protections! capsicum-mode)
+    ;; Enter Capsicum capability mode
+    (when capsicum-mode
+      (if (capsicum-available?)
+        (capsicum-enter!)
+        ;; Capsicum not available — warn but don't fail
+        (void))))
+
+  ;; ========== Core sandbox implementation ==========
+
+  (define (run-safe-internal thunk timeout seccomp-filter landlock-rules
+                             seatbelt-profile capsicum-mode capabilities)
     ;; Communication via pipe: child writes result, parent reads it.
     ;; HARDENED: Uses pipe(2) instead of temp files to prevent symlink attacks,
     ;; TOCTOU races, and read-eval injection.
@@ -249,20 +370,21 @@
                             (c-close write-fd))))
                       (exit 1)])
 
-              ;; Step 1: Install Landlock
-              (when (and landlock-rules (landlock-available?))
-                (landlock-install! landlock-rules))
+              ;; Install platform-specific protections
+              (case *current-platform*
+                [(linux)
+                 (install-linux-protections! landlock-rules seccomp-filter)]
+                [(macos)
+                 (install-macos-protections! seatbelt-profile)]
+                [(freebsd)
+                 (install-freebsd-protections! capsicum-mode)]
+                [else (void)])  ;; Unknown platform — run without kernel protections
 
-              ;; Step 2: Install seccomp AFTER setting up pipe
-              ;; Pipe fd is already open, so even compute-only filter works
-              (when (and seccomp-filter (seccomp-available?))
-                (seccomp-install! seccomp-filter))
-
-              ;; Step 3: Set capabilities
+              ;; Set capabilities (cross-platform runtime enforcement)
               (unless (null? capabilities)
                 (current-capabilities capabilities))
 
-              ;; Step 4: Run thunk with timeout
+              ;; Run thunk with timeout
               (let ([result
                       (if timeout
                         (let ([completed #f]
@@ -283,7 +405,7 @@
                           value)
                         (thunk))])
 
-                ;; Step 5: Send result to parent via pipe
+                ;; Send result to parent via pipe
                 (let ([data (string->utf8 (format "(ok ~s)" result))])
                   (fd-write-all write-fd data)
                   (c-close write-fd)
@@ -320,12 +442,13 @@
 
   ;; ========== FFI Initialization ==========
 
+  ;; Load libc — platform-specific library names
   (define _libc
-    (guard (e [#t #f])
-      (load-shared-object "libc.so.6")))
-  (define _libc2
-    (guard (e [#t #f])
-      (load-shared-object "")))
+    (or (guard (e [#t #f]) (load-shared-object "libc.so.6"))       ;; Linux
+        (guard (e [#t #f]) (load-shared-object "libc.dylib"))      ;; macOS
+        (guard (e [#t #f]) (load-shared-object "libc.so.7"))       ;; FreeBSD
+        (guard (e [#t #f]) (load-shared-object "libc.so"))         ;; generic
+        (guard (e [#t #f]) (load-shared-object ""))))              ;; default
 
   (define fork-process
     (guard (e [#t (lambda () (error 'run-safe "fork() not available on this platform"))])
@@ -346,13 +469,17 @@
     (let ([cfg (if (null? maybe-config) (default-config) (car maybe-config))])
       (unless (sandbox-config? cfg)
         (error 'run-safe-eval "expected sandbox-config" cfg))
-      (let ([seccomp-filter (resolve-seccomp-filter (%sandbox-config-seccomp cfg))])
+      (let ([seccomp-filter (resolve-seccomp-filter (%sandbox-config-seccomp cfg))]
+            [seatbelt-profile (resolve-seatbelt-profile (%sandbox-config-seatbelt cfg))]
+            [capsicum-mode (%sandbox-config-capsicum cfg)])
         (run-safe-internal
           (lambda ()
             (restricted-eval-string expr-string))
           (%sandbox-config-timeout cfg)
           seccomp-filter
           (%sandbox-config-landlock cfg)
+          seatbelt-profile
+          capsicum-mode
           (%sandbox-config-capabilities cfg)))))
 
 ) ;; end library

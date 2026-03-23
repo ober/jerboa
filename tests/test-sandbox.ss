@@ -35,7 +35,8 @@
 
 ;; Config that disables kernel features (for CI / non-root testing)
 (define no-kernel-config
-  (make-sandbox-config 'timeout 5 'seccomp #f 'landlock #f))
+  (make-sandbox-config 'timeout 5 'seccomp #f 'landlock #f
+                       'seatbelt #f 'capsicum #f))
 
 (printf "--- Sandbox Tests ---~%~%")
 
@@ -147,7 +148,7 @@
                        (string-contains detail "exceeded"))))]
            [#t #f])
     (run-safe (lambda () (let loop () (loop)))
-      (make-sandbox-config 'timeout 1 'seccomp #f 'landlock #f))
+      (make-sandbox-config 'timeout 1 'seccomp #f 'landlock #f 'seatbelt #f 'capsicum #f))
     #f)
   #t)
 
@@ -198,7 +199,7 @@
                        (string-contains detail "exceeded"))))]
            [#t #f])
     (run-safe-eval "(let loop () (loop))"
-      (make-sandbox-config 'timeout 1 'seccomp #f 'landlock #f))
+      (make-sandbox-config 'timeout 1 'seccomp #f 'landlock #f 'seatbelt #f 'capsicum #f))
     #f)
   #t)
 
@@ -209,9 +210,56 @@
 (test "run-safe uses parameter defaults when no config given"
   (parameterize ([*sandbox-timeout* 5]
                  [*sandbox-seccomp* #f]
-                 [*sandbox-landlock* #f])
+                 [*sandbox-landlock* #f]
+                 [*sandbox-seatbelt* #f]
+                 [*sandbox-capsicum* #f])
     (run-safe (lambda () 99)))
   99)
+
+;; ========== Cross-platform config keys ==========
+
+(printf "~%-- Cross-platform config --~%")
+
+(test "make-sandbox-config accepts seatbelt key"
+  (sandbox-config? (make-sandbox-config 'seatbelt #f))
+  #t)
+
+(test "make-sandbox-config accepts capsicum key"
+  (sandbox-config? (make-sandbox-config 'capsicum #f))
+  #t)
+
+(test "sandbox-config-seatbelt accessor"
+  (sandbox-config-seatbelt (make-sandbox-config 'seatbelt 'no-write))
+  'no-write)
+
+(test "sandbox-config-capsicum accessor"
+  (sandbox-config-capsicum (make-sandbox-config 'capsicum #t))
+  #t)
+
+(test "make-sandbox-config with all platform keys"
+  (let ([cfg (make-sandbox-config
+               'timeout 5 'seccomp #f 'landlock #f
+               'seatbelt #f 'capsicum #f)])
+    (and (= (sandbox-config-timeout cfg) 5)
+         (not (sandbox-config-seccomp cfg))
+         (not (sandbox-config-landlock cfg))
+         (not (sandbox-config-seatbelt cfg))
+         (not (sandbox-config-capsicum cfg))))
+  #t)
+
+(test "*sandbox-seatbelt* parameter exists"
+  (procedure? *sandbox-seatbelt*)
+  #t)
+
+(test "*sandbox-capsicum* parameter exists"
+  (procedure? *sandbox-capsicum*)
+  #t)
+
+(test "run-safe works with all protections disabled"
+  (run-safe (lambda () (* 6 7))
+    (make-sandbox-config 'timeout 5 'seccomp #f 'landlock #f
+                         'seatbelt #f 'capsicum #f))
+  42)
 
 ;; ========== Summary ==========
 
