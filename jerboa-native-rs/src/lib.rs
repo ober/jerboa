@@ -10,3 +10,6 @@ mod inotify_native;
 mod landlock;
 mod tls;
 mod x509;
+mod antidebug;
+mod seccomp;
+mod integrity;
