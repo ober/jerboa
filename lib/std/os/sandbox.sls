@@ -42,7 +42,8 @@
     sandbox-run/capsicum
     sandbox-available?)
 
-  (import (chezscheme))
+  (import (chezscheme)
+          (std security capsicum))
 
   ;; ========== Platform Detection ==========
 
@@ -149,18 +150,10 @@
         (lambda ()
           (foreign-free errptr)))))
 
-  ;; ========== Capsicum FFI (FreeBSD) ==========
-
-  (define c-cap-enter
-    (if (eq? *platform* 'freebsd)
-      (guard (e [#t (lambda () -1)])
-        (foreign-procedure "cap_enter" () int))
-      (lambda () -1)))
-
-  (define (capsicum-available?)
-    (and (eq? *platform* 'freebsd)
-         (guard (e [#t #f])
-           (foreign-entry? "cap_enter"))))
+  ;; Capsicum availability (delegates to the capsicum module)
+  ;; capsicum-available?, capsicum-enter!, capsicum-limit-fd!,
+  ;; capsicum-open-path, capsicum-apply-preset! imported from
+  ;; (std security capsicum)
 
   ;; ========== Landlock helpers ==========
 
@@ -237,13 +230,16 @@
               (let ([sbpl (paths->sbpl-profile read-paths write-paths exec-paths)])
                 (apply-seatbelt! sbpl)))]
            [(freebsd)
-            ;; Enter Capsicum capability mode
+            ;; Pre-open paths as restricted fds, then enter capability mode.
+            ;; This gives Landlock-equivalent path-based restrictions via Capsicum.
             (when (capsicum-available?)
-              (let ([rc (c-cap-enter)])
-                (when (< rc 0)
-                  (display "sandbox: Capsicum cap_enter failed\n"
-                           (current-error-port))
-                  (c-exit 126))))]
+              (guard (e [#t
+                        (display "sandbox: Capsicum enforcement failed: "
+                                 (current-error-port))
+                        (display-condition e (current-error-port))
+                        (newline (current-error-port))
+                        (c-exit 126)])
+                (capsicum-sandbox-paths! read-paths write-paths exec-paths)))]
            [else (void)])
          ;; Run the thunk in the sandboxed child
          (guard (e [#t
@@ -285,18 +281,25 @@
          (wait-for-child pid)))))
 
   ;; FreeBSD-specific: run a thunk in Capsicum capability mode.
-  (define (sandbox-run/capsicum thunk)
+  ;; Optional fd-rights: alist of (fd . (right-symbol ...)) for per-fd restriction.
+  (define (sandbox-run/capsicum thunk . maybe-fd-rights)
     (let ((pid (c-fork)))
       (cond
         ((< pid 0)
          (error 'sandbox-run/capsicum "fork failed"))
         ((= pid 0)
-         ;; CHILD: enter Capsicum mode
-         (when (capsicum-available?)
-           (let ([rc (c-cap-enter)])
-             (when (< rc 0)
-               (display "sandbox: cap_enter failed\n" (current-error-port))
-               (c-exit 126))))
+         ;; CHILD: apply fd restrictions then enter Capsicum mode
+         (guard (e [#t
+                   (display "sandbox: " (current-error-port))
+                   (display-condition e (current-error-port))
+                   (newline (current-error-port))
+                   (c-exit 1)])
+           (when (capsicum-available?)
+             (if (and (pair? maybe-fd-rights) (pair? (car maybe-fd-rights)))
+               ;; Apply preset with fd restrictions
+               (capsicum-apply-preset! (car maybe-fd-rights))
+               ;; Bare cap_enter
+               (capsicum-enter!))))
          (guard (e [#t
                    (display "sandbox: " (current-error-port))
                    (display-condition e (current-error-port))
@@ -306,6 +309,47 @@
          (c-exit 0))
         (else
          (wait-for-child pid)))))
+
+  ;; ========== Capsicum Path Pre-opening ==========
+
+  (define (capsicum-sandbox-paths! read-paths write-paths exec-paths)
+    ;; Pre-open paths as fds with appropriate Capsicum rights, restrict
+    ;; stdio, then enter capability mode. This maps Landlock-style path
+    ;; restrictions to the Capsicum fd-capability model.
+    ;;
+    ;; After this call, the process can only operate on pre-opened fds
+    ;; with their restricted rights. No new fds from global namespace.
+    ;;
+    ;; Returns the list of opened fds (caller can use with openat(2)).
+    (let ([opened-fds '()])
+      ;; Pre-open read-only paths
+      (for-each
+        (lambda (p)
+          (guard (e [#t (void)])  ;; skip paths that can't be opened
+            (let ([fd (capsicum-open-path p '(read fstat seek lookup))])
+              (set! opened-fds (cons fd opened-fds)))))
+        (if (list? read-paths) read-paths '()))
+      ;; Pre-open read-write paths
+      (for-each
+        (lambda (p)
+          (guard (e [#t (void)])
+            (let ([fd (capsicum-open-path p '(read write fstat seek ftruncate lookup))])
+              (set! opened-fds (cons fd opened-fds)))))
+        (if (list? write-paths) write-paths '()))
+      ;; Pre-open execute paths (read-only access for loading)
+      (for-each
+        (lambda (p)
+          (guard (e [#t (void)])
+            (let ([fd (capsicum-open-path p '(read fstat lookup))])
+              (set! opened-fds (cons fd opened-fds)))))
+        (if (list? exec-paths) exec-paths '()))
+      ;; Restrict stdio fds
+      (guard (e [#t (void)]) (capsicum-limit-fd! 0 '(read fstat)))
+      (guard (e [#t (void)]) (capsicum-limit-fd! 1 '(write fstat)))
+      (guard (e [#t (void)]) (capsicum-limit-fd! 2 '(write fstat)))
+      ;; Enter capability mode
+      (capsicum-enter!)
+      (reverse opened-fds)))
 
   ;; ========== Internal ==========
 

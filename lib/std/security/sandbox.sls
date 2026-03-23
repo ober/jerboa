@@ -124,11 +124,13 @@
       (if (eq? *current-platform* 'macos) 'pure-computation #f)))
 
   ;; Default Capsicum mode (FreeBSD).
-  ;; #t to enter capability mode, #f to skip.
-  ;; Default: #t on FreeBSD, #f elsewhere.
+  ;; #f to skip, #t for bare cap_enter(), or a preset symbol:
+  ;;   'compute-only — restrict stdio fds + cap_enter (analogous to seccomp compute-only)
+  ;;   'io-only      — like compute-only but allows pre-opened fds
+  ;; Default: 'compute-only on FreeBSD, #f elsewhere.
   (define *sandbox-capsicum*
     (make-parameter
-      (if (eq? *current-platform* 'freebsd) #t #f)))
+      (if (eq? *current-platform* 'freebsd) 'compute-only #f)))
 
   ;; ========== Sandbox config record ==========
 
@@ -212,6 +214,25 @@
        spec]
       [else (error 'run-safe
               "invalid seatbelt spec; expected #f, a profile symbol, or an SBPL string"
+              spec)]))
+
+  ;; ========== Capsicum mode resolution (FreeBSD) ==========
+
+  (define (resolve-capsicum-mode spec pipe-fd)
+    ;; Resolve capsicum config to an actionable value.
+    ;; Returns: #f, 'bare, or a preset alist.
+    (cond
+      [(eq? spec #f) #f]
+      [(eq? spec #t) 'bare]                                ;; backward compat
+      [(eq? spec 'compute-only)
+       (capsicum-compute-only-preset pipe-fd)]
+      [(eq? spec 'io-only)
+       (capsicum-io-only-preset pipe-fd '())]
+      [(and (list? spec) (pair? spec)
+            (pair? (car spec)) (integer? (caar spec)))
+       spec]                                                ;; raw preset alist
+      [else (error 'run-safe
+              "invalid capsicum spec; expected #f, #t, 'compute-only, 'io-only, or preset alist"
               spec)]))
 
   ;; ========== Core: fork-based sandbox ==========
@@ -331,11 +352,18 @@
         ;; (could be running on a very old macOS or in a container)
         (void))))
 
-  (define (install-freebsd-protections! capsicum-mode)
-    ;; Enter Capsicum capability mode
-    (when capsicum-mode
+  (define (install-freebsd-protections! resolved-capsicum)
+    ;; Apply Capsicum protections based on resolved mode:
+    ;;   #f     — skip
+    ;;   'bare  — just cap_enter() (backward compat with 'capsicum #t)
+    ;;   alist  — restrict fds per preset, then cap_enter()
+    (when resolved-capsicum
       (if (capsicum-available?)
-        (capsicum-enter!)
+        (cond
+          [(eq? resolved-capsicum 'bare)
+           (capsicum-enter!)]
+          [(list? resolved-capsicum)
+           (capsicum-apply-preset! resolved-capsicum)])
         ;; Capsicum not available — warn but don't fail
         (void))))
 
@@ -377,7 +405,9 @@
                 [(macos)
                  (install-macos-protections! seatbelt-profile)]
                 [(freebsd)
-                 (install-freebsd-protections! capsicum-mode)]
+                 ;; Resolve capsicum mode here in the child, where we know the pipe fd
+                 (let ([resolved (resolve-capsicum-mode capsicum-mode write-fd)])
+                   (install-freebsd-protections! resolved))]
                 [else (void)])  ;; Unknown platform — run without kernel protections
 
               ;; Set capabilities (cross-platform runtime enforcement)

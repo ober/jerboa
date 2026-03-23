@@ -261,6 +261,34 @@
                          'seatbelt #f 'capsicum #f))
   42)
 
+;; ========== Capsicum preset config values ==========
+
+(printf "~%-- Capsicum presets --~%")
+
+(test "make-sandbox-config accepts capsicum compute-only"
+  (sandbox-config-capsicum (make-sandbox-config 'capsicum 'compute-only))
+  'compute-only)
+
+(test "make-sandbox-config accepts capsicum io-only"
+  (sandbox-config-capsicum (make-sandbox-config 'capsicum 'io-only))
+  'io-only)
+
+(test "make-sandbox-config accepts capsicum #t (backward compat)"
+  (sandbox-config-capsicum (make-sandbox-config 'capsicum #t))
+  #t)
+
+(test "run-safe works with capsicum compute-only (non-FreeBSD skips)"
+  (run-safe (lambda () (+ 10 20))
+    (make-sandbox-config 'timeout 5 'seccomp #f 'landlock #f
+                         'seatbelt #f 'capsicum 'compute-only))
+  30)
+
+(test "run-safe works with capsicum io-only (non-FreeBSD skips)"
+  (run-safe (lambda () (string-append "a" "b"))
+    (make-sandbox-config 'timeout 5 'seccomp #f 'landlock #f
+                         'seatbelt #f 'capsicum 'io-only))
+  "ab")
+
 ;; ========== Summary ==========
 
 (printf "~%Sandbox tests: ~a passed, ~a failed~%" pass fail)

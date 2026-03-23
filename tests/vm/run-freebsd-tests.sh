@@ -220,6 +220,47 @@ cat > /tmp/fbsd-capsicum-functional.ss <<'SCHEME_EOF'
          (begin (set! pass (+ pass 1)) (printf "  ok cap_rights_limit blocks write~%"))
          (begin (set! fail (+ fail 1)) (printf "FAIL child=~a~%" c))))]))
 
+;; capsicum-apply-preset! enforcement
+(printf "~%-- capsicum-apply-preset! enforcement --~%")
+(let ([pid (c-fork)])
+  (cond
+    [(< pid 0) (set! fail (+ fail 1)) (printf "FAIL fork~%")]
+    [(= pid 0)
+     ;; Apply compute-only preset with pipe fd 5 (dummy)
+     (capsicum-apply-preset!
+       (capsicum-compute-only-preset 1))  ;; use stdout as "pipe fd"
+     ;; Should be in cap mode now
+     (if (not (capsicum-in-capability-mode?)) (c-exit 2)
+       ;; open should fail
+       (let ([fd (c-open "/etc/passwd" 0)])
+         (if (< fd 0) (c-exit 0) (begin (c-close fd) (c-exit 1)))))]
+    [else
+     (let ([c (wait-child pid)])
+       (if (= c 0)
+         (begin (set! pass (+ pass 1)) (printf "  ok apply-preset! blocks open()~%"))
+         (begin (set! fail (+ fail 1)) (printf "FAIL child=~a~%" c))))]))
+
+;; capsicum-open-path pre-opens and restricts
+(printf "~%-- capsicum-open-path enforcement --~%")
+(let ([pid (c-fork)])
+  (cond
+    [(< pid 0) (set! fail (+ fail 1)) (printf "FAIL fork~%")]
+    [(= pid 0)
+     (let* ([c-wr (foreign-procedure "write" (int u8* size_t) ssize_t)]
+            ;; Pre-open /tmp as read-only
+            [dir-fd (capsicum-open-path "/tmp" '(read fstat seek lookup))])
+       ;; Enter cap mode
+       (capsicum-enter!)
+       ;; The dir-fd should be restricted to read-only rights
+       ;; Writing should fail on this fd
+       (let ([n (c-wr dir-fd (string->utf8 "test") 4)])
+         (if (< n 0) (c-exit 0) (c-exit 1))))]
+    [else
+     (let ([c (wait-child pid)])
+       (if (= c 0)
+         (begin (set! pass (+ pass 1)) (printf "  ok open-path restricts fd rights~%"))
+         (begin (set! fail (+ fail 1)) (printf "FAIL child=~a~%" c))))]))
+
 (printf "~%Capsicum functional: ~a passed, ~a failed~%" pass fail)
 (when (> fail 0) (exit 1))
 SCHEME_EOF

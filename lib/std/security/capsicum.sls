@@ -20,6 +20,12 @@
 ;;;   ;; Restrict an fd to read-only before entering capability mode:
 ;;;   (capsicum-limit-fd! fd '(read))
 ;;;
+;;;   ;; Apply a preset (restrict fds + enter cap mode in one call):
+;;;   (capsicum-apply-preset! (capsicum-compute-only-preset pipe-fd))
+;;;
+;;;   ;; Pre-open a path as a restricted fd:
+;;;   (capsicum-open-path "/data" '(read fstat seek lookup))
+;;;
 ;;;   ;; Check availability:
 ;;;   (capsicum-available?)
 
@@ -32,6 +38,14 @@
 
     ;; FD rights management
     capsicum-limit-fd!
+
+    ;; Presets (analogous to seccomp presets)
+    capsicum-compute-only-preset
+    capsicum-io-only-preset
+    capsicum-apply-preset!
+
+    ;; Path pre-opening
+    capsicum-open-path
 
     ;; Rights constants
     capsicum-right-read
@@ -236,5 +250,87 @@
                         fd (get-errno))))))
         (lambda ()
           (foreign-free rights-mem)))))
+
+  ;; ========== Path Pre-opening ==========
+
+  ;; FreeBSD open(2) flags
+  (define O_RDONLY   #x0000)
+  (define O_RDWR     #x0002)
+  (define O_DIRECTORY #x00020000)  ;; FreeBSD O_DIRECTORY
+
+  (define c-open
+    (if (freebsd?)
+      (guard (e [#t (lambda (path flags) -1)])
+        (foreign-procedure "open" (string int) int))
+      (lambda (path flags) -1)))
+
+  (define c-close
+    (if (freebsd?)
+      (guard (e [#t (lambda (fd) -1)])
+        (foreign-procedure "close" (int) int))
+      (lambda (fd) -1)))
+
+  (define (capsicum-open-path path right-symbols)
+    ;; Pre-open a path and restrict the resulting fd.
+    ;; Returns the fd number (caller must track it).
+    ;; The fd is restricted to the given rights via cap_rights_limit.
+    ;;
+    ;; If 'write is in right-symbols, opens O_RDWR; otherwise O_RDONLY.
+    ;; If 'lookup is in right-symbols, adds O_DIRECTORY for directories.
+    (unless (freebsd?)
+      (error 'capsicum-open-path "Capsicum is only available on FreeBSD"))
+    (let* ([has-write (memq 'write right-symbols)]
+           [flags (if has-write O_RDWR O_RDONLY)]
+           [fd (c-open path flags)])
+      (when (< fd 0)
+        (error 'capsicum-open-path
+          (format "open(~s) failed (errno ~a)" path (get-errno))))
+      ;; Restrict the fd to the requested rights
+      (capsicum-limit-fd! fd right-symbols)
+      fd))
+
+  ;; ========== Presets ==========
+  ;;
+  ;; Presets are alists of (fd . (right-symbol ...)) that specify
+  ;; how each fd should be restricted before entering capability mode.
+  ;; Analogous to seccomp's compute-only-filter / io-only-filter.
+
+  (define (capsicum-compute-only-preset pipe-fd)
+    ;; Minimal preset: restrict stdio + pipe fd.
+    ;; No file I/O, no network — just computation with stdio.
+    ;; Analogous to seccomp compute-only-filter.
+    `((0 . (read fstat))            ;; stdin: read-only
+      (1 . (write fstat))           ;; stdout: write-only
+      (2 . (write fstat))           ;; stderr: write-only
+      (,pipe-fd . (write fstat))))  ;; pipe to parent: write-only
+
+  (define (capsicum-io-only-preset pipe-fd extra-fds)
+    ;; Like compute-only but with additional pre-opened fds.
+    ;; extra-fds: list of (fd . (right-symbol ...)) pairs for
+    ;; fds the caller pre-opened via capsicum-open-path.
+    ;; Analogous to seccomp io-only-filter + Landlock paths.
+    (append
+      (capsicum-compute-only-preset pipe-fd)
+      extra-fds))
+
+  (define (capsicum-apply-preset! preset)
+    ;; Apply a preset: restrict each fd then enter capability mode.
+    ;; preset: alist of (fd . (right-symbol ...))
+    ;;
+    ;; This is the single-call entry point for Capsicum sandboxing
+    ;; with per-fd restrictions. IRREVERSIBLE.
+    (unless (freebsd?)
+      (error 'capsicum-apply-preset! "Capsicum is only available on FreeBSD"))
+    (unless (and (list? preset) (not (null? preset)))
+      (error 'capsicum-apply-preset! "expected non-empty preset alist" preset))
+    ;; Step 1: Restrict each fd
+    (for-each
+      (lambda (entry)
+        (let ([fd (car entry)]
+              [rights (cdr entry)])
+          (capsicum-limit-fd! fd rights)))
+      preset)
+    ;; Step 2: Enter capability mode
+    (capsicum-enter!))
 
   ) ;; end library

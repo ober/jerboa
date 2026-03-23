@@ -72,6 +72,46 @@
   (not (= capsicum-right-read capsicum-right-write))
   #t)
 
+;; ========== Presets ==========
+
+(printf "~%-- Presets --~%")
+
+(test "capsicum-compute-only-preset returns alist"
+  (let ([preset (capsicum-compute-only-preset 5)])
+    (and (list? preset)
+         (pair? preset)
+         (pair? (car preset))))
+  #t)
+
+(test "capsicum-compute-only-preset includes pipe fd"
+  (let ([preset (capsicum-compute-only-preset 7)])
+    (assv 7 preset))
+  '(7 . (write fstat)))
+
+(test "capsicum-compute-only-preset includes stdin"
+  (let ([preset (capsicum-compute-only-preset 5)])
+    (assv 0 preset))
+  '(0 . (read fstat)))
+
+(test "capsicum-compute-only-preset includes stdout"
+  (let ([preset (capsicum-compute-only-preset 5)])
+    (assv 1 preset))
+  '(1 . (write fstat)))
+
+(test "capsicum-io-only-preset includes extra fds"
+  (let ([preset (capsicum-io-only-preset 5 '((10 . (read fstat seek))))])
+    (assv 10 preset))
+  '(10 . (read fstat seek)))
+
+(test "capsicum-io-only-preset includes compute-only fds"
+  (let ([preset (capsicum-io-only-preset 5 '((10 . (read))))])
+    (and (assv 0 preset)   ;; stdin
+         (assv 1 preset)   ;; stdout
+         (assv 5 preset)   ;; pipe
+         (assv 10 preset)  ;; extra
+         #t))
+  #t)
+
 ;; ========== Error handling for non-FreeBSD ==========
 
 (printf "~%-- Error handling --~%")
@@ -86,6 +126,18 @@
   (test "capsicum-limit-fd! raises on non-FreeBSD"
     (guard (exn [#t #t])
       (capsicum-limit-fd! 0 '(read))
+      #f)
+    #t)
+
+  (test "capsicum-apply-preset! raises on non-FreeBSD"
+    (guard (exn [#t #t])
+      (capsicum-apply-preset! '((0 . (read fstat))))
+      #f)
+    #t)
+
+  (test "capsicum-open-path raises on non-FreeBSD"
+    (guard (exn [#t #t])
+      (capsicum-open-path "/tmp" '(read fstat))
       #f)
     #t))
 
