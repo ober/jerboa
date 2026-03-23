@@ -376,6 +376,257 @@ pub extern "C" fn jerboa_tls_accept(
 }
 
 // ============================================================
+// Server: mTLS — require and verify client certificates
+// ============================================================
+
+/// Create a TLS server context that requires client certificates.
+/// client_ca_path points to a PEM file with the CA cert(s) that
+/// issued the client certificates. Clients without a valid cert
+/// signed by this CA will be rejected at the TLS handshake level.
+/// Returns context handle (>0) on success, 0 on error.
+#[no_mangle]
+pub extern "C" fn jerboa_tls_server_new_mtls(
+    cert_path: *const u8,
+    cert_path_len: usize,
+    key_path: *const u8,
+    key_path_len: usize,
+    client_ca_path: *const u8,
+    client_ca_len: usize,
+) -> u64 {
+    match std::panic::catch_unwind(|| {
+        if cert_path.is_null() || key_path.is_null() || client_ca_path.is_null() {
+            set_last_error("null cert/key/ca path".to_string());
+            return 0;
+        }
+        let cert_str = unsafe {
+            match std::str::from_utf8(std::slice::from_raw_parts(cert_path, cert_path_len)) {
+                Ok(s) => s,
+                Err(_) => { set_last_error("invalid cert path".to_string()); return 0; }
+            }
+        };
+        let key_str = unsafe {
+            match std::str::from_utf8(std::slice::from_raw_parts(key_path, key_path_len)) {
+                Ok(s) => s,
+                Err(_) => { set_last_error("invalid key path".to_string()); return 0; }
+            }
+        };
+        let ca_str = unsafe {
+            match std::str::from_utf8(std::slice::from_raw_parts(client_ca_path, client_ca_len)) {
+                Ok(s) => s,
+                Err(_) => { set_last_error("invalid CA path".to_string()); return 0; }
+            }
+        };
+
+        // Read server cert chain
+        let cert_file = match std::fs::File::open(cert_str) {
+            Ok(f) => f,
+            Err(e) => { set_last_error(format!("open cert: {}", e)); return 0; }
+        };
+        let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut std::io::BufReader::new(cert_file))
+            .filter_map(|r| r.ok())
+            .collect();
+        if certs.is_empty() {
+            set_last_error("no certificates found in cert file".to_string());
+            return 0;
+        }
+
+        // Read server private key
+        let key_file = match std::fs::File::open(key_str) {
+            Ok(f) => f,
+            Err(e) => { set_last_error(format!("open key: {}", e)); return 0; }
+        };
+        let key = match rustls_pemfile::private_key(&mut std::io::BufReader::new(key_file)) {
+            Ok(Some(k)) => k,
+            Ok(None) => { set_last_error("no private key found".to_string()); return 0; }
+            Err(e) => { set_last_error(format!("read key: {}", e)); return 0; }
+        };
+
+        // Read client CA certs for verification
+        let ca_file = match std::fs::File::open(ca_str) {
+            Ok(f) => f,
+            Err(e) => { set_last_error(format!("open client CA: {}", e)); return 0; }
+        };
+        let ca_certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut std::io::BufReader::new(ca_file))
+            .filter_map(|r| r.ok())
+            .collect();
+        if ca_certs.is_empty() {
+            set_last_error("no CA certificates found in client CA file".to_string());
+            return 0;
+        }
+
+        // Build root cert store from client CA
+        let mut client_root_store = rustls::RootCertStore::empty();
+        for cert in ca_certs {
+            if let Err(e) = client_root_store.add(cert) {
+                set_last_error(format!("add CA cert: {}", e));
+                return 0;
+            }
+        }
+
+        // Build client cert verifier
+        let client_verifier = match rustls::server::WebPkiClientVerifier::builder(
+            Arc::new(client_root_store),
+        ).build() {
+            Ok(v) => v,
+            Err(e) => {
+                set_last_error(format!("client verifier: {}", e));
+                return 0;
+            }
+        };
+
+        // Build server config with client auth required
+        let config = match ServerConfig::builder()
+            .with_client_cert_verifier(client_verifier)
+            .with_single_cert(certs, PrivateKeyDer::from(key))
+        {
+            Ok(c) => c,
+            Err(e) => { set_last_error(format!("server config: {}", e)); return 0; }
+        };
+
+        let handle = next_handle();
+        server_ctxs().lock().unwrap().insert(handle, TlsServerCtx {
+            config: Arc::new(config),
+        });
+        handle
+    }) {
+        Ok(h) => h,
+        Err(_) => {
+            set_last_error("panic in tls_server_new_mtls".to_string());
+            0
+        }
+    }
+}
+
+// ============================================================
+// Client: connect with client certificate (for mTLS)
+// ============================================================
+
+/// Connect to host:port over TLS, presenting a client certificate.
+/// The server's cert is verified against the given CA cert.
+/// Returns handle ID (>0) on success, 0 on error.
+#[no_mangle]
+pub extern "C" fn jerboa_tls_connect_mtls(
+    host: *const u8,
+    host_len: usize,
+    port: u16,
+    cert_path: *const u8,
+    cert_path_len: usize,
+    key_path: *const u8,
+    key_path_len: usize,
+    ca_cert_path: *const u8,
+    ca_cert_len: usize,
+) -> u64 {
+    match std::panic::catch_unwind(|| {
+        if host.is_null() || cert_path.is_null() || key_path.is_null() || ca_cert_path.is_null() {
+            set_last_error("null argument".to_string());
+            return 0;
+        }
+        let host_str = unsafe {
+            match std::str::from_utf8(std::slice::from_raw_parts(host, host_len)) {
+                Ok(s) => s.to_string(),
+                Err(_) => { set_last_error("invalid UTF-8 hostname".to_string()); return 0; }
+            }
+        };
+        let cert_str = unsafe {
+            match std::str::from_utf8(std::slice::from_raw_parts(cert_path, cert_path_len)) {
+                Ok(s) => s,
+                Err(_) => { set_last_error("invalid cert path".to_string()); return 0; }
+            }
+        };
+        let key_str = unsafe {
+            match std::str::from_utf8(std::slice::from_raw_parts(key_path, key_path_len)) {
+                Ok(s) => s,
+                Err(_) => { set_last_error("invalid key path".to_string()); return 0; }
+            }
+        };
+        let ca_str = unsafe {
+            match std::str::from_utf8(std::slice::from_raw_parts(ca_cert_path, ca_cert_len)) {
+                Ok(s) => s,
+                Err(_) => { set_last_error("invalid CA path".to_string()); return 0; }
+            }
+        };
+
+        // Read client cert chain
+        let cert_file = match std::fs::File::open(cert_str) {
+            Ok(f) => f,
+            Err(e) => { set_last_error(format!("open client cert: {}", e)); return 0; }
+        };
+        let client_certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut std::io::BufReader::new(cert_file))
+            .filter_map(|r| r.ok())
+            .collect();
+        if client_certs.is_empty() {
+            set_last_error("no client certificates found".to_string());
+            return 0;
+        }
+
+        // Read client private key
+        let key_file = match std::fs::File::open(key_str) {
+            Ok(f) => f,
+            Err(e) => { set_last_error(format!("open client key: {}", e)); return 0; }
+        };
+        let client_key = match rustls_pemfile::private_key(&mut std::io::BufReader::new(key_file)) {
+            Ok(Some(k)) => k,
+            Ok(None) => { set_last_error("no client private key found".to_string()); return 0; }
+            Err(e) => { set_last_error(format!("read client key: {}", e)); return 0; }
+        };
+
+        // Read server CA cert for verification
+        let ca_file = match std::fs::File::open(ca_str) {
+            Ok(f) => f,
+            Err(e) => { set_last_error(format!("open server CA: {}", e)); return 0; }
+        };
+        let ca_certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut std::io::BufReader::new(ca_file))
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Build root store from CA cert
+        let mut root_store = rustls::RootCertStore::empty();
+        for cert in ca_certs {
+            if let Err(e) = root_store.add(cert) {
+                set_last_error(format!("add CA cert: {}", e));
+                return 0;
+            }
+        }
+
+        // Build client config with client cert
+        let config = match ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_client_auth_cert(client_certs, PrivateKeyDer::from(client_key))
+        {
+            Ok(c) => c,
+            Err(e) => { set_last_error(format!("client config: {}", e)); return 0; }
+        };
+
+        let server_name = match ServerName::try_from(host_str.clone()) {
+            Ok(sn) => sn,
+            Err(e) => { set_last_error(format!("invalid server name: {}", e)); return 0; }
+        };
+
+        let conn = match ClientConnection::new(Arc::new(config), server_name) {
+            Ok(c) => c,
+            Err(e) => { set_last_error(format!("TLS client init: {}", e)); return 0; }
+        };
+
+        let addr = format!("{}:{}", host_str, port);
+        let tcp = match TcpStream::connect(&addr) {
+            Ok(s) => s,
+            Err(e) => { set_last_error(format!("TCP connect {}: {}", addr, e)); return 0; }
+        };
+
+        let stream = StreamOwned::new(conn, tcp);
+        let handle = next_handle();
+        conns().lock().unwrap().insert(handle, TlsConn::Client(stream));
+        handle
+    }) {
+        Ok(h) => h,
+        Err(_) => {
+            set_last_error("panic in tls_connect_mtls".to_string());
+            0
+        }
+    }
+}
+
+// ============================================================
 // Read / Write / Close
 // ============================================================
 
