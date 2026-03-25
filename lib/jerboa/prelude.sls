@@ -116,7 +116,10 @@
 
     ;; ---- FFI ----
     c-lambda define-c-lambda
-    begin-ffi c-declare)
+    begin-ffi c-declare
+
+    ;; ---- std/ergo ----
+    using : as maybe list-of?)
 
   (import
     (except (chezscheme)
@@ -157,6 +160,7 @@
     (std misc string)
     (std misc list)
     (std misc alist)
-    (std misc ports))
+    (std misc ports)
+    (std ergo))
 
   ) ;; end library

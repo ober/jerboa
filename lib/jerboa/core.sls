@@ -107,7 +107,8 @@
           (std os path)
           (std misc thread)
           (only (std misc string) string-split string-empty?)
-          (only (std misc list) filter-map))
+          (only (std misc list) filter-map)
+          (only (std typed) check-type! check-return-type!))
 
   ;;;; ---- Compile-time helpers ----
 
@@ -250,9 +251,84 @@
 
   ;;;; ---- DEF ----
 
+  ;; Check if a datum looks like a typed param: (name : type)
+  (meta define (typed-param? p)
+    (and (pair? p)
+         (pair? (cdr p))
+         (pair? (cddr p))
+         (null? (cdddr p))
+         (symbol? (car p))
+         (eq? (cadr p) ':)
+         (symbol? (caddr p))))
+
+  ;; Check if any param in the list is typed
+  (meta define (has-typed-params? params)
+    (cond
+      [(null? params) #f]
+      [(not (pair? params)) #f]
+      [(typed-param? (car params)) #t]
+      [else (has-typed-params? (cdr params))]))
+
+  ;; Extract just the arg names from a mixed typed/untyped param list
+  (meta define (extract-arg-names params)
+    (map (lambda (p)
+           (if (typed-param? p) (car p) p))
+         params))
+
+  ;; Extract typed params as list of (name type) pairs
+  (meta define (extract-typed-params params)
+    (let loop ([rest params] [acc '()])
+      (cond
+        [(null? rest) (reverse acc)]
+        [(typed-param? (car rest))
+         (loop (cdr rest)
+               (cons (list (caar rest) (caddar rest)) acc))]
+        [else (loop (cdr rest) acc)])))
+
   (define-syntax def
     (lambda (stx)
       (syntax-case stx ()
+        ;; Typed def with return type: (def (name (x : fixnum) y) : ret-type body ...)
+        [(_ (name . params) colon ret-type body ...)
+         (and (identifier? #'name)
+              (eq? (syntax->datum #'colon) ':)
+              (let ([pl (syntax->datum #'params)])
+                (and (list? pl) (has-typed-params? pl))))
+         (let* ([params-list (syntax->datum #'params)]
+                [arg-names (extract-arg-names params-list)]
+                [typed (extract-typed-params params-list)]
+                ;; Build individual check-type! calls
+                [checks (map (lambda (ta)
+                               (let ([aname (car ta)] [atype (cadr ta)])
+                                 `(check-type! ',#'name ',aname ,aname ',atype)))
+                             typed)])
+           (with-syntax ([(arg ...) (datum->syntax #'name arg-names)]
+                         [(chk ...) (datum->syntax #'name checks)])
+             #'(define (name arg ...)
+                 chk ...
+                 (let ([result (begin body ...)])
+                   (check-return-type! 'name result 'ret-type)
+                   result))))]
+
+        ;; Typed def without return type: (def (name (x : fixnum) y) body ...)
+        [(_ (name . params) body ...)
+         (and (identifier? #'name)
+              (let ([pl (syntax->datum #'params)])
+                (and (list? pl) (has-typed-params? pl))))
+         (let* ([params-list (syntax->datum #'params)]
+                [arg-names (extract-arg-names params-list)]
+                [typed (extract-typed-params params-list)]
+                [checks (map (lambda (ta)
+                               (let ([aname (car ta)] [atype (cadr ta)])
+                                 `(check-type! ',#'name ',aname ,aname ',atype)))
+                             typed)])
+           (with-syntax ([(arg ...) (datum->syntax #'name arg-names)]
+                         [(chk ...) (datum->syntax #'name checks)])
+             #'(define (name arg ...)
+                 chk ...
+                 body ...)))]
+
+        ;; Original: plain function def
         [(_ (name . params) body ...)
          (identifier? #'name)
          (let ([params-list (syntax->datum #'params)])
