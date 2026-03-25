@@ -13,3 +13,5 @@ mod x509;
 mod antidebug;
 mod seccomp;
 mod integrity;
+mod x25519;
+mod process_ctl;

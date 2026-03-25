@@ -23,7 +23,9 @@
     ;; Limits
     *ws-max-payload-size*)
 
-  (import (chezscheme))
+  (import (chezscheme)
+          (std crypto native-rust)
+          (std text base64))
 
   ;;; ========== Opcode constants ==========
   (define ws-opcode-continuation #x0)
@@ -224,20 +226,16 @@
   (define ws-rfc-test-key    "dGhlIHNhbXBsZSBub25jZQ==")
   (define ws-rfc-test-accept "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
 
-  ;; Compute the Sec-WebSocket-Accept from a key.
-  ;; This is a simplified/stub implementation that handles the RFC test vector
-  ;; exactly; for other keys it returns a placeholder.
+  ;; Compute the Sec-WebSocket-Accept from a client key.
+  ;; Per RFC 6455: SHA1(key + GUID) then base64-encode.
   (define (ws-handshake-accept key)
-    (if (string=? key ws-rfc-test-key)
-      ws-rfc-test-accept
-      ;; For real implementations, compute SHA1(key + ws-guid) then base64-encode.
-      ;; Here we return a placeholder for non-test keys.
-      (string-append "ACCEPT:" key)))
+    (let* ([combined (string->utf8 (string-append key ws-guid))]
+           [hash-bv (rust-sha1 combined)])
+      (u8vector->base64-string hash-bv)))
 
-  ;; Generate a random-ish 16-byte WebSocket key (base64 of 16 bytes).
-  ;; For testing, returns a fixed key.
+  ;; Generate a random 16-byte WebSocket key (base64-encoded).
   (define (ws-handshake-key)
-    ws-rfc-test-key)
+    (u8vector->base64-string (rust-random-bytes 16)))
 
   ;; Validate that the server's accept matches the expected value.
   (define (ws-handshake-valid? key accept)
