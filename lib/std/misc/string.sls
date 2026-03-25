@@ -14,8 +14,11 @@
   (export string-split string-join string-trim
           string-prefix? string-suffix?
           string-contains string-index
-          string-empty? string-trim-eol)
-  (import (chezscheme))
+          string-empty? string-trim-eol
+          ;; Regex convenience
+          string-match? string-find string-find-all)
+  (import (chezscheme)
+          (std pregexp))
 
   (define string-split
     (case-lambda
@@ -122,5 +125,36 @@
           (try-suffix "\n")
           (try-suffix "\r")
           str)))
+
+  ;; --- Regex convenience wrappers ---
+
+  ;; string-match?: does the string match the pattern?
+  ;; (string-match? "^[0-9]+$" "12345") => #t
+  (define (string-match? pattern str)
+    (and (pregexp-match pattern str) #t))
+
+  ;; string-find: return first match or #f
+  ;; (string-find "[0-9]+" "abc 123 def") => "123"
+  ;; With groups: returns list of match + groups
+  (define (string-find pattern str)
+    (let ([m (pregexp-match pattern str)])
+      (and m
+           (if (null? (cdr m))
+             (car m)        ;; no groups: return match string
+             m))))          ;; groups: return full match list
+
+  ;; string-find-all: return all non-overlapping matches
+  ;; (string-find-all "[0-9]+" "a1b22c333") => ("1" "22" "333")
+  (define (string-find-all pattern str)
+    (let ([rx (pregexp pattern)])
+      (let loop ([s str] [acc '()])
+        (let ([m (pregexp-match-positions rx s)])
+          (if (not m)
+            (reverse acc)
+            (let* ([start (caar m)]
+                   [end (cdar m)]
+                   [matched (substring s start end)]
+                   [rest (substring s (max end (+ start 1)) (string-length s))])
+              (loop rest (cons matched acc))))))))
 
   ) ;; end library

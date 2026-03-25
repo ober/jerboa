@@ -17,6 +17,24 @@
     when-let if-let
     ;; Clojure-style threading
     -> ->> as-> some-> some->> cond-> cond->>
+    ;; Result-aware threading
+    ->? ->>?
+    ;; Resource management
+    with-resource
+    ;; String builder
+    str
+    ;; Alist constructor
+    alist
+    ;; Guarded definitions
+    defn
+    ;; Record shorthand
+    defrecord
+    ;; Alist destructuring
+    let-alist
+    ;; Enum definitions
+    define-enum
+    ;; Output capture
+    capture
     ;; Iteration
     dotimes
     ;; Multiple value binding (re-export from Chez)
@@ -25,7 +43,8 @@
             make-hash-table hash-table? iota 1+ 1- getenv
             path-extension path-absolute?
             thread? make-mutex mutex? mutex-name)
-          (jerboa core))
+          (jerboa core)
+          (std result))
 
   ;; chain: thread a value through a series of expressions
   ;; (chain val (f _ arg) (g arg _)) → (g arg (f val arg))
@@ -298,5 +317,221 @@
       [(_ val test form rest ...)
        (let ([v val])
          (cond->> (if test (->> v form) v) rest ...))]))
+
+  ;; --- Result-aware threading macros ---
+
+  ;; ->? : thread through ok values as first arg, short-circuit on err
+  ;; (->? (ok 5) (+ 1) (* 2)) => (ok 12)
+  ;; (->? (err "bad") (+ 1)) => (err "bad")
+  (define-syntax ->?
+    (syntax-rules ()
+      [(_ val) val]
+      [(_ val (f args ...) rest ...)
+       (let ([v val])
+         (if (err? v)
+           v
+           (->? (ok (f (unwrap v) args ...)) rest ...)))]
+      [(_ val f rest ...)
+       (->? val (f) rest ...)]))
+
+  ;; ->>? : thread through ok values as last arg, short-circuit on err
+  (define-syntax ->>?
+    (syntax-rules ()
+      [(_ val) val]
+      [(_ val (f args ...) rest ...)
+       (let ([v val])
+         (if (err? v)
+           v
+           (->>? (ok (f args ... (unwrap v))) rest ...)))]
+      [(_ val f rest ...)
+       (->>? val (f) rest ...)]))
+
+  ;; --- Resource management ---
+
+  ;; with-resource: automatic open/close lifecycle
+  ;; (with-resource (p (open-input-file "foo.txt") close-input-port) (read p))
+  (define-syntax with-resource
+    (syntax-rules ()
+      [(_ (var init cleanup) body body* ...)
+       (let ([var init])
+         (dynamic-wind
+           (lambda () (void))
+           (lambda () body body* ...)
+           (lambda () (cleanup var))))]))
+
+  ;; --- String builder ---
+
+  ;; str: concatenate args, auto-coercing to strings
+  ;; (str "hello " 42 " world") => "hello 42 world"
+  ;; (str) => ""
+  (define-syntax str
+    (syntax-rules ()
+      [(_) ""]
+      [(_ arg args ...)
+       (string-append (->string arg) (->string args) ...)]))
+
+  (define (->string x)
+    (cond
+      [(string? x) x]
+      [(number? x) (number->string x)]
+      [(symbol? x) (symbol->string x)]
+      [(char? x) (string x)]
+      [(boolean? x) (if x "#t" "#f")]
+      [else (format "~a" x)]))
+
+  ;; --- Alist constructor ---
+
+  ;; alist: shorthand for building association lists
+  ;; (alist (name "Alice") (age 30)) => ((name . "Alice") (age . 30))
+  (define-syntax alist
+    (syntax-rules ()
+      [(_ (key val) ...)
+       (list (cons 'key val) ...)]))
+
+  ;; --- Guarded definitions ---
+
+  ;; defn: define with inline type guards
+  ;; (defn (add [x number?] [y number?]) (+ x y))
+  ;; Expands to: (define (add x y) (unless (number? x) (error ...)) (unless (number? y) (error ...)) (+ x y))
+  (define-syntax defn
+    (syntax-rules ()
+      [(_ (name [var pred] ...) body body* ...)
+       (define (name var ...)
+         (unless (pred var)
+           (error 'name (format "~a failed guard ~a, got ~s" 'var 'pred var))) ...
+         body body* ...)]))
+
+  ;; --- Record shorthand ---
+
+  ;; defrecord: define a record type with auto-generated accessors and printer
+  ;; (defrecord point (x y))
+  ;; Generates:
+  ;;   - make-point constructor
+  ;;   - point? predicate
+  ;;   - point-x, point-y accessors
+  ;;   - (point->alist p) => ((x . val) (y . val))
+  ;;   - record-writer for readable printing
+  ;; defrecord delegates to defrecord-base (syntax-rules for clean record def)
+  ;; then defrecord-extras (syntax-case for generated names)
+  (define-syntax defrecord
+    (syntax-rules ()
+      [(_ name (field ...))
+       (begin
+         (define-record-type name
+           (fields field ...))
+         (defrecord-extras name (field ...)))]))
+
+  (define-syntax defrecord-extras
+    (lambda (stx)
+      (define (make-id ctx fmt . args)
+        (datum->syntax ctx
+          (string->symbol (apply format fmt args))))
+      (syntax-case stx ()
+        [(_ name (field ...))
+         (let* ([name-str (symbol->string (syntax->datum #'name))]
+                [fields (syntax->list #'(field ...))])
+           (with-syntax
+             ([alist-name (make-id #'name "~a->alist" name-str)]
+              [(accessor ...)
+               (map (lambda (f)
+                      (make-id #'name "~a-~a" name-str
+                               (symbol->string (syntax->datum f))))
+                    fields)]
+              [name-string (datum->syntax #'name name-str)])
+             #'(begin
+                 (define (alist-name r)
+                   (list (cons 'field (accessor r)) ...))
+                 (record-writer (record-type-descriptor name)
+                   (lambda (r port writer)
+                     (display "#<" port)
+                     (display name-string port)
+                     (begin
+                       (display " " port)
+                       (display 'field port)
+                       (display "=" port)
+                       (writer (accessor r) port)) ...
+                     (display ">" port)))
+                 )))])))  ;; close: begin, with-syntax, let*, branch, syntax-case, lambda, define-syntax
+
+  ;; --- Alist destructuring ---
+
+  ;; let-alist: destructure an alist into bindings
+  ;; (let-alist expr ([name n] [age a]) body ...)
+  ;;   binds n to (cdr (assq 'name expr)), a to (cdr (assq 'age expr))
+  ;; (let-alist expr (name age) body ...)
+  ;;   binds name and age directly from alist keys
+  (define-syntax let-alist
+    (syntax-rules ()
+      ;; Named bindings: [key var]
+      [(_ alist-expr ([key var] ...) body body* ...)
+       (let ([al alist-expr])
+         (let ([var (cdr (assq 'key al))] ...)
+           body body* ...))]
+      ;; Short form: use field names as variable names
+      [(_ alist-expr (key ...) body body* ...)
+       (let ([al alist-expr])
+         (let ([key (cdr (assq 'key al))] ...)
+           body body* ...))]))
+
+  ;; --- Enum definitions ---
+
+  ;; define-enum: define a set of named integer constants with lookups
+  ;; (define-enum color (red green blue))
+  ;; Generates:
+  ;;   - color-red => 0, color-green => 1, color-blue => 2
+  ;;   - color? predicate (checks if value is valid)
+  ;;   - color->name: value => symbol
+  ;;   - name->color: symbol => value
+  (define-syntax define-enum
+    (lambda (stx)
+      (syntax-case stx ()
+        [(_ name (val ...))
+         (let* ([name-str (symbol->string (syntax->datum #'name))]
+                [vals (map syntax->datum (syntax->list #'(val ...)))]
+                [n (length vals)]
+                [mk-id (lambda (fmt)
+                          (datum->syntax #'name
+                            (string->symbol (format fmt name-str))))]
+                [const-ids (map (lambda (v)
+                                  (datum->syntax #'name
+                                    (string->symbol
+                                      (format "~a-~a" name-str (symbol->string v)))))
+                                vals)]
+                [indices (let loop ([i 0] [acc '()])
+                           (if (= i n) (reverse acc)
+                             (loop (+ i 1) (cons i acc))))])
+           (with-syntax ([pred (mk-id "~a?")]
+                         [to-name (mk-id "~a->name")]
+                         [from-name (mk-id "name->~a")]
+                         [(const-id ...) const-ids]
+                         [(idx ...) (map (lambda (i) (datum->syntax #'name i)) indices)]
+                         [(val-sym ...) (map (lambda (v) (datum->syntax #'name `(quote ,v))) vals)]
+                         [max-val (datum->syntax #'name (- n 1))])
+             #'(begin
+                 (define const-id idx) ...
+                 (define (pred v) (and (integer? v) (>= v 0) (<= v max-val)))
+                 (define to-name
+                   (let ([names (vector val-sym ...)])
+                     (lambda (v)
+                       (if (pred v) (vector-ref names v)
+                         (error 'to-name "invalid enum value" v)))))
+                 (define from-name
+                   (let ([pairs (list (cons val-sym idx) ...)])
+                     (lambda (sym)
+                       (cond
+                         [(assq sym pairs) => cdr]
+                         [else (error 'from-name "unknown enum name" sym)])))))))])))
+
+  ;; --- Output capture ---
+
+  ;; capture: capture stdout output as a string
+  ;; (capture (display "hello") (display " world")) => "hello world"
+  (define-syntax capture
+    (syntax-rules ()
+      [(_ body body* ...)
+       (let ([p (open-output-string)])
+         (parameterize ([current-output-port p])
+           body body* ...)
+         (get-output-string p))]))
 
   ) ;; end library

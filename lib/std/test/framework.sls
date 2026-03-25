@@ -11,6 +11,8 @@
     arbitrary-integer arbitrary-string arbitrary-list arbitrary-boolean
     ;; Test assertions
     test-case test-equal test-not-equal test-true test-false test-error
+    ;; Quick-check assertions (minimal boilerplate)
+    check= check-true check-false check-pred check-error
     ;; State/config
     *test-suites* with-test-output)
 
@@ -268,5 +270,60 @@
            (if (eq? result #t)
                (record-pass! name)
                (record-fail! name (format "falsified with values: ~s" result)))))]))
+
+  ;; --- Quick-check assertions (auto-named from expression) ---
+  ;; These eliminate the need for explicit test names.
+  ;; (check= (+ 1 2) 3)  instead of  (test-equal "add" (+ 1 2) 3)
+
+  (define-syntax check=
+    (syntax-rules ()
+      [(_ actual expected)
+       (guard (exn [#t (record-error! (format "~s" 'actual) exn)])
+         (let ([got actual] [exp expected])
+           (if (equal? got exp)
+               (record-pass! (format "~s" 'actual))
+               (record-fail! (format "~s" 'actual)
+                             (format "got ~s, expected ~s" got exp)))))]))
+
+  (define-syntax check-true
+    (syntax-rules ()
+      [(_ expr)
+       (guard (exn [#t (record-error! (format "~s" 'expr) exn)])
+         (let ([v expr])
+           (if v
+               (record-pass! (format "~s" 'expr))
+               (record-fail! (format "~s" 'expr)
+                             (format "expected truthy, got ~s" v)))))]))
+
+  (define-syntax check-false
+    (syntax-rules ()
+      [(_ expr)
+       (guard (exn [#t (record-error! (format "~s" 'expr) exn)])
+         (let ([v expr])
+           (if (not v)
+               (record-pass! (format "~s" 'expr))
+               (record-fail! (format "~s" 'expr)
+                             (format "expected #f, got ~s" v)))))]))
+
+  (define-syntax check-pred
+    (syntax-rules ()
+      [(_ pred expr)
+       (guard (exn [#t (record-error! (format "~s" 'expr) exn)])
+         (let ([v expr])
+           (if (pred v)
+               (record-pass! (format "~s" 'expr))
+               (record-fail! (format "~s" 'expr)
+                             (format "~s did not satisfy ~s" v 'pred)))))]))
+
+  (define-syntax check-error
+    (syntax-rules ()
+      [(_ expr)
+       (let ([raised? #f])
+         (guard (exn [#t (set! raised? #t)])
+           expr)
+         (if raised?
+             (record-pass! (format "~s" 'expr))
+             (record-fail! (format "~s" 'expr)
+                           "expected an error, none raised")))]))
 
   ) ;; end library
