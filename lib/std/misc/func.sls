@@ -6,7 +6,11 @@
 (library (std misc func)
   (export compose compose1 identity constantly flip
           curry curryn negate conjoin disjoin
-          memo-proc juxt)
+          memo-proc juxt
+          ;; Clojure-compatible aliases
+          partial complement
+          ;; Additional combinators
+          comp fnil every-pred some-fn)
 
   (import (chezscheme))
 
@@ -88,5 +92,48 @@
   (define (juxt . procs)
     (lambda args
       (map (lambda (f) (apply f args)) procs)))
+
+  ;; --- Clojure-compatible aliases and additions ---
+
+  ;; partial: Clojure name for curry (partial application)
+  (define partial curry)
+
+  ;; complement: Clojure name for negate
+  (define complement negate)
+
+  ;; comp: Clojure name for compose (also right-to-left)
+  (define comp compose)
+
+  ;; fnil: wrap f to replace #f args with defaults
+  ;; (define safe-+ (fnil + 0 0))
+  ;; (safe-+ #f 5) => 5
+  (define (fnil f . defaults)
+    (lambda args
+      (apply f
+        (let loop ([as args] [ds defaults])
+          (cond
+            [(null? as) '()]
+            [(null? ds) as]
+            [else
+             (cons (or (car as) (car ds))
+                   (loop (cdr as) (cdr ds)))])))))
+
+  ;; every-pred: return a predicate that is true when ALL preds are true
+  ;; ((every-pred number? positive?) 5) => #t
+  (define (every-pred . preds)
+    (lambda args
+      (let loop ([ps preds])
+        (or (null? ps)
+            (and (apply (car ps) args)
+                 (loop (cdr ps)))))))
+
+  ;; some-fn: return a function that returns first truthy pred result
+  ;; ((some-fn :name :id) {:id 1}) => value from first matching pred
+  (define (some-fn . fns)
+    (lambda args
+      (let loop ([fs fns])
+        (and (pair? fs)
+             (or (apply (car fs) args)
+                 (loop (cdr fs)))))))
 
 ) ;; end library

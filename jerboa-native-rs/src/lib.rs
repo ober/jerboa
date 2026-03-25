@@ -15,3 +15,4 @@ mod seccomp;
 mod integrity;
 mod x25519;
 mod process_ctl;
+mod duckdb_native;

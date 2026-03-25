@@ -15,6 +15,8 @@
     awhen aif
     ;; Binding macros
     when-let if-let
+    ;; Clojure-style threading
+    -> ->> as-> some-> some->> cond-> cond->>
     ;; Iteration
     dotimes
     ;; Multiple value binding (re-export from Chez)
@@ -231,5 +233,70 @@
 
   ;; define-values — re-exported from Chez (already built-in)
   ;; (define-values (a b c) (values 1 2 3))
+
+  ;; --- Clojure-style threading macros ---
+
+  ;; -> : thread as first argument
+  ;; (-> x (f a b) (g c)) => (g (f x a b) c)
+  (define-syntax ->
+    (syntax-rules ()
+      [(_ val) val]
+      [(_ val (f args ...) rest ...)
+       (-> (f val args ...) rest ...)]
+      [(_ val f rest ...)
+       (-> (f val) rest ...)]))
+
+  ;; ->> : thread as last argument
+  ;; (->> x (f a b) (g c)) => (g c (f a b x))
+  (define-syntax ->>
+    (syntax-rules ()
+      [(_ val) val]
+      [(_ val (f args ...) rest ...)
+       (->> (f args ... val) rest ...)]
+      [(_ val f rest ...)
+       (->> (f val) rest ...)]))
+
+  ;; as-> : thread with named binding (like chain but with explicit name)
+  ;; (as-> 1 x (+ x 10) (* x 2)) => 22
+  (define-syntax as->
+    (syntax-rules ()
+      [(_ val name) val]
+      [(_ val name form rest ...)
+       (as-> (let ([name val]) form) name rest ...)]))
+
+  ;; some-> : thread as first arg, short-circuit on #f
+  ;; (some-> x (f a) (g b)) => #f if x or (f x a) is #f
+  (define-syntax some->
+    (syntax-rules ()
+      [(_ val) val]
+      [(_ val form rest ...)
+       (let ([v val])
+         (if v (some-> (-> v form) rest ...) #f))]))
+
+  ;; some->> : thread as last arg, short-circuit on #f
+  (define-syntax some->>
+    (syntax-rules ()
+      [(_ val) val]
+      [(_ val form rest ...)
+       (let ([v val])
+         (if v (some->> (->> v form) rest ...) #f))]))
+
+  ;; cond-> : conditionally thread as first argument
+  ;; (cond-> val test1 (f a) test2 (g b))
+  ;; => threads through (f ... a) only if test1 is true, etc.
+  (define-syntax cond->
+    (syntax-rules ()
+      [(_ val) val]
+      [(_ val test form rest ...)
+       (let ([v val])
+         (cond-> (if test (-> v form) v) rest ...))]))
+
+  ;; cond->> : conditionally thread as last argument
+  (define-syntax cond->>
+    (syntax-rules ()
+      [(_ val) val]
+      [(_ val test form rest ...)
+       (let ([v val])
+         (cond->> (if test (->> v form) v) rest ...))]))
 
   ) ;; end library
