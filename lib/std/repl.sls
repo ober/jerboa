@@ -92,7 +92,7 @@
     repl-history-ref)
 
   (import (except (chezscheme) cpu-time box?)
-          (std misc list))
+          (except (std misc list) partition))
 
   ;;; ========== REPL Configuration ==========
   (define-record-type repl-config
@@ -1505,12 +1505,11 @@
       (install-history-bindings! env)
 
       ;; Make repl-history-ref available in env
-      (eval '(define repl-history-ref #f) env)
-      (eval `(set! repl-history-ref ,repl-history-ref) env)
+      (define-top-level-value 'repl-history-ref repl-history-ref env)
 
       ;; Welcome banner
       (display (c-bold cfg "Jerboa REPL"))
-      (display (c-dim cfg (format " v1.0 [Chez Scheme ~a]" (scheme-version))))
+      (display (c-dim cfg (format " v1.0 [~a]" (scheme-version))))
       (newline)
       (display (c-dim cfg "  Type ,help for commands, ,quit to exit\n"))
       (display (c-dim cfg "  Results stored as $1, $2, ... and *, **, ***\n"))

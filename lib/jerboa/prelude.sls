@@ -49,6 +49,13 @@
 
     ;; ---- std/sugar ----
     chain chain-and assert!
+    unwind-protect with-id with-lock with-catch
+    cut cute <> <...>
+    awhen aif when-let if-let
+    -> ->> as-> some-> some->> cond-> cond->>
+    ->? ->>?
+    with-resource str alist defn defrecord
+    let-alist define-enum capture dotimes define-values
 
     ;; ---- std/text/json ----
     read-json write-json json-object->string string->json-object
@@ -71,12 +78,35 @@
     filter-map
     group-by
     zip
+    ;; Gerbil v0.19 compat
+    append-map append1 flatten1
+    push! pop!
+    for-each!
+    take-while take-until drop-while drop-until
+    butlast slice split
+    length=? length<? length<=? length>? length>=?
+    length=n? length<n? length<=n? length>n? length>=n?
+    group-consecutive group-n-consecutive group-same
+    rassoc every-consecutive?
+    map/car first-and-only when/list
+    with-list-builder call-with-list-builder
+    duplicates delete-duplicates/hash
 
     ;; ---- std/misc/alist ----
     agetq agetv aget
     asetq! asetv! aset!
     pgetq pgetv pget
     alist->hash-table
+    ;; Gerbil v0.19 compat
+    alist? acons
+    asetq asetv aset
+    aremq aremv arem
+    aremq! aremv! arem!
+    psetq psetv pset
+    psetq! psetv! pset!
+    premq premv prem
+    premq! premv! prem!
+    plist->alist* alist->plist*
 
     ;; ---- std/misc/ports ----
     read-all-as-string read-all-as-lines
@@ -95,7 +125,8 @@
             printf fprintf
             path-extension path-absolute?
             with-input-from-string with-output-to-string
-            iota 1+ 1-)
+            iota 1+ 1-
+            partition)
     (only (jerboa core)
       def def* defrule defrules
       defstruct defclass defmethod
@@ -112,9 +143,15 @@
     (std format)
     (except (std error) error-message error-irritants error-trace error?
                        with-exception-handler)
-    (except (std sugar) try catch finally while until
-                       hash-literal hash-eq-literal let-hash
-                       defrule defrules)
+    (only (std sugar)
+      assert! chain chain-and
+      unwind-protect with-id with-lock with-catch
+      cut cute <> <...>
+      awhen aif when-let if-let
+      -> ->> as-> some-> some->> cond-> cond->>
+      ->? ->>?
+      with-resource str alist defn defrecord
+      let-alist define-enum capture dotimes define-values)
     (std text json)
     (std os path)
     (std misc string)
