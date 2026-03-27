@@ -1,5 +1,6 @@
 mod panic;
 mod crypto;
+mod embed_crypto;
 mod compress;
 mod regex_native;
 mod secure_mem;
@@ -15,4 +16,5 @@ mod seccomp;
 mod integrity;
 mod x25519;
 mod process_ctl;
+#[cfg(feature = "duckdb")]
 mod duckdb_native;
