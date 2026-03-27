@@ -1,10 +1,12 @@
 #!chezscheme
 ;;; jerboa/prelude -- One-import-to-rule-them-all
 ;;;
-;;; (import (jerboa prelude)) gives you all of Gerbil's user-facing API:
+;;; (import (jerboa prelude)) gives you the full Jerboa API:
 ;;; - Core macros: def, defstruct, defmethod, match, try/catch, etc.
 ;;; - Runtime: hash tables, method dispatch, keywords
 ;;; - Standard library: sort, format, JSON, paths, strings, lists, etc.
+;;; - Advanced: result types, datetime, iterators, CSV, pretty-printer
+;;; - Ergonomic typing: using, :, maybe
 ;;; - FFI: c-lambda, define-c-lambda
 
 (library (jerboa prelude)
@@ -70,6 +72,7 @@
     string-prefix? string-suffix?
     string-contains string-index
     string-empty?
+    string-match? string-find string-find-all
 
     ;; ---- std/misc/list ----
     flatten unique snoc
@@ -78,6 +81,17 @@
     filter-map
     group-by
     zip
+    frequencies
+    partition partition-all partition-by
+    interleave interpose
+    mapcat
+    distinct
+    keep
+    some
+    iterate-n
+    reductions
+    take-last drop-last
+    split-at split-with
     ;; Gerbil v0.19 compat
     append-map append1 flatten1
     push! pop!
@@ -114,12 +128,74 @@
     write-file-string
     with-input-from-string with-output-to-string
 
+    ;; ---- std/misc/func ----
+    compose compose1 identity constantly flip
+    curry curryn negate conjoin disjoin
+    memo-proc juxt
+    partial complement comp
+    fnil every-pred some-fn
+
+    ;; ---- std/iter ----
+    for for/collect for/fold for/or for/and
+    in-list in-vector in-range in-string
+    in-hash-keys in-hash-values in-hash-pairs
+    in-naturals in-indexed
+    in-port in-lines in-chars in-bytes in-producer
+
+    ;; ---- std/result ----
+    ok err
+    ok? err? result?
+    unwrap unwrap-err unwrap-or unwrap-or-else
+    map-ok map-err
+    and-then or-else
+    flatten-result
+    result->values
+    try-result try-result*
+    result->option
+    results-partition
+    map-results
+    filter-ok filter-err
+    sequence-results
+    ok->list err->list
+
+    ;; ---- std/datetime ----
+    make-datetime datetime?
+    make-date make-time
+    datetime-now datetime-utc-now
+    datetime-year datetime-month datetime-day
+    datetime-hour datetime-minute datetime-second
+    datetime-nanosecond datetime-offset
+    parse-datetime parse-date parse-time
+    datetime->string date->string time->string
+    datetime->iso8601
+    datetime->epoch epoch->datetime
+    datetime->julian julian->datetime
+    datetime-add datetime-subtract
+    datetime-diff
+    duration duration? duration-seconds duration-nanoseconds
+    make-duration
+    datetime<? datetime>? datetime=? datetime<=? datetime>=?
+    datetime-min datetime-max datetime-clamp
+    day-of-week day-of-year days-in-month leap-year?
+    datetime->alist
+    datetime-truncate
+    datetime-floor-hour datetime-floor-day datetime-floor-month
+
+    ;; ---- std/debug/pp ----
+    pp pp-to-string pprint
+    ppd ppd-to-string
+
+    ;; ---- std/csv ----
+    read-csv read-csv-file csv-port->rows
+    write-csv write-csv-file rows->csv-string
+    csv->alists alists->csv
+
     ;; ---- FFI ----
     c-lambda define-c-lambda
     begin-ffi c-declare
 
     ;; ---- std/ergo ----
-    using : as maybe list-of?)
+    using : maybe list-of?)
 
   (import
     (except (chezscheme)
@@ -129,7 +205,8 @@
             path-extension path-absolute?
             with-input-from-string with-output-to-string
             iota 1+ 1-
-            partition)
+            partition
+            make-date make-time)
     (only (jerboa core)
       def def* defrule defrules
       defstruct defclass defmethod
@@ -145,22 +222,20 @@
     (std sort)
     (std format)
     (except (std error) error-message error-irritants error-trace error?
-                       with-exception-handler)
-    (only (std sugar)
-      assert! chain chain-and
-      unwind-protect with-id with-lock with-catch
-      cut cute <> <...>
-      awhen aif when-let if-let
-      -> ->> as-> some-> some->> cond-> cond->>
-      ->? ->>?
-      with-resource str alist defn defrecord
-      let-alist define-enum capture dotimes define-values)
+                        with-exception-handler)
+    (except (std sugar) try catch finally)
     (std text json)
     (std os path)
     (std misc string)
     (std misc list)
     (std misc alist)
     (std misc ports)
+    (std misc func)
+    (std iter)
+    (std result)
+    (std datetime)
+    (std debug pp)
+    (std csv)
     (std ergo))
 
   ) ;; end library
