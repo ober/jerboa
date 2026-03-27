@@ -23,4 +23,4 @@ tests/vm/vm_key.pub
 tests/vm/seed/
 tests/vm/*.log
 tests/vm/*.pid
-.claude/worktrees/
+.claude/
