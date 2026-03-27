@@ -24,7 +24,10 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "logg
 rustls-pki-types = "1"
 rustls-pemfile = "2"
 webpki-roots = "0.26"
-duckdb = { version = "1", features = ["bundled"] }
+duckdb = { version = "1", features = ["bundled"], optional = true }
+
+[features]
+default = ["duckdb"]
 
 [profile.release]
 lto = true
