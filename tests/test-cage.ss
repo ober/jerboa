@@ -1,6 +1,24 @@
 (import (jerboa prelude))
 (import (std security cage))
 (import (std security landlock))
+(import (std security capsicum))
+
+;; fork-process and waitpid for subprocess tests
+(guard (e [#t (void)])
+  (load-shared-object "libc.so.7"))
+(guard (e [#t (void)])
+  (load-shared-object "libc.so.6"))
+(define fork-process
+  (guard (e [#t (lambda () (error 'fork "not available"))])
+    (foreign-procedure "fork" () int)))
+(define waitpid
+  (let ([c-waitpid
+          (guard (e [#t (lambda (pid buf flags) -1)])
+            (foreign-procedure "waitpid" (int u8* int) int))])
+    (lambda (pid)
+      (let ([status-buf (make-bytevector 4 0)])
+        (let ([result (c-waitpid pid status-buf 0)])
+          (values result (bytevector-s32-native-ref status-buf 0)))))))
 
 (displayln "=== cage tests ===")
 
@@ -149,6 +167,70 @@
 (unless (landlock-available?)
   (displayln "  [skipped — Landlock not available]"))
 
+;; ---- FreeBSD Capsicum cage test ----
+
+(displayln "--- FreeBSD Capsicum cage ---")
+
+(when (capsicum-available?)
+  ;; Create a temp directory for the cage root
+  (let ((cage-dir "/tmp/jerboa-cage-test-fb"))
+    ;; Setup
+    (when (file-exists? cage-dir)
+      (system (str "rm -rf " cage-dir)))
+    (mkdir cage-dir)
+    (write-file-string (str cage-dir "/hello.txt") "hello from capsicum cage")
+
+    ;; Fork and cage the child
+    (let ((pid (fork-process)))
+      (cond
+        ((= pid 0)
+         ;; === CHILD ===
+         (guard (exn
+                  (#t
+                   (display "CHILD ERROR: ")
+                   (display-condition exn)
+                   (newline)
+                   (exit 1)))
+
+           ;; Apply cage via Capsicum
+           (cage! (make-cage-config
+                    'root: cage-dir
+                    'system-paths: 'auto
+                    'temp-dir: "/tmp"))
+
+           ;; Verify cage is active
+           (assert! (cage-active?))
+           (assert! (string? (cage-root)))
+
+           ;; Verify we're in Capsicum capability mode
+           (assert! (capsicum-in-capability-mode?))
+
+           ;; Cannot open new files from global namespace (cap_enter blocks this)
+           (let ((blocked (not #t)))
+             (guard (exn (#t (set! blocked #t)))
+               (open-input-file "/etc/passwd"))
+             (assert! blocked))
+
+           (displayln "  child capsicum cage: ok")
+           (exit 0)))
+
+        (else
+         ;; === PARENT ===
+         (let-values (((wpid status) (waitpid pid)))
+           (let ((exit-code (bitwise-arithmetic-shift-right
+                              (bitwise-and status #xFF00) 8)))
+             (if (= exit-code 0)
+               (displayln "  capsicum cage! fork test: ok")
+               (begin
+                 (displayln (str "  capsicum cage! fork test: FAILED (exit " exit-code ")"))
+                 (exit 1))))))))
+
+    ;; Cleanup
+    (system (str "rm -rf " cage-dir))))
+
+(unless (capsicum-available?)
+  (displayln "  [skipped — Capsicum not available]"))
+
 ;; ---- Double-cage prevention ----
 
 (displayln "--- double cage prevention ---")
@@ -186,5 +268,39 @@
 
 (unless (landlock-available?)
   (displayln "  [skipped — Landlock not available]"))
+
+;; FreeBSD double-cage prevention
+(when (capsicum-available?)
+  (let ((pid (fork-process)))
+    (cond
+      ((= pid 0)
+       (guard (exn
+                (#t (display "CHILD ERROR: ")
+                    (display-condition exn) (newline)
+                    (exit 1)))
+         (let ((cage-dir "/tmp/jerboa-cage-test2-fb"))
+           (when (file-exists? cage-dir) (system (str "rm -rf " cage-dir)))
+           (mkdir cage-dir)
+           (cage! (make-cage-config 'root: cage-dir 'temp-dir: "/tmp"))
+           ;; Second cage! should raise
+           (let ((got-error (not #t)))
+             (try
+               (cage! (make-cage-config 'root: cage-dir 'temp-dir: "/tmp"))
+               (catch (e) (set! got-error #t)))
+             (assert! got-error)
+             (displayln "  FreeBSD double cage blocked: ok")
+             (exit 0)))))
+      (else
+       (let-values (((wpid status) (waitpid pid)))
+         (let ((exit-code (bitwise-arithmetic-shift-right
+                            (bitwise-and status #xFF00) 8)))
+           (if (= exit-code 0)
+             (displayln "  FreeBSD double cage test: ok")
+             (begin
+               (displayln (str "  FreeBSD double cage test: FAILED (exit " exit-code ")"))
+               (exit 1)))))))))
+
+(unless (capsicum-available?)
+  (displayln "  [skipped — Capsicum not available]"))
 
 (displayln "=== all cage tests passed ===")

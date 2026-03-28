@@ -57,6 +57,7 @@
 
   (import (chezscheme)
           (std security landlock)
+          (std security capsicum)
           (std error conditions))
 
   ;; ========== libc ==========
@@ -85,6 +86,7 @@
         [(string-contains-ci mt "le")  'linux]
         [(string-contains-ci mt "osx") 'macos]
         [(string-contains-ci mt "ob")  'openbsd]
+        [(string-contains-ci mt "fb")  'freebsd]
         [else                          'unknown])))
 
   (define *current-platform* (detect-platform))
@@ -293,13 +295,14 @@
                "cage already active — can only tighten, not replace")))
 
     (case *current-platform*
-      [(linux)  (cage-linux! cfg)]
+      [(linux)   (cage-linux! cfg)]
       [(openbsd) (cage-openbsd! cfg)]
+      [(freebsd) (cage-freebsd! cfg)]
       [else
        (raise (make-cage-error
                 "cage"
                 'platform
-                (format "cage! not yet supported on ~a (Linux and OpenBSD only)"
+                (format "cage! not yet supported on ~a"
                         *current-platform*)))]))
 
   ;; ========== Linux implementation (Landlock) ==========
@@ -374,5 +377,154 @@
              "cage"
              'platform
              "OpenBSD cage! not yet implemented (needs unveil(2) FFI bindings)")))
+
+  ;; ========== FreeBSD implementation (Capsicum) ==========
+  ;;
+  ;; Capsicum's capability mode is fundamentally different from Landlock:
+  ;; - After cap_enter(), NO new open() calls work from the global namespace
+  ;; - Only pre-opened file descriptors (and their descendants) are usable
+  ;; - openat() with a pre-opened directory fd works for relative paths
+  ;;
+  ;; We pre-open all allowed directories as O_DIRECTORY fds with
+  ;; appropriate capability rights, then enter capability mode.
+  ;; The pre-opened fds are stored globally so higher-level code
+  ;; can use openat() to access files within allowed directories.
+
+  ;; FreeBSD-specific system paths
+  (define *freebsd-system-read-only-paths*
+    '("/usr/lib"
+      "/lib"
+      "/libexec"
+      ;; TLS certificates
+      "/etc/ssl"
+      "/usr/share/certs"
+      "/etc/ssl/cert.pem"
+      ;; DNS resolution
+      "/etc/resolv.conf"
+      "/etc/hosts"
+      "/etc/nsswitch.conf"
+      ;; Terminal
+      "/usr/share/terminfo"
+      ;; Devices
+      "/dev/urandom"
+      "/dev/random"
+      "/dev/null"
+      "/dev/zero"
+      "/dev/tty"
+      "/dev/pts"
+      "/dev/fd"
+      ;; Timezone
+      "/etc/localtime"
+      "/usr/share/zoneinfo"
+      ;; Locale
+      "/usr/share/locale"
+      ;; Shared library config
+      "/var/run/ld-elf.so.hints"))
+
+  (define *freebsd-system-execute-paths*
+    '("/usr/bin"
+      "/bin"
+      "/usr/local/bin"
+      "/usr/sbin"
+      "/sbin"
+      "/usr/lib"
+      "/lib"
+      "/libexec"
+      "/usr/local/lib"))
+
+  ;; Track pre-opened directory fds for the cage
+  (define *cage-dir-fds* '())  ;; alist of (path . fd)
+
+  (define c-open-dir
+    (guard (e [#t #f])
+      (foreign-procedure "open" (string int) int)))
+
+  (define (cage-freebsd! cfg)
+    (unless (capsicum-available?)
+      (raise (make-cage-error
+               "cage"
+               'platform
+               "Capsicum not available on this FreeBSD system")))
+
+    (let* ([root (resolve-path 'cage! (cage-config-root cfg))]
+           [extra-ro (resolve-paths 'cage! (cage-config-read-only cfg))]
+           [extra-rw (resolve-paths 'cage! (cage-config-read-write cfg))]
+           [extra-exec (resolve-paths 'cage! (cage-config-execute cfg))]
+           [temp (and (cage-config-temp-dir cfg)
+                      (resolve-path 'cage! (cage-config-temp-dir cfg)))]
+           ;; Build system paths
+           [sys-ro (case (cage-config-system-paths cfg)
+                     [(auto) (existing-paths *freebsd-system-read-only-paths*)]
+                     [(#f)   '()]
+                     [else   (cage-config-system-paths cfg)])]
+           [sys-exec (case (cage-config-system-paths cfg)
+                       [(auto) (existing-paths *freebsd-system-execute-paths*)]
+                       [(#f)   '()]
+                       [else   '()])]
+           ;; Collect all paths to pre-open
+           [rw-paths (append (list root) (if temp (list temp) '()) extra-rw)]
+           [ro-paths (append sys-ro extra-ro)]
+           [exec-paths (append sys-exec extra-exec)])
+
+      ;; Pre-open directories with appropriate Capsicum rights
+      ;; Read-write directories
+      (for-each
+        (lambda (path)
+          (guard (e [#t (void)])  ;; skip paths that fail to open
+            (let ([fd (capsicum-open-path path
+                        '(read write seek fstat ftruncate lookup))])
+              (set! *cage-dir-fds*
+                (cons (cons path fd) *cage-dir-fds*)))))
+        (filter (lambda (p) (guard (e [#t #f]) (file-directory? p)))
+                rw-paths))
+
+      ;; Read-only directories
+      (for-each
+        (lambda (path)
+          (guard (e [#t (void)])
+            (let ([fd (capsicum-open-path path '(read fstat seek lookup))])
+              (set! *cage-dir-fds*
+                (cons (cons path fd) *cage-dir-fds*)))))
+        (filter (lambda (p) (guard (e [#t #f]) (file-directory? p)))
+                ro-paths))
+
+      ;; Execute directories (need read + lookup for path resolution)
+      (for-each
+        (lambda (path)
+          (guard (e [#t (void)])
+            (let ([fd (capsicum-open-path path '(read fstat lookup))])
+              (set! *cage-dir-fds*
+                (cons (cons path fd) *cage-dir-fds*)))))
+        (filter (lambda (p) (guard (e [#t #f]) (file-directory? p)))
+                exec-paths))
+
+      ;; Restrict stdio fds
+      (guard (e [#t (void)])
+        (capsicum-limit-fd! 0 '(read fstat event)))
+      (guard (e [#t (void)])
+        (capsicum-limit-fd! 1 '(write fstat event)))
+      (guard (e [#t (void)])
+        (capsicum-limit-fd! 2 '(write fstat event)))
+
+      ;; Enter capability mode — IRREVERSIBLE
+      (guard (exn
+               [#t (raise (make-cage-error
+                            "cage"
+                            'platform
+                            (if (message-condition? exn)
+                              (condition-message exn)
+                              "cap_enter() failed")))])
+        (capsicum-enter!))
+
+      ;; Record state
+      (set! *cage-active* #t)
+      (set! *cage-root-path* root)
+      (set! *cage-all-paths*
+        (append
+          (map (lambda (p) (cons 'read-write p)) rw-paths)
+          (map (lambda (p) (cons 'read-only p)) ro-paths)
+          (map (lambda (p) (cons 'execute p)) exec-paths)))
+
+      (void)))
 
 ) ;; end library
