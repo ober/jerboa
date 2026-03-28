@@ -3,14 +3,49 @@ use ring::{digest, signature};
 #[allow(deprecated)]
 use ring::constant_time;
 
-/// Portable path to the current executable.
-fn self_exe_path() -> &'static str {
+/// Read the current executable's binary contents.
+/// On Linux, reads /proc/self/exe directly.
+/// On FreeBSD, uses sysctl KERN_PROC_PATHNAME to resolve the path first
+/// (procfs may not be mounted).
+fn read_self_exe() -> Result<Vec<u8>, String> {
     #[cfg(target_os = "linux")]
-    { "/proc/self/exe" }
+    {
+        std::fs::read("/proc/self/exe")
+            .map_err(|e| format!("cannot read /proc/self/exe: {}", e))
+    }
     #[cfg(target_os = "freebsd")]
-    { "/proc/curproc/file" }
+    {
+        use std::os::raw::c_int;
+        extern "C" {
+            fn sysctl(
+                name: *const c_int,
+                namelen: u32,
+                oldp: *mut u8,
+                oldlenp: *mut usize,
+                newp: *const u8,
+                newlen: usize,
+            ) -> c_int;
+        }
+        let mut buf = vec![0u8; 4096];
+        let mut len = buf.len();
+        let mib: [c_int; 4] = [1 /* CTL_KERN */, 14 /* KERN_PROC */, 12 /* KERN_PROC_PATHNAME */, -1];
+        let rc = unsafe {
+            sysctl(mib.as_ptr(), 4, buf.as_mut_ptr(), &mut len, std::ptr::null(), 0)
+        };
+        if rc < 0 {
+            return Err("sysctl KERN_PROC_PATHNAME failed".to_string());
+        }
+        // len includes the NUL terminator
+        let path = std::str::from_utf8(&buf[..len.saturating_sub(1)])
+            .map_err(|e| format!("invalid UTF-8 in exe path: {}", e))?;
+        std::fs::read(path)
+            .map_err(|e| format!("cannot read {}: {}", path, e))
+    }
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-    { "/proc/self/exe" }
+    {
+        std::fs::read("/proc/self/exe")
+            .map_err(|e| format!("cannot read /proc/self/exe: {}", e))
+    }
 }
 
 /// Read /proc/self/exe and compute its SHA-256 hash.
@@ -32,10 +67,10 @@ pub extern "C" fn jerboa_integrity_hash_self(
             return -1;
         }
 
-        let binary = match std::fs::read(self_exe_path()) {
+        let binary = match read_self_exe() {
             Ok(b) => b,
             Err(e) => {
-                set_last_error(format!("cannot read /proc/self/exe: {}", e));
+                set_last_error(e);
                 return -1;
             }
         };
@@ -66,10 +101,10 @@ pub extern "C" fn jerboa_integrity_verify_hash(
             return -1;
         }
 
-        let binary = match std::fs::read(self_exe_path()) {
+        let binary = match read_self_exe() {
             Ok(b) => b,
             Err(e) => {
-                set_last_error(format!("cannot read /proc/self/exe: {}", e));
+                set_last_error(e);
                 return -1;
             }
         };
@@ -115,10 +150,10 @@ pub extern "C" fn jerboa_integrity_sign_verify(
             return -1;
         }
 
-        let mut binary = match std::fs::read(self_exe_path()) {
+        let mut binary = match read_self_exe() {
             Ok(b) => b,
             Err(e) => {
-                set_last_error(format!("cannot read /proc/self/exe: {}", e));
+                set_last_error(e);
                 return -1;
             }
         };
