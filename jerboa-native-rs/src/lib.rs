@@ -12,6 +12,8 @@ mod integrity;
 mod x25519;
 mod process_ctl;
 mod wasm;
+mod embed_crypto;
+mod boot_encrypt;
 
 #[cfg(target_os = "linux")]
 mod epoll;
