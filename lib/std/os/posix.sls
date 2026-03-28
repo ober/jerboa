@@ -52,6 +52,9 @@
 
     ;; User/permissions
     posix-umask posix-getuid posix-geteuid posix-getegid posix-access
+    posix-setuid posix-setgid posix-getgid
+    ;; Directory
+    posix-chdir
     ;; Access mode flags
     F_OK R_OK W_OK X_OK
 
@@ -69,6 +72,7 @@
     ;; Resources
     posix-getrlimit posix-setrlimit
     RLIMIT_NOFILE RLIMIT_NPROC RLIMIT_STACK RLIMIT_CORE RLIMIT_FSIZE
+    RLIMIT_AS RLIMIT_DATA
 
     ;; Time
     posix-strftime
@@ -231,6 +235,8 @@
   (define RLIMIT_STACK   3)
   (define RLIMIT_CORE    4)
   (define RLIMIT_FSIZE   1)
+  (define RLIMIT_DATA    2)
+  (define RLIMIT_AS      9)
 
   ;; ========== Process Operations ==========
 
@@ -477,6 +483,20 @@
 
   (define c-access (foreign-procedure "access" (string int) int))
   (define (posix-access path mode) (= (c-access path mode) 0))
+
+  (define c-setuid (foreign-procedure "setuid" (unsigned) int))
+  (define (posix-setuid uid) (check-posix 'setuid (c-setuid uid)))
+
+  (define c-setgid (foreign-procedure "setgid" (unsigned) int))
+  (define (posix-setgid gid) (check-posix 'setgid (c-setgid gid)))
+
+  (define c-getgid (foreign-procedure "getgid" () unsigned))
+  (define (posix-getgid) (c-getgid))
+
+  ;; ========== Directory ==========
+
+  (define c-chdir (foreign-procedure "chdir" (string) int))
+  (define (posix-chdir path) (check-posix 'chdir (c-chdir path)))
 
   ;; ========== Environment ==========
 
