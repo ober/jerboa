@@ -242,47 +242,56 @@
 
   ;; ========== Link Command Generation ==========
   
-  (define (musl-link-command output-path object-files static-libs)
-    "Generate the musl-gcc link command for a static binary.
-     
-     Uses musl-gcc -static which handles CRT objects and -lc automatically.
-     We only need to specify our object files, libkernel.a, and any extra
-     static libraries.
-     
+  (define (musl-link-command output-path object-files static-libs . opts)
+    "Generate the musl-gcc link command for a hardened static PIE binary.
+
+     Uses musl-gcc -static-pie for ASLR support, with full RELRO and
+     BIND_NOW for GOT protection.  Pass no-harden: #t to get plain -static.
+
      Parameters:
        output-path  - Path for the output executable
        object-files - List of .o files to link
        static-libs  - List of additional .a archives
-     
+
+     Keyword options:
+       no-harden:   - #t to disable PIE/RELRO (plain -static)
+
      Returns: Command string"
-    (let* ([gcc (musl-gcc-path)]
+    (let* ([no-harden? (%musl-kwarg 'no-harden: opts #f)]
+           [gcc (musl-gcc-path)]
            [libkernel (musl-libkernel-path)]
            [libz (musl-libz-path)]
            [liblz4 (musl-liblz4-path)]
-           
+
            ;; Object files as space-separated string
            [objs (apply string-append
                    (map (lambda (o) (format " '~a'" o))
                         object-files))]
-           
+
            ;; Chez runtime archives
            [chez-libs (apply string-append
                        (filter values
                          (list (format " '~a'" libkernel)
                                (and libz (format " '~a'" libz))
                                (and liblz4 (format " '~a'" liblz4)))))]
-           
+
            ;; User static libraries
            [user-libs (apply string-append
                        (map (lambda (a) (format " '~a'" a))
                             static-libs))]
-           
+
            ;; Standard libraries needed by Chez runtime
-           [std-libs "-lm -lrt -lpthread"])
-      
-      ;; musl-gcc -static handles CRT objects and libc linking automatically
-      (format "~a -static~a~a~a ~a -o '~a'"
+           [std-libs "-lm -lrt -lpthread"]
+
+           ;; Hardened: static PIE + full RELRO + BIND_NOW
+           ;; Plain: just -static (for debugging or unsupported platforms)
+           [link-flags (if no-harden?
+                         "-static"
+                         "-static-pie -Wl,-z,relro,-z,now")])
+
+      (format "~a ~a~a~a~a ~a -o '~a'"
               gcc
+              link-flags
               objs             ;; Application + Chez main.o + static_boot.o
               chez-libs        ;; Chez runtime archives
               user-libs        ;; User static libs
@@ -310,6 +319,7 @@
        extra-c-files:  - Additional C files to compile
        extra-cflags:   - Additional C compiler flags
        verbose:        - Print commands as they execute
+       no-harden:      - #t to disable hardening flags (PIE, RELRO, stack protector, etc.)
      
      Returns: output-path on success, raises on error"
     
@@ -325,6 +335,7 @@
            [extra-c (%musl-kwarg 'extra-c-files: opts '())]
            [extra-cflags (%musl-kwarg 'extra-cflags: opts "")]
            [verbose? (%musl-kwarg 'verbose: opts #f)]
+           [no-harden? (%musl-kwarg 'no-harden: opts #f)]
            
            ;; Build directory
            [build-dir (format "/tmp/jerboa-musl-~a" 
@@ -369,9 +380,21 @@
                 (when verbose? (display "[4/5] Compiling C...\n"))
                 (let* ([static-boot-o (format "~a/static_boot.o" build-dir)]
                        [include-flag (format "-I'~a'" scheme-h-dir)]
-                       [compile-cmd 
-                        (format "~a -c -O2 ~a ~a -o '~a' '~a'"
-                                gcc include-flag extra-cflags
+                       [harden-cflags
+                        (if no-harden? ""
+                          (string-append
+                            " -fstack-protector-strong"
+                            " -fstack-clash-protection"
+                            " -D_FORTIFY_SOURCE=2"
+                            " -fPIE"
+                            ;; CET: only on x86_64 Linux where CPU may support it.
+                            ;; Harmless on CPUs without CET (instructions are NOPs).
+                            (if (memq (machine-type) '(a6le ta6le i3le ti3le))
+                              " -fcf-protection=full"
+                              "")))]
+                       [compile-cmd
+                        (format "~a -c -O2~a ~a ~a -o '~a' '~a'"
+                                gcc harden-cflags include-flag extra-cflags
                                 static-boot-o static-boot-c)]
                        [rc (begin
                              (when verbose? (printf "  ~a~n" compile-cmd))
@@ -384,12 +407,13 @@
                   ;; Compile extra C files
                   (let ([extra-objs
                          (map (lambda (c-file)
-                                (let ([o-file (format "~a/~a.o" 
+                                (let ([o-file (format "~a/~a.o"
                                                 build-dir
-                                                (%musl-path-root 
+                                                (%musl-path-root
                                                   (%musl-path-last c-file)))])
-                                  (let ([cmd (format "~a -c -O2 ~a ~a -o '~a' '~a'"
-                                                     gcc include-flag extra-cflags 
+                                  (let ([cmd (format "~a -c -O2~a ~a ~a -o '~a' '~a'"
+                                                     gcc harden-cflags
+                                                     include-flag extra-cflags
                                                      o-file c-file)])
                                     (when verbose? (printf "  ~a~n" cmd))
                                     (unless (= (system cmd) 0)
@@ -401,13 +425,14 @@
                     
                     ;; Step 5: Link
                     (when verbose? (display "[5/5] Linking...\n"))
-                    (let* ([all-objs (cons* chez-main-o 
+                    (let* ([all-objs (cons* chez-main-o
                                             static-boot-o
                                             extra-objs)]
-                           [link-cmd (musl-link-command 
-                                      output-path 
+                           [link-cmd (musl-link-command
+                                      output-path
                                       all-objs
-                                      static-libs)]
+                                      static-libs
+                                      'no-harden: no-harden?)]
                            [rc (begin
                                  (when verbose? (printf "  ~a~n" link-cmd))
                                  (system link-cmd))])

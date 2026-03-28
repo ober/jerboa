@@ -1,0 +1,29 @@
+# Hardening flags for the Rust native library.
+# These apply when building libjerboa_native (cdylib + staticlib).
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = [
+  "-C", "link-arg=-Wl,-z,relro,-z,now",     # Full RELRO + BIND_NOW
+  "-C", "link-arg=-fcf-protection=full",      # Intel CET (SHSTK + IBT)
+]
+
+[target.x86_64-unknown-linux-musl]
+rustflags = [
+  "-C", "link-arg=-Wl,-z,relro,-z,now",
+  "-C", "link-arg=-fcf-protection=full",
+]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = [
+  "-C", "link-arg=-Wl,-z,relro,-z,now",
+]
+
+[target.x86_64-unknown-freebsd]
+rustflags = [
+  "-C", "link-arg=-Wl,-z,relro,-z,now",
+]
+
+[target.aarch64-unknown-freebsd]
+rustflags = [
+  "-C", "link-arg=-Wl,-z,relro,-z,now",
+]
