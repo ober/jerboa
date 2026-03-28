@@ -82,22 +82,29 @@
   (test "define-foreign-struct getter y" (test-struct-y ptr) 200)
   (foreign-free ptr))
 
-;; Test 10: define-ffi-library with single shared object
-(define-ffi-library mylibc
-  (if (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb)) "libc.so.7" "libc.so.6")
-  (define-foreign ffi-getpid "getpid" () -> int))
-(test "define-ffi-library single" (> (ffi-getpid) 0) #t)
+;; Test 10-11: define-ffi-library requires literal strings.
+;; Since the libc name varies by platform, we use eval with quasiquote to inject
+;; the correct string at runtime, but it appears as a literal to the macro.
+(define *libc-name*
+  (case (machine-type)
+    [(a6fb ta6fb i3fb ti3fb arm64fb) "libc.so.7"]
+    [else "libc.so.6"]))
+(define *libm-name*
+  (case (machine-type)
+    [(a6fb ta6fb i3fb ti3fb arm64fb) "libm.so.5"]
+    [else "libm.so.6"]))
 
-;; Test 11: define-ffi-library with multiple shared objects
-(define-ffi-library mylibs
-  (if (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb))
-      '("libc.so.7" "libm.so.6")
-      '("libc.so.6" "libm.so.6"))
-  (define-foreign ffi-ceil "ceil" (double) -> double))
-(test "define-ffi-library multi" (ffi-ceil 3.2) 4.0)
+(let ([env (copy-environment (scheme-environment) #t)])
+  (eval '(import (std foreign)) env)
+  (eval `(define-ffi-library mylibc ,*libc-name*
+           (define-foreign ffi-getpid "getpid" () -> int)) env)
+  (test "define-ffi-library single" (> (eval '(ffi-getpid) env) 0) #t)
+  (eval `(define-ffi-library mylibs (,*libc-name* ,*libm-name*)
+           (define-foreign ffi-ceil2 "ceil" (double) -> double)) env)
+  (test "define-ffi-library multi" (eval '(ffi-ceil2 3.2) env) 4.0))
 
 ;; Test 12: define-foreign auto-name
-(load-shared-object "libm.so.6")
+(load-shared-object *libm-name*)
 (define-foreign floor (double) -> double)
 (test "define-foreign auto-name" (floor 3.7) 3.0)
 
