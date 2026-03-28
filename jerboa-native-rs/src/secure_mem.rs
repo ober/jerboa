@@ -36,10 +36,12 @@ pub extern "C" fn jerboa_secure_alloc(size: usize) -> *mut u8 {
         // Lock into RAM — never swapped to disk
         unsafe { libc::mlock(data as *const _, size); }
 
-        // Exclude from core dumps
+        // Exclude from core dumps (MADV_DONTDUMP is Linux-specific)
+        #[cfg(target_os = "linux")]
         unsafe { libc::madvise(data as *mut _, size, libc::MADV_DONTDUMP); }
 
-        // Don't inherit in child processes
+        // Don't inherit in child processes (MADV_DONTFORK is Linux-specific)
+        #[cfg(target_os = "linux")]
         unsafe { libc::madvise(data as *mut _, size, libc::MADV_DONTFORK); }
 
         data

@@ -3,6 +3,16 @@ use ring::{digest, signature};
 #[allow(deprecated)]
 use ring::constant_time;
 
+/// Portable path to the current executable.
+fn self_exe_path() -> &'static str {
+    #[cfg(target_os = "linux")]
+    { "/proc/self/exe" }
+    #[cfg(target_os = "freebsd")]
+    { "/proc/curproc/file" }
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    { "/proc/self/exe" }
+}
+
 /// Read /proc/self/exe and compute its SHA-256 hash.
 /// output: buffer for the 32-byte hash
 /// output_len: must be >= 32
@@ -22,7 +32,7 @@ pub extern "C" fn jerboa_integrity_hash_self(
             return -1;
         }
 
-        let binary = match std::fs::read("/proc/self/exe") {
+        let binary = match std::fs::read(self_exe_path()) {
             Ok(b) => b,
             Err(e) => {
                 set_last_error(format!("cannot read /proc/self/exe: {}", e));
@@ -56,7 +66,7 @@ pub extern "C" fn jerboa_integrity_verify_hash(
             return -1;
         }
 
-        let binary = match std::fs::read("/proc/self/exe") {
+        let binary = match std::fs::read(self_exe_path()) {
             Ok(b) => b,
             Err(e) => {
                 set_last_error(format!("cannot read /proc/self/exe: {}", e));
@@ -105,7 +115,7 @@ pub extern "C" fn jerboa_integrity_sign_verify(
             return -1;
         }
 
-        let mut binary = match std::fs::read("/proc/self/exe") {
+        let mut binary = match std::fs::read(self_exe_path()) {
             Ok(b) => b,
             Err(e) => {
                 set_last_error(format!("cannot read /proc/self/exe: {}", e));

@@ -17,7 +17,6 @@ postgres = "0.19"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 hkdf = "0.12"
 sha2 = "0.10"
-inotify = { version = "0.11", default-features = false }
 rcgen = { version = "0.13", features = ["ring", "pem"] }
 time = "0.3"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
@@ -26,8 +25,11 @@ rustls-pemfile = "2"
 webpki-roots = "0.26"
 duckdb = { version = "1", features = ["bundled"], optional = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+inotify = { version = "0.11", default-features = false }
+
 [features]
-default = ["duckdb"]
+default = []
 
 [profile.release]
 lto = true
