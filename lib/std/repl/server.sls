@@ -70,7 +70,9 @@
     (let ((v (getenv "JEMACS_STATIC")))
       (if (and v (not (string=? v "")) (not (string=? v "0")))
           #f
-          (load-shared-object "libc.so.6"))))
+          (or (guard (e [#t #f]) (load-shared-object "libc.so.7"))
+              (guard (e [#t #f]) (load-shared-object "libc.so.6"))
+              (load-shared-object "libc.so")))))
 
   (define c-socket    (foreign-procedure "socket" (int int int) int))
   (define c-bind      (foreign-procedure "bind" (int u8* int) int))

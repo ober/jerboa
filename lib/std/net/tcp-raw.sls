@@ -19,8 +19,9 @@
   ;; Without this, compile-library fails because foreign-procedure can't
   ;; resolve "socket" etc. during ahead-of-time compilation.
   (define _libc
-    (guard (exn [#t (void)])
-      (load-shared-object "libc.so.6")))
+    (or (guard (e [#t #f]) (load-shared-object "libc.so.7"))
+        (guard (e [#t #f]) (load-shared-object "libc.so.6"))
+        (guard (e [#t #f]) (load-shared-object "libc.so"))))
 
   (define c-socket    (foreign-procedure "socket" (int int int) int))
   (define c-bind      (foreign-procedure "bind" (int void* int) int))

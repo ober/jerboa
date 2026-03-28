@@ -19,7 +19,9 @@
   (import (chezscheme))
 
   ;; Load libc
-  (define _libc (guard (e [#t #f]) (load-shared-object "libc.so.6")))
+  (define _libc (or (guard (e [#t #f]) (load-shared-object "libc.so.7"))
+                    (guard (e [#t #f]) (load-shared-object "libc.so.6"))
+                    (guard (e [#t #f]) (load-shared-object "libc.so"))))
 
   ;; fcntl FFI — uses the 3-argument form (fd, cmd, arg)
   (define c-fcntl (foreign-procedure "fcntl" (int int int) int))

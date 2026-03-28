@@ -106,11 +106,10 @@
                     (error 'hash-ref "key not found" key)
                     v)))
       ((ht key default)
-       ;; Gerbil compatibility: default is returned as-is, never called.
-       ;; Even if default is a procedure, it is returned, not invoked.
+       ;; If default is a thunk (procedure), invoke it on missing key.
        (let ([v (hashtable-ref ht key *not-found*)])
          (if (eq? v *not-found*)
-           default
+           (if (procedure? default) (default) default)
            v)))))
 
   (define-syntax hash-get

@@ -62,7 +62,10 @@
           (std os flock))
 
   ;; Ensure libc is loaded for FFI (mmap, ftruncate, etc.)
-  (define _libc (load-shared-object "libc.so.6"))
+  (define _libc
+    (or (guard (e [#t #f]) (load-shared-object "libc.so.7"))
+        (guard (e [#t #f]) (load-shared-object "libc.so.6"))
+        (load-shared-object "libc.so")))
 
   ;; =========================================================================
   ;; Constants

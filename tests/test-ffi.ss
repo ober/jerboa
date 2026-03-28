@@ -28,7 +28,10 @@
 
 ;; c-lambda creates a foreign-procedure
 ;; We can test that c-lambda expands and produces a procedure for libc functions
-(load-shared-object "libc.so.6")
+(load-shared-object
+  (case (machine-type)
+    [(a6fb ta6fb i3fb ti3fb arm64fb) "libc.so.7"]
+    [else "libc.so.6"]))
 
 ;; Test c-lambda with a real C function
 (let ([my-getpid (c-lambda () int "getpid")])

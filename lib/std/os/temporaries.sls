@@ -14,7 +14,9 @@
     (let ((v (getenv "JEMACS_STATIC")))
       (if (and v (not (string=? v "")) (not (string=? v "0")))
           #f  ; symbols already in static binary
-          (load-shared-object "libc.so.6"))))
+          (or (guard (e [#t #f]) (load-shared-object "libc.so.7"))
+              (guard (e [#t #f]) (load-shared-object "libc.so.6"))
+              (load-shared-object "libc.so")))))
   (define getpid (foreign-procedure "getpid" () int))
 
   (define *temp-counter* 0)

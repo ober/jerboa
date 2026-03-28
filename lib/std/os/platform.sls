@@ -15,7 +15,8 @@
     platform-cpu-count
     platform-page-size
     platform-load-program
-    platform-tmpfile-path)
+    platform-tmpfile-path
+    platform-load-libc)
 
   (import (chezscheme))
 
@@ -140,5 +141,14 @@
   (define (platform-tmpfile-path prefix suffix)
     (let ([dir (or (getenv "TMPDIR") "/tmp")])
       (format "~a/~a-~a~a" dir prefix (random 999999999) suffix)))
+
+  ;; ========== Portable libc Loading ==========
+
+  (define (platform-load-libc)
+    (or (guard (e [#t #f]) (load-shared-object "libc.so.7"))       ;; FreeBSD
+        (guard (e [#t #f]) (load-shared-object "libc.so.6"))       ;; Linux (glibc)
+        (guard (e [#t #f]) (load-shared-object "libc.dylib"))      ;; macOS
+        (guard (e [#t #f]) (load-shared-object "libc.so"))         ;; generic fallback
+        (error 'platform-load-libc "cannot find libc shared object")))
 
   ) ;; end library

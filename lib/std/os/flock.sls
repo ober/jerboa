@@ -15,7 +15,9 @@
   (import (chezscheme))
 
   ;; Load libc
-  (define _libc (guard (e [#t #f]) (load-shared-object "libc.so.6")))
+  (define _libc (or (guard (e [#t #f]) (load-shared-object "libc.so.7"))
+                    (guard (e [#t #f]) (load-shared-object "libc.so.6"))
+                    (guard (e [#t #f]) (load-shared-object "libc.so"))))
 
   ;; flock(2) FFI
   (define c-flock (foreign-procedure "flock" (int int) int))

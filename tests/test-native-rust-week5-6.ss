@@ -41,7 +41,10 @@
 ;;; ===== Helpers =====
 
 ;; Load libc for pipe/close
-(load-shared-object "libc.so.6")
+(load-shared-object
+  (case (machine-type)
+    [(a6fb ta6fb i3fb ti3fb arm64fb) "libc.so.7"]
+    [else "libc.so.6"]))
 
 (define c-pipe (foreign-procedure "pipe" (u8*) int))
 (define c-close (foreign-procedure "close" (int) int))

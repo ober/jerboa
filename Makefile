@@ -7,7 +7,10 @@ CHEZ_EXT_LIBDIRS = $(CHEZ_EXT_DIR)/chez-https/src:$(CHEZ_EXT_DIR)/chez-ssl/src:$
 # Shared object paths for legacy FFI-based chez-* libraries
 CHEZ_EXT_LDPATH = $(CHEZ_EXT_DIR)/chez-ssl:$(CHEZ_EXT_DIR)/chez-zlib:$(CHEZ_EXT_DIR)/chez-pcre2:$(CHEZ_EXT_DIR)/chez-leveldb:$(CHEZ_EXT_DIR)/chez-epoll:$(CHEZ_EXT_DIR)/chez-inotify:$(CHEZ_EXT_DIR)/chez-crypto:$(CHEZ_EXT_DIR)/chez-sqlite:$(CHEZ_EXT_DIR)/chez-postgresql
 
-.PHONY: test test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded test-features test-wrappers test-phase4a test-phase4b test-phase4c test-phase4d test-phase4e test-phase4f test-phase5 test-phase5e test-phase6 test-phase7 test-phase8 test-functional test-repl test-security test-native test-gaps native clean-native audit-native clean fuzz fuzz-smoke fuzz-deep fuzz-reader-fuzz fuzz-json-fuzz fuzz-http2-fuzz fuzz-websocket-fuzz fuzz-dns-fuzz fuzz-pregexp-fuzz fuzz-csv-fuzz fuzz-base64-fuzz fuzz-hex-fuzz fuzz-uri-fuzz fuzz-format-fuzz fuzz-router-fuzz fuzz-sandbox-fuzz
+.PHONY: build test test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded test-features test-wrappers test-phase4a test-phase4b test-phase4c test-phase4d test-phase4e test-phase4f test-phase5 test-phase5e test-phase6 test-phase7 test-phase8 test-functional test-repl test-security test-native test-gaps native clean-native audit-native clean fuzz fuzz-smoke fuzz-deep fuzz-reader-fuzz fuzz-json-fuzz fuzz-http2-fuzz fuzz-websocket-fuzz fuzz-dns-fuzz fuzz-pregexp-fuzz fuzz-csv-fuzz fuzz-base64-fuzz fuzz-hex-fuzz fuzz-uri-fuzz fuzz-format-fuzz fuzz-router-fuzz fuzz-sandbox-fuzz
+
+build:
+	$(SCHEME) --libdirs $(LIBDIRS) --script support/build.ss
 
 test: test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded
 

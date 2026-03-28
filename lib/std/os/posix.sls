@@ -84,7 +84,9 @@
   ;; ========== libc loading ==========
   ;; In static builds (musl), symbols are already linked.
   ;; In dynamic builds, load libc.
-  (define _libc (guard (e [#t #f]) (load-shared-object "libc.so.6")))
+  (define _libc (or (guard (e [#t #f]) (load-shared-object "libc.so.7"))
+                    (guard (e [#t #f]) (load-shared-object "libc.so.6"))
+                    (guard (e [#t #f]) (load-shared-object "libc.so"))))
   (define _libc2 (guard (e [#t #f]) (load-shared-object "")))
 
   ;; ========== Errno ==========

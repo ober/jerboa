@@ -22,7 +22,10 @@
 (printf "--- (std foreign) tests ---~%")
 
 ;; Load libc for direct foreign-procedure tests
-(load-shared-object "libc.so.6")
+(load-shared-object
+  (case (machine-type)
+    [(a6fb ta6fb i3fb ti3fb arm64fb) "libc.so.7"]
+    [else "libc.so.6"]))
 
 ;; Test 1: define-foreign with libc
 (define-foreign c-getpid "getpid" () -> int)
@@ -80,12 +83,16 @@
   (foreign-free ptr))
 
 ;; Test 10: define-ffi-library with single shared object
-(define-ffi-library mylibc "libc.so.6"
+(define-ffi-library mylibc
+  (if (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb)) "libc.so.7" "libc.so.6")
   (define-foreign ffi-getpid "getpid" () -> int))
 (test "define-ffi-library single" (> (ffi-getpid) 0) #t)
 
 ;; Test 11: define-ffi-library with multiple shared objects
-(define-ffi-library mylibs ("libc.so.6" "libm.so.6")
+(define-ffi-library mylibs
+  (if (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb))
+      '("libc.so.7" "libm.so.6")
+      '("libc.so.6" "libm.so.6"))
   (define-foreign ffi-ceil "ceil" (double) -> double))
 (test "define-ffi-library multi" (ffi-ceil 3.2) 4.0)
 

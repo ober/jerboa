@@ -62,7 +62,8 @@
   ;; ========== libc ==========
 
   (define _libc
-    (or (guard (e [#t #f]) (load-shared-object "libc.so.6"))
+    (or (guard (e [#t #f]) (load-shared-object "libc.so.7"))
+        (guard (e [#t #f]) (load-shared-object "libc.so.6"))
         (guard (e [#t #f]) (load-shared-object "libc.dylib"))
         (guard (e [#t #f]) (load-shared-object "libc.so"))
         (guard (e [#t #f]) (load-shared-object ""))))

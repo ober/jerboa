@@ -21,7 +21,9 @@
 
   (define (ensure-libc!)
     (unless *libc-loaded*
-      (load-shared-object "libc.so.6")
+      (or (guard (e [#t #f]) (load-shared-object "libc.so.7"))
+          (guard (e [#t #f]) (load-shared-object "libc.so.6"))
+          (load-shared-object "libc.so"))
       (set! *libc-loaded* #t)))
 
   (define (get-socket-fn)   (foreign-procedure "socket"     (int int int) int))

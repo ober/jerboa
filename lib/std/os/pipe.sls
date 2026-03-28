@@ -8,7 +8,10 @@
 
   (import (chezscheme))
 
-  (define dummy-load (load-shared-object "libc.so.6"))
+  (define dummy-load
+    (or (guard (e [#t #f]) (load-shared-object "libc.so.7"))
+        (guard (e [#t #f]) (load-shared-object "libc.so.6"))
+        (load-shared-object "libc.so")))
 
   (define c-pipe
     (foreign-procedure "pipe" (u8* ) int))

@@ -10,7 +10,10 @@
         (std os mmap))
 
 ;; Ensure libc is loaded for raw mmap FFI calls
-(load-shared-object "libc.so.6")
+(load-shared-object
+  (case (machine-type)
+    [(a6fb ta6fb i3fb ti3fb arm64fb) "libc.so.7"]
+    [else "libc.so.6"]))
 
 ;;; ---- Benchmark infrastructure ----
 (define *N* 100000)
