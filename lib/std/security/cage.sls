@@ -46,10 +46,16 @@
     cage-config-network
     cage-config-system-paths
     cage-config-temp-dir
+    cage-config-namespaces
+
+    ;; Namespace isolation (Linux)
+    cage-unshare!
+    cage-namespaces-available?
 
     ;; Introspection
     cage-root
     cage-allowed-paths
+    cage-namespaces-active?
 
     ;; Condition
     &cage-error make-cage-error cage-error?
@@ -103,10 +109,76 @@
   (define *cage-active* #f)
   (define *cage-root-path* #f)
   (define *cage-all-paths* '())
+  (define *cage-namespaces-active* #f)
 
   (define (cage-active?) *cage-active*)
   (define (cage-root) *cage-root-path*)
   (define (cage-allowed-paths) *cage-all-paths*)
+  (define (cage-namespaces-active?) *cage-namespaces-active*)
+
+  ;; ========== Linux namespace isolation (unshare) ==========
+  ;;
+  ;; unshare(2) creates new namespaces for the calling process.
+  ;; After unshare, the process is isolated from:
+  ;;   CLONE_NEWPID  — other processes (can't see/signal them)
+  ;;   CLONE_NEWNS   — mount tree (sees only its own mounts)
+  ;;   CLONE_NEWNET  — network stack (only loopback unless configured)
+  ;;
+  ;; CLONE_NEWNET is opt-out because DNS/network servers need it.
+  ;; Requires CAP_SYS_ADMIN or unprivileged user namespaces.
+
+  ;; Linux clone flags for unshare(2)
+  (define CLONE_NEWNS    #x00020000)
+  (define CLONE_NEWPID   #x20000000)
+  (define CLONE_NEWNET   #x40000000)
+  (define CLONE_NEWUSER  #x10000000)
+
+  (define c-unshare
+    (guard (e [#t #f])
+      (foreign-procedure "unshare" (int) int)))
+
+  (define (cage-namespaces-available?)
+    (and (eq? *current-platform* 'linux)
+         (procedure? c-unshare)))
+
+  (define (cage-unshare! . opts)
+    "Enter Linux namespaces for process isolation. Call AFTER cage! and
+     AFTER binding any sockets. Options:
+       pid:     #t to isolate PID namespace (default #t)
+       mount:   #t to isolate mount namespace (default #t)
+       network: #f to isolate network namespace (default #f — preserves network)
+     Raises &cage-error on failure."
+    (unless (cage-namespaces-available?)
+      (raise (make-cage-error
+               "cage"
+               'platform
+               "Namespaces not available (Linux only, needs unshare(2))")))
+    (let ([do-pid     (%cage-kwarg 'pid:     opts #t)]
+          [do-mount   (%cage-kwarg 'mount:   opts #t)]
+          [do-network (%cage-kwarg 'network: opts #f)])
+      (let ([flags (bitwise-ior
+                     (if do-pid     CLONE_NEWPID 0)
+                     (if do-mount   CLONE_NEWNS  0)
+                     (if do-network CLONE_NEWNET 0))])
+        (when (> flags 0)
+          (let ([rc (c-unshare flags)])
+            (unless (= rc 0)
+              ;; Try with CLONE_NEWUSER prepended (unprivileged namespaces)
+              (let ([rc2 (c-unshare (bitwise-ior CLONE_NEWUSER flags))])
+                (unless (= rc2 0)
+                  (raise (make-cage-error
+                           "cage"
+                           'platform
+                           (format "unshare() failed (flags=#x~x). Need CAP_SYS_ADMIN or unprivileged user namespaces."
+                                   flags)))))))
+          (set! *cage-namespaces-active* #t)
+          (void)))))
+
+  (define (%cage-kwarg key opts default)
+    (let loop ([lst opts])
+      (cond [(or (null? lst) (null? (cdr lst))) default]
+            [(eq? (car lst) key) (cadr lst)]
+            [else (loop (cddr lst))])))
 
   ;; ========== FFI for realpath ==========
 
@@ -212,7 +284,8 @@
       (immutable execute      cage-config-execute)
       (immutable network      cage-config-network)
       (immutable system-paths cage-config-system-paths)
-      (immutable temp-dir     cage-config-temp-dir)))
+      (immutable temp-dir     cage-config-temp-dir)
+      (immutable namespaces   cage-config-namespaces)))  ;; #f | #t | list of flags
 
   ;; Normalize keyword symbols: both 'root: (Chez reader) and '#:root
   ;; (Jerboa reader keyword) map to the string "root".
@@ -238,7 +311,8 @@
                [execute '()]
                [network #t]
                [system-paths 'auto]
-               [temp-dir "/tmp"])
+               [temp-dir "/tmp"]
+               [namespaces #f])
       (if (null? rest)
         (begin
           (unless root
@@ -247,7 +321,7 @@
                      'config
                      "root: is required")))
           (%make-cage-config root read-only read-write execute
-                             network system-paths temp-dir))
+                             network system-paths temp-dir namespaces))
         (begin
           (when (null? (cdr rest))
             (error 'make-cage-config "keyword missing value" (car rest)))
@@ -257,28 +331,31 @@
             (cond
               [(string=? key "root")
                (loop remaining val read-only read-write execute
-                     network system-paths temp-dir)]
+                     network system-paths temp-dir namespaces)]
               [(string=? key "read-only")
                (loop remaining root val read-write execute
-                     network system-paths temp-dir)]
+                     network system-paths temp-dir namespaces)]
               [(string=? key "read-write")
                (loop remaining root read-only val execute
-                     network system-paths temp-dir)]
+                     network system-paths temp-dir namespaces)]
               [(string=? key "execute")
                (loop remaining root read-only read-write val
-                     network system-paths temp-dir)]
+                     network system-paths temp-dir namespaces)]
               [(string=? key "network")
                (loop remaining root read-only read-write execute
-                     val system-paths temp-dir)]
+                     val system-paths temp-dir namespaces)]
               [(string=? key "system-paths")
                (loop remaining root read-only read-write execute
-                     network val temp-dir)]
+                     network val temp-dir namespaces)]
               [(string=? key "temp-dir")
                (loop remaining root read-only read-write execute
-                     network system-paths val)]
+                     network system-paths val namespaces)]
+              [(string=? key "namespaces")
+               (loop remaining root read-only read-write execute
+                     network system-paths temp-dir val)]
               [else
                (error 'make-cage-config
-                 "unknown keyword; expected root:, read-only:, read-write:, execute:, network:, system-paths:, or temp-dir:"
+                 "unknown keyword; expected root:, read-only:, read-write:, execute:, network:, system-paths:, temp-dir:, or namespaces:"
                  (car rest))]))))))
 
   ;; ========== Core: cage! ==========
@@ -365,6 +442,14 @@
                (append sys-ro extra-ro))
           (map (lambda (p) (cons 'execute p))
                (append sys-exec extra-exec))))
+
+      ;; Apply namespace isolation if requested
+      (when (cage-config-namespaces cfg)
+        (guard (e [#t (void)])  ;; best-effort — don't fail cage if namespaces unavailable
+          (cage-unshare!
+            'pid:     #t
+            'mount:   #t
+            'network: (not (cage-config-network cfg)))))
 
       (void)))
 
