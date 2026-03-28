@@ -575,6 +575,86 @@ mod tests {
     }
 
     #[test]
+    fn test_dns_parser_wasm() {
+        // Load the actual DNS parser WASM module
+        let home = std::env::var("HOME").unwrap_or_default();
+        let wasm_path = format!("{}/mine/jerboa-dns/data/dns_parser.wasm", home);
+        let wasm_bytes = match std::fs::read(&wasm_path) {
+            Ok(b) => b,
+            Err(_) => {
+                eprintln!("Skipping DNS parser test: {} not found", wasm_path);
+                return;
+            }
+        };
+
+        let engine = jerboa_wasm_engine_new();
+        let module = jerboa_wasm_module_new(engine, wasm_bytes.as_ptr(), wasm_bytes.len());
+        assert!(module > 0, "DNS parser module load failed");
+
+        let instance = jerboa_wasm_instance_new(module);
+        assert!(instance > 0, "DNS parser instantiation failed");
+
+        // Write a DNS query for "example.com" type A class IN into WASM memory
+        let dns_query: &[u8] = &[
+            0x12, 0x34, // ID
+            0x01, 0x00, // Flags: RD=1, standard query
+            0x00, 0x01, // QDCOUNT = 1
+            0x00, 0x00, // ANCOUNT
+            0x00, 0x00, // NSCOUNT
+            0x00, 0x00, // ARCOUNT
+            // QNAME: example.com
+            7, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
+            3, b'c', b'o', b'm',
+            0, // terminator
+            0x00, 0x01, // QTYPE = A
+            0x00, 0x01, // QCLASS = IN
+        ];
+
+        // Write DNS packet into WASM linear memory at offset 0
+        {
+            let mut instances = INSTANCES.lock().unwrap();
+            let (store, inst, _) = instances.instances.get_mut(&instance).unwrap();
+            let memory = inst.get_memory(store.as_context(), "memory").unwrap();
+            let mem = memory.data_mut(&mut *store);
+            mem[..dns_query.len()].copy_from_slice(dns_query);
+        }
+
+        // Call parse_dns_query(0, len)
+        let func_name = b"parse_dns_query";
+        let result = jerboa_wasm_call_i32(
+            instance, func_name.as_ptr(), func_name.len(),
+            2, 0, dns_query.len() as i32, 0, 0,
+        );
+        assert!(result > 0, "parse_dns_query returned error: {}", result);
+
+        // Read output from WASM memory at OUTPUT_BASE (32768)
+        let output_base = 32768usize;
+        let output_len = result as usize;
+        let mut output = vec![0u8; output_len];
+        {
+            let mut instances = INSTANCES.lock().unwrap();
+            let (store, inst, _) = instances.instances.get_mut(&instance).unwrap();
+            let memory = inst.get_memory(store.as_context(), "memory").unwrap();
+            let mem = memory.data(&*store);
+            output.copy_from_slice(&mem[output_base..output_base + output_len]);
+        }
+
+        // Verify parsed output
+        assert_eq!(output[0], 0x12, "ID hi"); // Query ID
+        assert_eq!(output[1], 0x34, "ID lo");
+        assert_eq!(output[2], 0, "Opcode should be QUERY");
+        assert_eq!(output[3] & 1, 1, "RD should be set");
+        assert_eq!(output[4], 0, "QTYPE hi");
+        assert_eq!(output[5], 1, "QTYPE lo = A");
+        assert_eq!(output[6], 0, "QCLASS hi");
+        assert_eq!(output[7], 1, "QCLASS lo = IN");
+
+        jerboa_wasm_instance_free(instance);
+        jerboa_wasm_module_free(module);
+        jerboa_wasm_engine_free(engine);
+    }
+
+    #[test]
     fn test_invalid_wasm() {
         let garbage = vec![0xFF, 0xFF, 0xFF, 0xFF];
         let engine = jerboa_wasm_engine_new();
