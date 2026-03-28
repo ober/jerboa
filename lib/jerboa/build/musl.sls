@@ -391,6 +391,13 @@
                             ;; Harmless on CPUs without CET (instructions are NOPs).
                             (if (memq (machine-type) '(a6le ta6le i3le ti3le))
                               " -fcf-protection=full"
+                              "")
+                            ;; ARM PAC+BTI: on aarch64 targets.
+                            ;; PAC signs return addresses (defeats ROP).
+                            ;; BTI marks valid indirect branch targets.
+                            ;; -mbranch-protection=standard enables both.
+                            (if (memq (machine-type) '(arm64le tarm64le arm64fb tarm64fb arm64osx tarm64osx))
+                              " -mbranch-protection=standard"
                               "")))]
                        [compile-cmd
                         (format "~a -c -O2~a ~a ~a -o '~a' '~a'"
