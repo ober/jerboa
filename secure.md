@@ -437,15 +437,15 @@ are ranked higher than Linux-only features.
 
 | Phase | Work | Effort | Linux | FreeBSD | Status |
 |-------|------|--------|-------|---------|--------|
-| **1a** | Embed wasmi in jerboa-native-rs | Week | Defense-in-depth | **Primary ROP defense** | NOT YET |
-| **1b** | Write DNS parser in Rust → WASM | Week | Defense-in-depth | **Primary ROP defense** | NOT YET |
+| ~~1a~~ | ~~Embed wasmi in jerboa-native-rs~~ | ~~Week~~ | ~~Defense-in-depth~~ | ~~**Primary ROP defense**~~ | **DONE** — `wasm.rs` with handle-based FFI, 5 tests pass |
+| ~~1b~~ | ~~Write DNS parser in Rust → WASM~~ | ~~Week~~ | ~~Defense-in-depth~~ | ~~**Primary ROP defense**~~ | **DONE** — 547-byte `dns_parser.wasm` in `jerboa-dns/data/` |
 | ~~1c~~ | ~~Switch musl build to static PIE~~ | ~~Hours~~ | ~~Full ASLR~~ | ~~Full ASLR~~ | **DONE** — `musl.sls` uses `-static-pie` |
 | ~~1d~~ | ~~Rebuild Chez with hardening CFLAGS~~ | ~~Days~~ | ~~All flags~~ | ~~All except CET~~ | **DONE** — `~/chez-secure`, CET confirmed |
 | ~~2a~~ | ~~Enable CET/SHSTK in Chez build~~ | ~~Days~~ | ~~**Defeats ROP**~~ | ~~N/A~~ | **DONE** — libkernel.a has IBT+SHSTK |
 | ~~2b~~ | ~~Add namespace isolation to cage~~ | ~~Days~~ | ~~Micro-VM containment~~ | ~~N/A~~ | **DONE** — cage.sls + jerboa-dns server.sls |
-| **2c** | Enable PROTMAX post-init on FreeBSD | Days | N/A | Block mprotect escalation | NOT YET |
-| **2d** | ARM PAC+BTI build target | Days | N/A | HW ROP defense (arm64) | NOT YET |
-| **3a** | Patch Chez codegen for ENDBR64 | Weeks | Full CET (IBT+SHSTK) | N/A | NOT YET — IBT in binary but Chez JIT lacks ENDBR64 |
-| **3b** | Encrypted boot files | Weeks | Resist static analysis | Resist static analysis | NOT YET |
+| ~~2c~~ | ~~Enable PROTMAX post-init on FreeBSD~~ | ~~Days~~ | ~~N/A~~ | ~~Block mprotect escalation~~ | **DONE** — `cage-protmax!` in cage.sls via `procctl(2)` |
+| ~~2d~~ | ~~ARM PAC+BTI build target~~ | ~~Days~~ | ~~N/A~~ | ~~HW ROP defense (arm64)~~ | **DONE** — `-mbranch-protection=standard` in musl.sls + cargo config |
+| ~~3a~~ | ~~Patch Chez codegen for ENDBR64~~ | ~~Weeks~~ | ~~Full CET (IBT+SHSTK)~~ | ~~N/A~~ | **DONE** — `endbr64` at every function entry + foreign-callable prologue |
+| ~~3b~~ | ~~Encrypted boot files~~ | ~~Weeks~~ | ~~Resist static analysis~~ | ~~Resist static analysis~~ | **DONE** — `boot_encrypt.rs` ChaCha20-Poly1305 AEAD with PBKDF2 |
 | **3c** | Firecracker deployment wrapper | Weeks | VM-level isolation | N/A (bhyve possible) | NOT YET |
 | **3d** | HardenedBSD deployment target | Days | N/A | Strict W^X, SEGVGUARD | NOT YET |
