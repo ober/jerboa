@@ -105,30 +105,29 @@ pub extern "C" fn jerboa_seccomp_lock() -> i32 {
         //   4: if nr == process_vm_readv, kill
         //   5: if nr == process_vm_writev, kill
         //   6: if nr == personality, kill
-        //   7: allow
-        //   8: kill
-        //
-        // NOTE: memfd_create is NOT blocked. jsh's own entry point uses it
-        // to load the embedded program .so, so blocking it would kill any
-        // fork-exec'd jsh child (e.g. ,server).
+        //   7: if nr == memfd_create, kill
+        //   8: allow
+        //   9: kill
         let filter = [
             // 0: Load architecture
             bpf_stmt(BPF_LD | BPF_W | BPF_ABS, OFFSET_ARCH),
-            // 1: Verify x86_64 — if not, jump to kill (offset +6 -> instruction 8)
-            bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 0, 6),
+            // 1: Verify x86_64 — if not, jump to kill (offset +7 -> instruction 9)
+            bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 0, 7),
             // 2: Load syscall number
             bpf_stmt(BPF_LD | BPF_W | BPF_ABS, OFFSET_NR),
-            // 3: Check ptrace — if match, jump to kill (+4 -> instruction 8)
-            bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, NR_PTRACE, 4, 0),
+            // 3: Check ptrace — if match, jump to kill (+5 -> instruction 9)
+            bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, NR_PTRACE, 5, 0),
             // 4: Check process_vm_readv
-            bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, NR_PROCESS_VM_READV, 3, 0),
+            bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, NR_PROCESS_VM_READV, 4, 0),
             // 5: Check process_vm_writev
-            bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, NR_PROCESS_VM_WRITEV, 2, 0),
+            bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, NR_PROCESS_VM_WRITEV, 3, 0),
             // 6: Check personality
-            bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, NR_PERSONALITY, 1, 0),
-            // 7: Allow
+            bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, NR_PERSONALITY, 2, 0),
+            // 7: Check memfd_create — prevents code injection via memfd
+            bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, NR_MEMFD_CREATE, 1, 0),
+            // 8: Allow
             bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            // 8: Kill process
+            // 9: Kill process
             bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
         ];
 
