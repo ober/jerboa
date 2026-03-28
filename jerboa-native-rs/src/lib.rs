@@ -11,6 +11,7 @@ mod antidebug;
 mod integrity;
 mod x25519;
 mod process_ctl;
+mod wasm;
 
 #[cfg(target_os = "linux")]
 mod epoll;
