@@ -71,25 +71,27 @@ are only added on x86_64 Linux machine types.
 **Status: DONE in `jerboa-native-rs/.cargo/config.toml`** — Rust builds now pass
 `-Wl,-z,relro,-z,now` for all targets and `-fcf-protection=full` for x86_64 Linux.
 
-**NOT YET DONE — downstream projects**: jerboa-secmon and jerboa-dns have their own
-build scripts (`build-secmon-musl.ss`, `build-secmon-musl.sh`, `Dockerfile`) that hardcode
-`musl-gcc -c -O2` and `musl-gcc -static` directly instead of using `(jerboa build musl)`.
-These need the same flags added manually, or better, ported to use the shared build module.
+**Status: DONE — jerboa-dns** (`secure` branch) — `build-jdns-musl.ss` and
+`build-jdns-musl.sh` produce a fully static PIE binary with all hardening flags. The
+Makefile also exports `HARDEN_CFLAGS` and `HARDEN_LDFLAGS` with CET on x86_64 Linux.
 
-**NOT YET DONE — Chez Scheme itself (libkernel.a)**: This is the biggest gap. The
-Dockerfile builds Chez with `./configure --threads --disable-x11 --static CC=musl-gcc`
-and no `CFLAGS` override. The resulting `libkernel.a` — the ~1MB primary source of ROP
-gadgets — has **zero hardening**: no stack canaries, no CET, no FORTIFY_SOURCE. Fix by
-passing hardening flags when building Chez:
+**NOT YET DONE — jerboa-secmon**: `build-secmon-musl.ss` and `build-secmon-musl.sh`
+hardcode `musl-gcc -c -O2` and `musl-gcc -static` directly instead of using
+`(jerboa build musl)`. Need the same flags added, or ported to use the shared build module.
+
+**Status: DONE — Chez Scheme itself (libkernel.a)**: The `secure` branch at
+`~/mine/ChezScheme` builds Chez with full hardening and installs to `~/chez-secure`:
 
 ```bash
-./configure --threads --disable-x11 --static \
-  CC=musl-gcc \
-  CFLAGS="-O2 -fstack-protector-strong -fstack-clash-protection -D_FORTIFY_SOURCE=2 -fPIE -fcf-protection=full"
+./configure --threads --installprefix=$HOME/chez-secure --workarea=build-secure \
+  CFLAGS+="-fstack-protector-strong -fstack-clash-protection -D_FORTIFY_SOURCE=2 -fcf-protection=full" \
+  LDFLAGS+="-Wl,-z,relro,-z,now"
 ```
 
-This is the single highest-impact change remaining — it hardens the code that contributes
-the most ROP gadgets.
+The resulting `libkernel.a` has **CET enabled** (`readelf -n` confirms `x86 feature: IBT, SHSTK`),
+stack canaries, FORTIFY_SOURCE, and the scheme binary is PIE with full RELRO and NX stack.
+This was the single highest-impact change — the ~1MB primary source of ROP gadgets is now
+hardware-protected.
 
 ### Static PIE
 
@@ -102,16 +104,27 @@ Static linking actually slightly increases the gadget set (musl code is embedded
 
 ### Namespace Isolation
 
-Add Linux namespace isolation to the security cage module (`lib/std/security/cage.sls`). After initialization, call:
+**Status: DONE** — Linux namespace isolation is implemented in two places:
 
-```c
-unshare(CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWNET)
-```
+**`lib/std/security/cage.sls`** (`secure` branch): The cage module now supports namespace
+isolation via `unshare(2)`. New exports:
+- `cage-unshare!` — Enter PID/mount/network namespaces (keyword args: `pid:`, `mount:`, `network:`)
+- `cage-namespaces-available?` — Check if running on Linux with unshare(2) available
+- `cage-namespaces-active?` — Check if namespaces have been entered
+- `cage-config-namespaces` — Config accessor; set `namespaces: #t` in `make-cage-config`
 
-This creates:
+When `namespaces: #t`, `cage-linux!` automatically calls `cage-unshare!` after Landlock
+installation (best-effort — namespace failure doesn't break the cage). Falls back to
+`CLONE_NEWUSER` for unprivileged namespaces.
+
+**`jerboa-dns/lib/jerboa-dns/server.sls`** (`secure` branch): The DNS server now enters
+PID + mount namespaces after Landlock sandboxing. Network namespace is deliberately NOT
+isolated since the server needs UDP socket access. Best-effort — continues without
+namespaces if unavailable.
+
+After `unshare(CLONE_NEWPID | CLONE_NEWNS)`:
 - **PID namespace**: Process can't see or signal other processes
 - **Mount namespace**: Process sees only an allow-listed filesystem
-- **Network namespace**: Process has only its own network stack (or a specific pre-bound socket)
 
 Combined with existing seccomp + Landlock/Capsicum, this creates micro-VM-like isolation without VM overhead.
 
@@ -119,18 +132,18 @@ Combined with existing seccomp + Landlock/Capsicum, this creates micro-VM-like i
 
 ### Hardening Summary
 
-| Technique | Works with Chez JIT? | Effort | ROP Impact |
-|-----------|---------------------|--------|------------|
-| **SHSTK (shadow stack)** | Likely yes | Low (rebuild Chez) | **Directly defeats ROP** |
-| **IBT (indirect branch)** | No (needs Chez patch) | High | Constrains gadgets to function entries |
-| Stack canaries | C code only, not JIT | Low (add CFLAG) | Detects stack buffer overflows |
-| Static PIE + ASLR | Yes | Low (change linker flag) | Gadget addresses unpredictable |
-| `-fstack-clash-protection` | Yes | Trivial | Prevents guard-page bypass |
-| seccomp post-init | Yes | **Already done** | Blocks ptrace, process_vm_readv |
-| Landlock/Capsicum post-init | Yes | **Already done** | Blocks filesystem escape |
-| Anti-debug | Yes | **Already done** | Blocks dynamic analysis |
-| Integrity verification | Yes | **Already done** | Detects binary modification |
-| Namespace isolation | Yes | Medium | PID/mount/network containment |
+| Technique | Works with Chez JIT? | Effort | ROP Impact | Status |
+|-----------|---------------------|--------|------------|--------|
+| **SHSTK (shadow stack)** | Likely yes | Low (rebuild Chez) | **Directly defeats ROP** | **DONE** (libkernel.a) |
+| **IBT (indirect branch)** | No (needs Chez patch) | High | Constrains gadgets to function entries | Partial — in C code, JIT needs ENDBR64 |
+| Stack canaries | C code only, not JIT | Low (add CFLAG) | Detects stack buffer overflows | **DONE** |
+| Static PIE + ASLR | Yes | Low (change linker flag) | Gadget addresses unpredictable | **DONE** |
+| `-fstack-clash-protection` | Yes | Trivial | Prevents guard-page bypass | **DONE** |
+| seccomp post-init | Yes | **Already done** | Blocks ptrace, process_vm_readv | **DONE** |
+| Landlock/Capsicum post-init | Yes | **Already done** | Blocks filesystem escape | **DONE** |
+| Anti-debug | Yes | **Already done** | Blocks dynamic analysis | **DONE** |
+| Integrity verification | Yes | **Already done** | Detects binary modification | **DONE** |
+| Namespace isolation | Yes | Medium | PID/mount/network containment | **DONE** |
 
 ### FreeBSD Portability (Path 1)
 
@@ -422,17 +435,17 @@ making it the strongest FreeBSD deployment target.
 Priority is adjusted for cross-platform impact. Items that benefit both Linux and FreeBSD
 are ranked higher than Linux-only features.
 
-| Phase | Work | Effort | Linux | FreeBSD | Notes |
-|-------|------|--------|-------|---------|-------|
-| **1a** | Embed wasmi in jerboa-native-rs | Week | Defense-in-depth | **Primary ROP defense** | Cross-platform, highest priority |
-| **1b** | Write DNS parser in Rust → WASM | Week | Defense-in-depth | **Primary ROP defense** | Cross-platform |
-| **1c** | Switch musl build to static PIE | Hours | Full ASLR | Full ASLR | Cross-platform |
-| **1d** | Rebuild Chez with hardening CFLAGS | Days | All flags | All except CET | Cross-platform (flag subset varies) |
-| **2a** | Enable CET/SHSTK in Chez build | Days | **Defeats ROP** | N/A | Linux-only, highest HW impact |
-| **2b** | Add namespace isolation to cage | Days | Micro-VM containment | N/A | Linux-only |
-| **2c** | Enable PROTMAX post-init on FreeBSD | Days | N/A | Block mprotect escalation | FreeBSD-only, requires post-JIT sequencing |
-| **2d** | ARM PAC+BTI build target | Days | N/A | HW ROP defense (arm64) | FreeBSD arm64 only |
-| **3a** | Patch Chez codegen for ENDBR64 | Weeks | Full CET (IBT+SHSTK) | N/A | Linux-only, enables IBT |
-| **3b** | Encrypted boot files | Weeks | Resist static analysis | Resist static analysis | Cross-platform |
-| **3c** | Firecracker deployment wrapper | Weeks | VM-level isolation | N/A (bhyve possible) | Linux-primary |
-| **3d** | HardenedBSD deployment target | Days | N/A | Strict W^X, SEGVGUARD | FreeBSD fork, maximum hardening |
+| Phase | Work | Effort | Linux | FreeBSD | Status |
+|-------|------|--------|-------|---------|--------|
+| **1a** | Embed wasmi in jerboa-native-rs | Week | Defense-in-depth | **Primary ROP defense** | NOT YET |
+| **1b** | Write DNS parser in Rust → WASM | Week | Defense-in-depth | **Primary ROP defense** | NOT YET |
+| ~~1c~~ | ~~Switch musl build to static PIE~~ | ~~Hours~~ | ~~Full ASLR~~ | ~~Full ASLR~~ | **DONE** — `musl.sls` uses `-static-pie` |
+| ~~1d~~ | ~~Rebuild Chez with hardening CFLAGS~~ | ~~Days~~ | ~~All flags~~ | ~~All except CET~~ | **DONE** — `~/chez-secure`, CET confirmed |
+| ~~2a~~ | ~~Enable CET/SHSTK in Chez build~~ | ~~Days~~ | ~~**Defeats ROP**~~ | ~~N/A~~ | **DONE** — libkernel.a has IBT+SHSTK |
+| ~~2b~~ | ~~Add namespace isolation to cage~~ | ~~Days~~ | ~~Micro-VM containment~~ | ~~N/A~~ | **DONE** — cage.sls + jerboa-dns server.sls |
+| **2c** | Enable PROTMAX post-init on FreeBSD | Days | N/A | Block mprotect escalation | NOT YET |
+| **2d** | ARM PAC+BTI build target | Days | N/A | HW ROP defense (arm64) | NOT YET |
+| **3a** | Patch Chez codegen for ENDBR64 | Weeks | Full CET (IBT+SHSTK) | N/A | NOT YET — IBT in binary but Chez JIT lacks ENDBR64 |
+| **3b** | Encrypted boot files | Weeks | Resist static analysis | Resist static analysis | NOT YET |
+| **3c** | Firecracker deployment wrapper | Weeks | VM-level isolation | N/A (bhyve possible) | NOT YET |
+| **3d** | HardenedBSD deployment target | Days | N/A | Strict W^X, SEGVGUARD | NOT YET |
