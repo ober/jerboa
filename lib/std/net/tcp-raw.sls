@@ -36,7 +36,10 @@
   (define c-inet-pton (foreign-procedure "inet_pton" (int string void*) int))
 
   ;; errno
-  (define c-errno-location (foreign-procedure "__errno_location" () void*))
+  (define c-errno-location
+    (if (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb))
+      (foreign-procedure "__error" () void*)
+      (foreign-procedure "__errno_location" () void*)))
   (define (get-errno) (foreign-ref 'int (c-errno-location) 0))
   (define EINTR 4)
 

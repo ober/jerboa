@@ -47,7 +47,9 @@
 
   (define c-errno
     (guard (e [#t (lambda () 0)])
-      (foreign-procedure "__errno_location" () void*)))
+      (if (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb))
+        (foreign-procedure "__error" () void*)
+        (foreign-procedure "__errno_location" () void*))))
 
   (define (get-errno)
     (guard (e [#t 0])
