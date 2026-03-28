@@ -7,7 +7,12 @@ use crate::panic::{ffi_wrap, set_last_error};
 #[no_mangle]
 pub extern "C" fn jerboa_antidebug_ptrace() -> i32 {
     ffi_wrap(|| {
+        #[cfg(target_os = "linux")]
         let rc = unsafe { libc::ptrace(libc::PTRACE_TRACEME, 0, 0, 0) };
+        #[cfg(target_os = "freebsd")]
+        let rc = unsafe { libc::ptrace(libc::PT_TRACE_ME, 0, std::ptr::null_mut(), 0) };
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        let rc: libc::c_long = -1;
         if rc == -1 {
             set_last_error("PTRACE_TRACEME failed: process is already being traced".to_string());
             -1
