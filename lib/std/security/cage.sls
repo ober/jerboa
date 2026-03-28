@@ -52,6 +52,10 @@
     cage-unshare!
     cage-namespaces-available?
 
+    ;; PROTMAX (FreeBSD) — block mprotect escalation
+    cage-protmax!
+    cage-protmax-available?
+
     ;; Introspection
     cage-root
     cage-allowed-paths
@@ -179,6 +183,51 @@
       (cond [(or (null? lst) (null? (cdr lst))) default]
             [(eq? (car lst) key) (cadr lst)]
             [else (loop (cddr lst))])))
+
+  ;; ========== FreeBSD PROTMAX (block mprotect escalation) ==========
+  ;;
+  ;; procctl(P_PID, 0, PROC_PROTMAX_CTL, &arg) where arg = PROC_PROTMAX_FORCE_ENABLE
+  ;; prevents mprotect from escalating page protections beyond what was set at
+  ;; mmap time. This blocks the classic ROP second stage: attacker chains gadgets
+  ;; to call mprotect(addr, len, PROT_READ|PROT_WRITE|PROT_EXEC) on their payload.
+  ;;
+  ;; IMPORTANT: Must be called AFTER all JIT compilation and boot file loading
+  ;; is complete, because Chez's pattern is mmap(RW) then mprotect(RX).
+  ;; Once PROTMAX is enabled, mmap(RW) → mprotect(RX) will fail.
+
+  ;; FreeBSD constants from sys/procctl.h
+  (define PROC_PROTMAX_CTL       14)
+  (define PROC_PROTMAX_FORCE_ENABLE 2)
+  (define P_PID 0)
+
+  (define c-procctl
+    (guard (e [#t #f])
+      (foreign-procedure "procctl" (int int int void*) int)))
+
+  (define (cage-protmax-available?)
+    (and (eq? *current-platform* 'freebsd)
+         (procedure? c-procctl)))
+
+  (define (cage-protmax!)
+    "Enable PROTMAX for the current process. After this call, mprotect cannot
+     escalate page protections beyond what was set at mmap time. This blocks
+     ROP chains from making data executable. MUST be called after all Chez
+     compilation is complete (boot files loaded, libraries compiled).
+     Raises &cage-error on failure."
+    (unless (cage-protmax-available?)
+      (raise (make-cage-error
+               "cage"
+               'platform
+               "PROTMAX not available (FreeBSD 14+ with procctl required)")))
+    (let ([arg-buf (foreign-alloc 4)])
+      (foreign-set! 'int arg-buf 0 PROC_PROTMAX_FORCE_ENABLE)
+      (let ([rc (c-procctl P_PID 0 PROC_PROTMAX_CTL arg-buf)])
+        (foreign-free arg-buf)
+        (when (< rc 0)
+          (raise (make-cage-error
+                   "cage"
+                   'platform
+                   "procctl(PROC_PROTMAX_CTL) failed — requires FreeBSD 14+"))))))
 
   ;; ========== FFI for realpath ==========
 
@@ -600,6 +649,13 @@
                               (condition-message exn)
                               "cap_enter() failed")))])
         (capsicum-enter!))
+
+      ;; Enable PROTMAX — block mprotect(PROT_EXEC) escalation
+      ;; This prevents ROP chains from making attacker data executable.
+      ;; Best-effort: PROTMAX requires FreeBSD 14+ and may not be available.
+      (when (cage-protmax-available?)
+        (guard (e [#t (void)])  ;; best-effort
+          (cage-protmax!)))
 
       ;; Record state
       (set! *cage-active* #t)
