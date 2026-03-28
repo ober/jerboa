@@ -26,7 +26,8 @@
                     (guard (e [#t #f]) (load-shared-object "libc.so"))))
   (define _libc2 (guard (e [#t #f]) (load-shared-object "")))
 
-  (define SIGSET_SIZE 128)
+  (define *freebsd?* (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb)))
+  (define SIGSET_SIZE (if *freebsd?* 16 128))  ;; sizeof(sigset_t): FreeBSD=16, Linux=128
   (define c-sigemptyset  (foreign-procedure "sigemptyset" (void*) int))
   (define c-sigaddset    (foreign-procedure "sigaddset" (void* int) int))
   (define c-sigprocmask  (foreign-procedure "sigprocmask" (int void* void*) int))

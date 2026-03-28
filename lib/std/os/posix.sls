@@ -199,16 +199,18 @@
   (define (WSTOPSIG s)    (bitwise-arithmetic-shift-right (bitwise-and s #xff00) 8))
 
   ;; ========== Open Flags ==========
-  (define O_RDONLY    #o0)
-  (define O_WRONLY    #o1)
-  (define O_RDWR      #o2)
-  (define O_CREAT    #o100)
-  (define O_EXCL     #o200)
-  (define O_NOCTTY   #o400)
-  (define O_TRUNC    #o1000)
-  (define O_APPEND   #o2000)
-  (define O_NONBLOCK #o4000)
-  (define O_CLOEXEC  #o2000000)
+  ;; Values differ between Linux and FreeBSD
+  (define *freebsd?* (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb)))
+  (define O_RDONLY    #x0)
+  (define O_WRONLY    #x1)
+  (define O_RDWR      #x2)
+  (define O_CREAT    (if *freebsd?* #x200    #x40))
+  (define O_EXCL     (if *freebsd?* #x800    #x80))
+  (define O_NOCTTY   (if *freebsd?* #x8000   #x100))
+  (define O_TRUNC    (if *freebsd?* #x400    #x200))
+  (define O_APPEND   (if *freebsd?* #x8      #x400))
+  (define O_NONBLOCK (if *freebsd?* #x4      #x800))
+  (define O_CLOEXEC  (if *freebsd?* #x100000 #x80000))
 
   ;; ========== Seek Constants ==========
   (define SEEK_SET 0)
@@ -222,9 +224,11 @@
   (define X_OK 1)
 
   ;; ========== Signal Mask Constants ==========
-  (define SIG_BLOCK   0)
-  (define SIG_UNBLOCK 1)
-  (define SIG_SETMASK 2)
+  ;; FreeBSD: SIG_BLOCK=1, SIG_UNBLOCK=2, SIG_SETMASK=3
+  ;; Linux:   SIG_BLOCK=0, SIG_UNBLOCK=1, SIG_SETMASK=2
+  (define SIG_BLOCK   (if *freebsd?* 1 0))
+  (define SIG_UNBLOCK (if *freebsd?* 2 1))
+  (define SIG_SETMASK (if *freebsd?* 3 2))
 
   ;; ========== Terminal Constants ==========
   (define TCSANOW   0)
@@ -361,8 +365,8 @@
   (define (posix-kill pid sig) (check-posix 'kill (c-kill pid sig)))
 
   ;; sigprocmask with sigset_t management
-  ;; sigset_t is 128 bytes on Linux (1024 bits)
-  (define SIGSET_SIZE 128)
+  ;; sigset_t: 16 bytes on FreeBSD, 128 bytes on Linux (1024 bits)
+  (define SIGSET_SIZE (if *freebsd?* 16 128))
 
   (define c-sigemptyset (foreign-procedure "sigemptyset" (void*) int))
   (define c-sigfillset  (foreign-procedure "sigfillset" (void*) int))
@@ -558,17 +562,20 @@
   (define (free-stat stat-buf)
     (foreign-free stat-buf))
 
-  ;; Linux x86_64 struct stat field offsets
+  ;; struct stat field offsets (first 6 fields match Linux and FreeBSD x86_64)
   (define (stat-dev buf)    (foreign-ref 'unsigned-64 buf 0))    ;; st_dev
   (define (stat-ino buf)    (foreign-ref 'unsigned-64 buf 8))    ;; st_ino
   (define (stat-nlink buf)  (foreign-ref 'unsigned-64 buf 16))   ;; st_nlink
   (define (stat-mode buf)   (foreign-ref 'unsigned-32 buf 24))   ;; st_mode
   (define (stat-uid buf)    (foreign-ref 'unsigned-32 buf 28))   ;; st_uid
   (define (stat-gid buf)    (foreign-ref 'unsigned-32 buf 32))   ;; st_gid
-  (define (stat-size buf)   (foreign-ref 'integer-64  buf 48))   ;; st_size
-  (define (stat-atime buf)  (foreign-ref 'integer-64  buf 72))   ;; st_atim.tv_sec
-  (define (stat-mtime buf)  (foreign-ref 'integer-64  buf 88))   ;; st_mtim.tv_sec
-  (define (stat-ctime buf)  (foreign-ref 'integer-64  buf 104))  ;; st_ctim.tv_sec
+  ;; Remaining fields differ: FreeBSD has st_atim at 48, st_mtim at 64,
+  ;; st_ctim at 80, st_size at 112. Linux has st_size at 48, st_atim at 72,
+  ;; st_mtim at 88, st_ctim at 104.
+  (define (stat-size buf)   (foreign-ref 'integer-64  buf (if *freebsd?* 112 48)))
+  (define (stat-atime buf)  (foreign-ref 'integer-64  buf (if *freebsd?* 48 72)))
+  (define (stat-mtime buf)  (foreign-ref 'integer-64  buf (if *freebsd?* 64 88)))
+  (define (stat-ctime buf)  (foreign-ref 'integer-64  buf (if *freebsd?* 80 104)))
 
   ;; File type checks (from st_mode)
   (define S_IFMT   #o170000)

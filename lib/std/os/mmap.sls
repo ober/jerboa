@@ -38,8 +38,11 @@
 
   (import (chezscheme))
 
+  ;;; ========== Platform detection ==========
+  (define *freebsd?* (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb)))
+
   ;;; ========== POSIX constants ==========
-  ;; Values for Linux x86-64. Adjust for other platforms.
+  ;; Values for Linux x86-64 and FreeBSD. Platform-specific values use *freebsd?* guard.
 
   (define PROT_READ   1)
   (define PROT_WRITE  2)
@@ -48,7 +51,7 @@
 
   (define MAP_SHARED    1)
   (define MAP_PRIVATE   2)
-  (define MAP_ANONYMOUS #x20)
+  (define MAP_ANONYMOUS (if *freebsd?* #x1000 #x20))
   (define MAP_FAILED    -1)   ; mmap returns (void*)-1 on failure
 
   (define MADV_SEQUENTIAL  2)
@@ -107,8 +110,8 @@
 
   (define O_RDONLY  0)
   (define O_RDWR    2)
-  (define O_CREAT   #x40)
-  (define O_TRUNC   #x200)
+  (define O_CREAT   (if *freebsd?* #x200 #x40))
+  (define O_TRUNC   (if *freebsd?* #x400 #x200))
   (define SEEK_END  2)
 
   ;;; ========== mmap region record ==========

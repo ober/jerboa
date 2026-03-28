@@ -37,10 +37,11 @@
 
   ;; ========== Constants ==========
 
-  (define SFD_CLOEXEC  #x80000)   ;; same as O_CLOEXEC
-  (define SFD_NONBLOCK #x800)     ;; same as O_NONBLOCK
+  (define *freebsd?* (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb)))
+  (define SFD_CLOEXEC  (if *freebsd?* #x100000 #x80000))   ;; same as O_CLOEXEC
+  (define SFD_NONBLOCK (if *freebsd?* #x4      #x800))      ;; same as O_NONBLOCK
 
-  (define SIGSET_SIZE 128)        ;; sizeof(sigset_t) on Linux x86_64
+  (define SIGSET_SIZE (if *freebsd?* 16 128))  ;; sizeof(sigset_t): FreeBSD=16, Linux=128
   (define SIGNALFD_SIGINFO_SIZE 128)  ;; sizeof(struct signalfd_siginfo)
   (define SIG_BLOCK 0)
 
@@ -60,6 +61,7 @@
       (foreign-procedure "__errno_location" () void*)))
   (define (get-errno) (foreign-ref 'int (c-errno-location) 0))
   (define EINTR 4)
+  (define EAGAIN (if *freebsd?* 35 11))
 
   ;; ========== signalfd record ==========
 
@@ -127,7 +129,7 @@
                  (foreign-ref 'unsigned-32 buf 0)]
                 [(and (< n 0) (= (get-errno) EINTR))
                  (loop)]
-                [(and (< n 0) (= (get-errno) 11))  ;; EAGAIN
+                [(and (< n 0) (= (get-errno) EAGAIN))
                  #f]  ;; no signal pending (non-blocking mode)
                 [(= n 0)
                  #f]  ;; EOF

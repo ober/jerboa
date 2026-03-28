@@ -86,16 +86,22 @@
 
   (define AF_INET 2)
   (define SOCK_STREAM 1)
-  (define SOL_SOCKET 1)
-  (define SO_REUSEADDR 2)
+  (define *freebsd?* (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb)))
+  (define SOL_SOCKET (if *freebsd?* #xffff 1))
+  (define SO_REUSEADDR (if *freebsd?* 4 2))
   (define F_GETFL 3)
   (define F_SETFL 4)
-  (define O_NONBLOCK 2048)
+  (define O_NONBLOCK
+    (if (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb)) #x4 #x800))
 
   (define (make-sockaddr-in port)
     ;; struct sockaddr_in: family(2) + port(2) + addr(4) + zero(8) = 16 bytes
     (let ([buf (make-bytevector 16 0)])
-      (bytevector-u16-native-set! buf 0 AF_INET)
+      (if *freebsd?*
+          (begin
+            (bytevector-u8-set! buf 0 16)        ;; sin_len = sizeof(sockaddr_in)
+            (bytevector-u8-set! buf 1 AF_INET))  ;; sin_family (uint8)
+          (bytevector-u16-native-set! buf 0 AF_INET))
       (bytevector-u16-set! buf 2 (c-htons port) 'big)
       ;; INADDR_ANY = 0.0.0.0 (already zeroed)
       buf))

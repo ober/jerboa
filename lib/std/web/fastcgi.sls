@@ -51,15 +51,17 @@
 
   (define AF_INET 2)
   (define SOCK_STREAM 1)
-  (define SOL_SOCKET 1)
-  (define SO_REUSEADDR 2)
+  (define SOL_SOCKET (if *freebsd?* #xffff 1))
+  (define SO_REUSEADDR (if *freebsd?* 4 2))
   (define INADDR_ANY 0)
   (define SOCKADDR_IN_SIZE 16)
+  (define *freebsd?* (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb)))
   (define EINTR 4)
-  (define EAGAIN 11)
+  (define EAGAIN (if *freebsd?* 35 11))
   (define F_GETFL 3)
   (define F_SETFL 4)
-  (define O_NONBLOCK #x800)
+  (define O_NONBLOCK
+    (if (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb)) #x4 #x800))
 
   (define *retry-delay* (make-time 'time-duration 10000000 0))
 
@@ -127,7 +129,11 @@
 
   (define (make-sockaddr-in address port)
     (let ((buf (make-bytevector SOCKADDR_IN_SIZE 0)))
-      (bytevector-u16-set! buf 0 AF_INET (native-endianness))
+      (if *freebsd?*
+          (begin
+            (bytevector-u8-set! buf 0 16)        ;; sin_len = sizeof(sockaddr_in)
+            (bytevector-u8-set! buf 1 AF_INET))  ;; sin_family (uint8)
+          (bytevector-u16-set! buf 0 AF_INET (native-endianness)))
       (bytevector-u16-set! buf 2 (c-htons port) (native-endianness))
       (if (string=? address "0.0.0.0")
           (bytevector-u32-set! buf 4 INADDR_ANY (native-endianness))

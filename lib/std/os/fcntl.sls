@@ -42,9 +42,10 @@
   (define F_SETFL 4)
 
   ;; File status flags (F_GETFL/F_SETFL)
-  (define O_APPEND    #x400)
-  (define O_NONBLOCK  #x800)
-  (define O_CLOEXEC   #x80000)
+  (define *freebsd?* (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb)))
+  (define O_APPEND    (if *freebsd?* #x8      #x400))
+  (define O_NONBLOCK  (if *freebsd?* #x4      #x800))
+  (define O_CLOEXEC   (if *freebsd?* #x100000 #x80000))
 
   ;; File descriptor flags (F_GETFD/F_SETFD)
   (define FD_CLOEXEC 1)

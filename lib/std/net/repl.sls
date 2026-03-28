@@ -36,17 +36,18 @@
       (foreign-procedure "__errno_location" () void*)))
   (define (get-errno) (foreign-ref 'int (c-errno-location) 0))
 
-  ;; Constants
+  ;; Constants (values differ between Linux and FreeBSD)
+  (define *freebsd?* (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb)))
   (define AF_INET 2)
   (define SOCK_STREAM 1)
-  (define SOL_SOCKET 1)
-  (define SO_REUSEADDR 2)
+  (define SOL_SOCKET    (if *freebsd?* #xffff 1))
+  (define SO_REUSEADDR  (if *freebsd?* 4 2))
   (define SOCKADDR_IN_SIZE 16)
   (define F_GETFL 3)
   (define F_SETFL 4)
-  (define O_NONBLOCK #x800)
+  (define O_NONBLOCK (if *freebsd?* #x4 #x800))
   (define EINTR 4)
-  (define EAGAIN 11)
+  (define EAGAIN (if *freebsd?* 35 11))
   (define *retry-delay* (make-time 'time-duration 10000000 0))
 
   ;; ========== Helpers ==========
@@ -62,7 +63,11 @@
         (when (< i SOCKADDR_IN_SIZE)
           (foreign-set! 'unsigned-8 buf i 0)
           (lp (+ i 1))))
-      (foreign-set! 'unsigned-short buf 0 AF_INET)
+      (if *freebsd?*
+        (begin
+          (foreign-set! 'unsigned-8 buf 0 SOCKADDR_IN_SIZE)  ;; sin_len
+          (foreign-set! 'unsigned-8 buf 1 AF_INET))          ;; sin_family (uint8)
+        (foreign-set! 'unsigned-short buf 0 AF_INET))        ;; sin_family (uint16)
       (foreign-set! 'unsigned-short buf 2 (c-htons port))
       ;; sin_addr stays 0 = INADDR_ANY
       buf))

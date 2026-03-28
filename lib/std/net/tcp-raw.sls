@@ -43,13 +43,14 @@
   (define (get-errno) (foreign-ref 'int (c-errno-location) 0))
   (define EINTR 4)
 
-  ;; Constants
+  ;; Constants (values differ between Linux and FreeBSD)
+  (define *freebsd?* (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb)))
   (define AF_INET 2)
   (define SOCK_STREAM 1)
-  (define SOL_SOCKET 1)
-  (define SO_REUSEADDR 2)
-  (define SO_RCVTIMEO 20)
-  (define SO_SNDTIMEO 21)
+  (define SOL_SOCKET    (if *freebsd?* #xffff 1))
+  (define SO_REUSEADDR  (if *freebsd?* 4 2))
+  (define SO_RCVTIMEO   (if *freebsd?* #x1006 20))
+  (define SO_SNDTIMEO   (if *freebsd?* #x1005 21))
   (define SOCKADDR_IN_SIZE 16)
 
   ;; ========== sockaddr_in ==========
@@ -60,7 +61,11 @@
         (when (< i SOCKADDR_IN_SIZE)
           (foreign-set! 'unsigned-8 buf i 0)
           (lp (+ i 1))))
-      (foreign-set! 'unsigned-short buf 0 AF_INET)
+      (if *freebsd?*
+        (begin
+          (foreign-set! 'unsigned-8 buf 0 SOCKADDR_IN_SIZE)  ;; sin_len
+          (foreign-set! 'unsigned-8 buf 1 AF_INET))          ;; sin_family (uint8)
+        (foreign-set! 'unsigned-short buf 0 AF_INET))        ;; sin_family (uint16)
       (foreign-set! 'unsigned-short buf 2 (c-htons port))
       (let ([addr-ptr (+ buf 4)])
         (when (= (c-inet-pton AF_INET address addr-ptr) 0)

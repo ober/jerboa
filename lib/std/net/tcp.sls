@@ -56,18 +56,20 @@
       (foreign-procedure "__errno_location" () void*)))
   (define (get-errno) (foreign-ref 'int (c-errno-location) 0))
   (define EINTR 4)
-  (define EAGAIN 11)
+  (define *freebsd?* (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb)))
+  (define EAGAIN (if *freebsd?* 35 11))
 
   ;; fcntl constants
   (define F_GETFL 3)
   (define F_SETFL 4)
-  (define O_NONBLOCK #x800)
+  (define O_NONBLOCK
+    (if (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb)) #x4 #x800))
 
   ;; Constants
   (define AF_INET 2)
   (define SOCK_STREAM 1)
-  (define SOL_SOCKET 1)
-  (define SO_REUSEADDR 2)
+  (define SOL_SOCKET   (if *freebsd?* #xffff 1))
+  (define SO_REUSEADDR (if *freebsd?* 4 2))
   (define SOCKADDR_IN_SIZE 16)  ;; sizeof(struct sockaddr_in) on Linux
 
   ;; GC-safe retry delay: 10ms via Chez's sleep (not a foreign call).
@@ -88,8 +90,14 @@
         (when (< i SOCKADDR_IN_SIZE)
           (foreign-set! 'unsigned-8 buf i 0)
           (lp (+ i 1))))
-      ;; sin_family = AF_INET (offset 0, 2 bytes)
-      (foreign-set! 'unsigned-short buf 0 AF_INET)
+      ;; sin_family = AF_INET
+      ;; FreeBSD sockaddr_in has sin_len (uint8) at offset 0, sin_family (uint8) at offset 1
+      ;; Linux sockaddr_in has sin_family (uint16) at offset 0
+      (if *freebsd?*
+        (begin
+          (foreign-set! 'unsigned-8 buf 0 16)        ;; sin_len = sizeof(sockaddr_in)
+          (foreign-set! 'unsigned-8 buf 1 AF_INET))  ;; sin_family (uint8)
+        (foreign-set! 'unsigned-short buf 0 AF_INET)) ;; sin_family (uint16)
       ;; sin_port = htons(port) (offset 2, 2 bytes)
       (foreign-set! 'unsigned-short buf 2 (c-htons port))
       ;; sin_addr (offset 4, 4 bytes) — parse address string

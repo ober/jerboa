@@ -28,7 +28,8 @@
       (foreign-procedure "__error" () void*)
       (foreign-procedure "__errno_location" () void*)))
   (define (get-errno) (foreign-ref 'int (c-errno-location) 0))
-  (define EWOULDBLOCK 11)  ;; same as EAGAIN on Linux
+  (define *freebsd?* (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb)))
+  (define EWOULDBLOCK (if *freebsd?* 35 11))
 
   ;; ========== Constants ==========
 

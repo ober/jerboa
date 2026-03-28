@@ -184,6 +184,11 @@
   ;; Store lifecycle
   ;; =========================================================================
 
+  ;; Platform detection for open(2) flag constants
+  (define *freebsd?* (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb)))
+  (define %O_CREAT (if *freebsd?* #x200 #x40))
+  (define %O_TRUNC (if *freebsd?* #x400 #x200))
+
   ;; open(2) and ftruncate(2) FFI for creating/growing backing files
   (define %c-open
     (foreign-procedure "open" (string int int) int))
@@ -208,7 +213,7 @@
       ;; Lock the directory
       (let* ([lock-path (string-append path "/odb.lock")]
              [fd (%c-open lock-path
-                          (bitwise-ior #x40 #x2) ;; O_CREAT | O_RDWR
+                          (bitwise-ior %O_CREAT #x2) ;; O_CREAT | O_RDWR
                           #o644)])
         (when (< fd 0)
           (error 'odb-open "cannot create lock file" lock-path))
@@ -407,7 +412,7 @@
 
   (define (create-backing-file! path size)
     (let ([fd (%c-open path
-                       (bitwise-ior #x42 #x200)  ;; O_CREAT | O_RDWR | O_TRUNC
+                       (bitwise-ior (bitwise-ior %O_CREAT #x2) %O_TRUNC)  ;; O_CREAT | O_RDWR | O_TRUNC
                        #o644)])
       (when (< fd 0)
         (error 'create-backing-file! "cannot create file" path))
