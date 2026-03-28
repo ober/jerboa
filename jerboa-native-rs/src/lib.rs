@@ -10,6 +10,7 @@ mod x509;
 mod antidebug;
 mod integrity;
 mod x25519;
+mod ed25519;
 mod process_ctl;
 
 #[cfg(target_os = "linux")]
