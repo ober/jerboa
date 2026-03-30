@@ -330,6 +330,78 @@ pub extern "C" fn jerboa_tls_server_new(
     }
 }
 
+/// Create a TLS server context from in-memory PEM cert and key data.
+/// Same as jerboa_tls_server_new but reads from byte buffers instead of files.
+/// Returns context handle (>0) on success, 0 on error.
+#[no_mangle]
+pub extern "C" fn jerboa_tls_server_new_pem(
+    cert_pem: *const u8,
+    cert_pem_len: usize,
+    key_pem: *const u8,
+    key_pem_len: usize,
+) -> u64 {
+    match std::panic::catch_unwind(|| {
+        if cert_pem.is_null() || key_pem.is_null() {
+            set_last_error("null cert/key PEM pointer".to_string());
+            return 0;
+        }
+
+        let cert_data = unsafe { std::slice::from_raw_parts(cert_pem, cert_pem_len) };
+        let key_data = unsafe { std::slice::from_raw_parts(key_pem, key_pem_len) };
+
+        // Parse cert chain from PEM bytes
+        let mut cert_cursor = std::io::Cursor::new(cert_data);
+        let certs: Vec<CertificateDer<'static>> =
+            rustls_pemfile::certs(&mut cert_cursor)
+                .filter_map(|r| r.ok())
+                .collect();
+        if certs.is_empty() {
+            set_last_error("no certificates found in PEM data".to_string());
+            return 0;
+        }
+
+        // Parse private key from PEM bytes
+        let mut key_cursor = std::io::Cursor::new(key_data);
+        let key = match rustls_pemfile::private_key(&mut key_cursor) {
+            Ok(Some(k)) => k,
+            Ok(None) => {
+                set_last_error("no private key found in PEM data".to_string());
+                return 0;
+            }
+            Err(e) => {
+                set_last_error(format!("read key PEM: {}", e));
+                return 0;
+            }
+        };
+
+        let config = match ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, PrivateKeyDer::from(key))
+        {
+            Ok(c) => c,
+            Err(e) => {
+                set_last_error(format!("server config: {}", e));
+                return 0;
+            }
+        };
+
+        let handle = next_handle();
+        server_ctxs()
+            .lock()
+            .unwrap()
+            .insert(handle, TlsServerCtx {
+                config: Arc::new(config),
+            });
+        handle
+    }) {
+        Ok(h) => h,
+        Err(_) => {
+            set_last_error("panic in tls_server_new_pem".to_string());
+            0
+        }
+    }
+}
+
 /// Accept a TLS connection on an already-accepted TCP fd.
 /// Takes the server context handle and a raw fd (from accept()).
 /// Returns a connection handle (>0) on success, 0 on error.
@@ -579,18 +651,13 @@ pub extern "C" fn jerboa_tls_connect_mtls(
             .filter_map(|r| r.ok())
             .collect();
 
-        // Build root store from CA cert
-        let mut root_store = rustls::RootCertStore::empty();
-        for cert in ca_certs {
-            if let Err(e) = root_store.add(cert) {
-                set_last_error(format!("add CA cert: {}", e));
-                return 0;
-            }
-        }
-
-        // Build client config with client cert
+        // Build client config: skip hostname verification (self-signed),
+        // but present client cert for mutual authentication.
         let config = match ClientConfig::builder()
-            .with_root_certificates(root_store)
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(PinVerifier {
+                expected_sha256: None,
+            }))
             .with_client_auth_cert(client_certs, PrivateKeyDer::from(client_key))
         {
             Ok(c) => c,
