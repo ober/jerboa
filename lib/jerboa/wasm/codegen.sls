@@ -477,20 +477,23 @@
   ;;; ========== Expression compiler ==========
 
   ;; Compile let bindings
+  ;; NOTE: Must process bindings left-to-right with explicit sequencing.
+  ;; Chez's map does not guarantee evaluation order, so we use a loop.
   (define (compile-let bindings body ctx)
-    (let* ([names (map car bindings)]
-           [exprs (map cadr bindings)])
-      (let ([binding-code
-             (bv-concat-list
-               (map (lambda (name expr)
-                      (let ([eval-bv (compile-expr expr ctx)]
-                            [idx (context-add-local! ctx name)])
-                        (bv-concat eval-bv
-                          (bytevector wasm-opcode-local-set)
-                          (encode-u32-leb128 idx))))
-                    names exprs))])
-        (bv-concat binding-code
-          (compile-body body ctx)))))
+    (let ([binding-code
+           (let loop ([bs bindings] [acc '()])
+             (if (null? bs)
+               (bv-concat-list (reverse acc))
+               (let* ([name (caar bs)]
+                      [expr (cadar bs)]
+                      [eval-bv (compile-expr expr ctx)]
+                      [idx (context-add-local! ctx name)]
+                      [code (bv-concat eval-bv
+                              (bytevector wasm-opcode-local-set)
+                              (encode-u32-leb128 idx))])
+                 (loop (cdr bs) (cons code acc)))))])
+      (bv-concat binding-code
+        (compile-body body ctx))))
 
   ;; Does the expression produce no value on the stack (void)?
   (define (void-expr? expr)
