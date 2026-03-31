@@ -1096,6 +1096,10 @@
                   (wasm-export-func (symbol->string (car pair)) idx)))))
           funcs))
 
+      ;; Auto-export memory as "memory" (WASM convention for host access)
+      (unless (null? (wasm-module-memories mod))
+        (wasm-module-add-export! mod (wasm-export-memory "memory" 0)))
+
       ;; Process data segments
       (for-each
         (lambda (form)
