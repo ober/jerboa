@@ -1,17 +1,54 @@
 #!chezscheme
 ;;; (jerboa wasm codegen) -- WebAssembly code generation
 ;;;
-;;; Compiles a restricted subset of Scheme to WASM binary format.
-;;; Supported subset: i32-only, no closures, no heap allocation.
+;;; Compiles a Scheme subset to WASM binary format.
+;;; Supports all four numeric types (i32, i64, f32, f64), structured control
+;;; flow (block, loop, br, br_if, while), memory operations, globals,
+;;; tables, data/element/start sections, and import function calls.
 ;;;
-;;; (define (name args...) body)  -> WASM function
-;;; (let ([x e] ...) body)        -> locals
-;;; (if test then else)           -> WASM if/else
-;;; (+ a b), (- a b), etc.        -> i32 arithmetic
-;;; (= a b), (< a b), (> a b)    -> i32 comparisons
-;;; integer literals               -> i32.const
-;;; variable references            -> local.get
-;;; (begin e1 ... en)              -> sequential, result is last
+;;; Source language forms:
+;;;   (define (name params...) body...)           -> function (default i32)
+;;;   (define (name (p type)...) -> rtype body..) -> typed function
+;;;   (define-global name type mut? init)         -> global variable
+;;;   (define-memory min [max])                   -> linear memory
+;;;   (define-table min [max])                    -> function table
+;;;   (define-import mod name (ptypes) (rtypes))  -> import
+;;;   (define-data offset bytes)                  -> data segment
+;;;   (define-element offset funcs)               -> element segment
+;;;   (start name)                                -> start function
+;;;
+;;; Expression forms:
+;;;   42, 3.14                -> numeric constants (int→i32, float→f64)
+;;;   (i32 n), (i64 n)       -> explicit int const
+;;;   (f32 x), (f64 x)       -> explicit float const
+;;;   symbol                  -> local.get
+;;;   (set! sym val)          -> local.set
+;;;   (+ a b), etc.           -> i32 arithmetic (default)
+;;;   (i64.add a b), etc.     -> typed arithmetic
+;;;   (if test then else)     -> if/else
+;;;   (cond cls... [else e])  -> nested ifs
+;;;   (when test body...)     -> if without else
+;;;   (unless test body...)   -> negated when
+;;;   (and a b), (or a b)     -> short-circuit
+;;;   (not a)                 -> i32.eqz
+;;;   (begin e1 ... en)       -> sequential
+;;;   (let ([x e]...) body)   -> locals
+;;;   (block body...)         -> WASM block
+;;;   (loop body...)          -> WASM loop
+;;;   (br depth)              -> branch
+;;;   (br-if cond depth)      -> conditional branch
+;;;   (while test body...)    -> loop with br_if
+;;;   (return val)            -> return
+;;;   (i32.load addr)         -> memory load (also i64/f32/f64 variants)
+;;;   (i32.store addr val)    -> memory store
+;;;   (memory.size)           -> current pages
+;;;   (memory.grow n)         -> grow memory
+;;;   (global.get idx)        -> read global
+;;;   (global.set idx val)    -> write global
+;;;   (select a b cond)       -> conditional select
+;;;   (drop expr)             -> evaluate and discard
+;;;   (call name args...)     -> direct call by name
+;;;   (call-indirect ti args) -> indirect call via table
 
 (library (jerboa wasm codegen)
   (export
@@ -19,9 +56,13 @@
     make-wasm-module wasm-module? wasm-module-encode
     wasm-module-types wasm-module-imports wasm-module-functions
     wasm-module-exports wasm-module-memories wasm-module-globals
+    wasm-module-tables wasm-module-data-segments wasm-module-elements
+    wasm-module-start
     wasm-module-add-type! wasm-module-add-import!
     wasm-module-add-function! wasm-module-add-export!
     wasm-module-add-memory! wasm-module-add-global!
+    wasm-module-add-table! wasm-module-add-data!
+    wasm-module-add-element! wasm-module-set-start!
     ;; WASM function
     make-wasm-func wasm-func? wasm-func-locals wasm-func-body
     ;; WASM type (function signature)
@@ -30,12 +71,13 @@
     make-wasm-import wasm-import-module wasm-import-name wasm-import-desc
     ;; WASM export descriptor
     make-wasm-export wasm-export-name wasm-export-kind wasm-export-index
-    wasm-export-func wasm-export-memory
+    wasm-export-func wasm-export-memory wasm-export-table wasm-export-global
     ;; Compilation
     compile-expr compile-program scheme->wasm-type
     ;; Compile context
     make-compile-context context-add-local! context-local-index
-    context-add-func! context-func-index)
+    context-add-func! context-func-index
+    context-block-depth context-push-block! context-pop-block!)
 
   (import (except (chezscheme) compile-program)
           (jerboa wasm format))
@@ -63,6 +105,12 @@
   (define (wasm-export-memory name index)
     (make-wasm-export name 2 index))  ; kind 2 = memory
 
+  (define (wasm-export-table name index)
+    (make-wasm-export name 1 index))  ; kind 1 = table
+
+  (define (wasm-export-global name index)
+    (make-wasm-export name 3 index))  ; kind 3 = global
+
   ;;; ========== WASM function ==========
 
   (define-record-type wasm-func
@@ -72,14 +120,18 @@
 
   (define-record-type wasm-module
     (fields
-      (mutable types)      ; list of wasm-type
-      (mutable imports)    ; list of wasm-import
-      (mutable functions)  ; list of (type-index . wasm-func)
-      (mutable exports)    ; list of wasm-export
-      (mutable memories)   ; list of (min . max-or-#f)
-      (mutable globals))   ; list of (type mut? init-expr)
+      (mutable types)          ; list of wasm-type
+      (mutable imports)        ; list of wasm-import
+      (mutable functions)      ; list of (type-index . wasm-func)
+      (mutable exports)        ; list of wasm-export
+      (mutable memories)       ; list of (min . max-or-#f)
+      (mutable globals)        ; list of (type mut? init-expr)
+      (mutable tables)         ; list of (type min . max-or-#f)
+      (mutable data-segments)  ; list of (mem-idx offset-expr bytes)
+      (mutable elements)       ; list of (table-idx offset-expr func-indices)
+      (mutable start))         ; #f or function index
     (protocol (lambda (new)
-      (lambda () (new '() '() '() '() '() '())))))
+      (lambda () (new '() '() '() '() '() '() '() '() '() #f)))))
 
   (define (wasm-module-add-type! mod type)
     (wasm-module-types-set! mod (append (wasm-module-types mod) (list type))))
@@ -102,9 +154,24 @@
     (wasm-module-globals-set! mod
       (append (wasm-module-globals mod) (list (list type mut? init-bv)))))
 
+  (define (wasm-module-add-table! mod elem-type min-elems max-elems)
+    (wasm-module-tables-set! mod
+      (append (wasm-module-tables mod) (list (list elem-type min-elems max-elems)))))
+
+  (define (wasm-module-add-data! mod mem-idx offset-bv data-bv)
+    (wasm-module-data-segments-set! mod
+      (append (wasm-module-data-segments mod) (list (list mem-idx offset-bv data-bv)))))
+
+  (define (wasm-module-add-element! mod table-idx offset-bv func-indices)
+    (wasm-module-elements-set! mod
+      (append (wasm-module-elements mod)
+              (list (list table-idx offset-bv func-indices)))))
+
+  (define (wasm-module-set-start! mod func-idx)
+    (wasm-module-start-set! mod func-idx))
+
   ;;; ========== Binary encoding helpers ==========
 
-  ;; Concatenate list of bytevectors
   (define (bv-concat . bvs)
     (let ([total (apply + (map bytevector-length bvs))])
       (let ([result (make-bytevector total)])
@@ -117,39 +184,28 @@
               (loop (cdr bvs) (+ offset len))))))))
 
   (define (bv-concat-list lst)
-    (apply bv-concat lst))
+    (if (null? lst) (bytevector) (apply bv-concat lst)))
 
-  ;; Encode a vector (list of items) with count prefix
   (define (encode-vec items encode-item)
     (let ([encoded (map encode-item items)])
-      (bv-concat
-        (encode-u32-leb128 (length items))
-        (bv-concat-list encoded))))
+      (bv-concat (encode-u32-leb128 (length items))
+                 (bv-concat-list encoded))))
 
-  ;; Encode a WASM section: section-id + length + content
   (define (encode-section id content)
     (let ([len-bv (encode-u32-leb128 (bytevector-length content))])
-      (bv-concat
-        (bytevector id)
-        len-bv
-        content)))
+      (bv-concat (bytevector id) len-bv content)))
 
-  ;;; ========== Type section encoding ==========
+  ;;; ========== Section encoding ==========
 
   (define (encode-wasm-type type)
-    ;; func type: 0x60 params results
     (bv-concat
       (bytevector #x60)
       (encode-vec (wasm-type-params type) (lambda (t) (bytevector t)))
       (encode-vec (wasm-type-results type) (lambda (t) (bytevector t)))))
 
   (define (encode-type-section types)
-    (if (null? types)
-      (bytevector)
-      (encode-section wasm-section-type
-        (encode-vec types encode-wasm-type))))
-
-  ;;; ========== Import section encoding ==========
+    (if (null? types) (bytevector)
+      (encode-section wasm-section-type (encode-vec types encode-wasm-type))))
 
   (define (encode-wasm-import imp)
     (let ([desc (wasm-import-desc imp)])
@@ -159,55 +215,59 @@
         (cond
           [(and (pair? desc) (= (car desc) 0))
            (bv-concat (bytevector #x00) (encode-u32-leb128 (cdr desc)))]
+          [(and (pair? desc) (= (car desc) 1))
+           ;; table import: type + limits
+           (let ([tbl (cdr desc)])
+             (bv-concat (bytevector #x01 (car tbl))
+                        (encode-limits (cadr tbl) (caddr tbl))))]
+          [(and (pair? desc) (= (car desc) 2))
+           ;; memory import: limits
+           (let ([mem (cdr desc)])
+             (bv-concat (bytevector #x02) (encode-limits (car mem) (cadr mem))))]
+          [(and (pair? desc) (= (car desc) 3))
+           ;; global import: type + mut
+           (let ([gl (cdr desc)])
+             (bv-concat (bytevector #x03) (bytevector (car gl) (if (cadr gl) 1 0))))]
           [else
            (error 'encode-wasm-import "unsupported import descriptor" desc)]))))
 
-  (define (encode-import-section imports)
-    (if (null? imports)
-      (bytevector)
-      (encode-section wasm-section-import
-        (encode-vec imports encode-wasm-import))))
+  (define (encode-limits min max)
+    (if max
+      (bv-concat (bytevector #x01) (encode-u32-leb128 min) (encode-u32-leb128 max))
+      (bv-concat (bytevector #x00) (encode-u32-leb128 min))))
 
-  ;;; ========== Function section encoding ==========
+  (define (encode-import-section imports)
+    (if (null? imports) (bytevector)
+      (encode-section wasm-section-import (encode-vec imports encode-wasm-import))))
 
   (define (encode-function-section functions)
-    (if (null? functions)
-      (bytevector)
+    (if (null? functions) (bytevector)
       (encode-section wasm-section-function
-        (encode-vec functions
-          (lambda (f) (encode-u32-leb128 (car f)))))))
+        (encode-vec functions (lambda (f) (encode-u32-leb128 (car f)))))))
 
-  ;;; ========== Memory section encoding ==========
+  (define (encode-table-section tables)
+    (if (null? tables) (bytevector)
+      (encode-section wasm-section-table
+        (encode-vec tables
+          (lambda (t)
+            (let ([elem-type (car t)] [min (cadr t)] [max (caddr t)])
+              (bv-concat (bytevector elem-type) (encode-limits min max))))))))
 
   (define (encode-memory-section memories)
-    (if (null? memories)
-      (bytevector)
+    (if (null? memories) (bytevector)
       (encode-section wasm-section-memory
         (encode-vec memories
-          (lambda (m)
-            (let ([min (car m)] [max (cdr m)])
-              (if max
-                (bv-concat (bytevector #x01)
-                           (encode-u32-leb128 min)
-                           (encode-u32-leb128 max))
-                (bv-concat (bytevector #x00)
-                           (encode-u32-leb128 min)))))))))
-
-  ;;; ========== Global section encoding ==========
+          (lambda (m) (encode-limits (car m) (cdr m)))))))
 
   (define (encode-global-section globals)
-    (if (null? globals)
-      (bytevector)
+    (if (null? globals) (bytevector)
       (encode-section wasm-section-global
         (encode-vec globals
           (lambda (g)
             (let ([type (car g)] [mut? (cadr g)] [init (caddr g)])
-              (bv-concat
-                (bytevector type (if mut? 1 0))
-                init
-                (bytevector wasm-opcode-end))))))))
-
-  ;;; ========== Export section encoding ==========
+              (bv-concat (bytevector type (if mut? 1 0))
+                         init
+                         (bytevector wasm-opcode-end))))))))
 
   (define (encode-wasm-export exp)
     (bv-concat
@@ -216,12 +276,25 @@
       (encode-u32-leb128 (wasm-export-index exp))))
 
   (define (encode-export-section exports)
-    (if (null? exports)
-      (bytevector)
-      (encode-section wasm-section-export
-        (encode-vec exports encode-wasm-export))))
+    (if (null? exports) (bytevector)
+      (encode-section wasm-section-export (encode-vec exports encode-wasm-export))))
 
-  ;;; ========== Code section encoding ==========
+  (define (encode-start-section start-idx)
+    (if (not start-idx) (bytevector)
+      (encode-section wasm-section-start (encode-u32-leb128 start-idx))))
+
+  (define (encode-element-section elements)
+    (if (null? elements) (bytevector)
+      (encode-section wasm-section-element
+        (encode-vec elements
+          (lambda (e)
+            (let ([tidx (car e)] [offset-bv (cadr e)] [func-idxs (caddr e)])
+              (bv-concat
+                (encode-u32-leb128 tidx)
+                offset-bv
+                (bytevector wasm-opcode-end)
+                (encode-vec func-idxs
+                  (lambda (fi) (encode-u32-leb128 fi))))))))))
 
   (define (encode-locals locals)
     (if (null? locals)
@@ -232,8 +305,7 @@
            (let ([final-groups (reverse (cons (cons count cur-type) groups))])
              (encode-vec final-groups
                (lambda (g)
-                 (bv-concat (encode-u32-leb128 (car g))
-                            (bytevector (cdr g))))))]
+                 (bv-concat (encode-u32-leb128 (car g)) (bytevector (cdr g))))))]
           [(= (car locals) cur-type)
            (loop (cdr locals) groups cur-type (+ count 1))]
           [else
@@ -250,11 +322,22 @@
       (bv-concat size-bv content)))
 
   (define (encode-code-section functions)
-    (if (null? functions)
-      (bytevector)
+    (if (null? functions) (bytevector)
       (encode-section wasm-section-code
-        (encode-vec functions
-          (lambda (f) (encode-func-body (cdr f)))))))
+        (encode-vec functions (lambda (f) (encode-func-body (cdr f)))))))
+
+  (define (encode-data-section data-segments)
+    (if (null? data-segments) (bytevector)
+      (encode-section wasm-section-data
+        (encode-vec data-segments
+          (lambda (d)
+            (let ([midx (car d)] [offset-bv (cadr d)] [data (caddr d)])
+              (bv-concat
+                (encode-u32-leb128 midx)
+                offset-bv
+                (bytevector wasm-opcode-end)
+                (encode-u32-leb128 (bytevector-length data))
+                data)))))))
 
   ;;; ========== Module encoding ==========
 
@@ -265,43 +348,54 @@
       (encode-type-section (wasm-module-types mod))
       (encode-import-section (wasm-module-imports mod))
       (encode-function-section (wasm-module-functions mod))
+      (encode-table-section (wasm-module-tables mod))
       (encode-memory-section (wasm-module-memories mod))
       (encode-global-section (wasm-module-globals mod))
       (encode-export-section (wasm-module-exports mod))
-      (encode-code-section (wasm-module-functions mod))))
+      (encode-start-section (wasm-module-start mod))
+      (encode-element-section (wasm-module-elements mod))
+      (encode-code-section (wasm-module-functions mod))
+      (encode-data-section (wasm-module-data-segments mod))))
 
   ;;; ========== Type conversion ==========
 
   (define (scheme->wasm-type sym)
     (case sym
       [(i32 integer fixnum) wasm-type-i32]
-      [(i64) wasm-type-i64]
-      [(f32 float single) wasm-type-f32]
-      [(f64 double) wasm-type-f64]
+      [(i64 long)           wasm-type-i64]
+      [(f32 float single)   wasm-type-f32]
+      [(f64 double)         wasm-type-f64]
+      [(void)               wasm-type-void]
       [else wasm-type-i32]))
 
   ;;; ========== Compile context ==========
 
   (define-record-type compile-context
     (fields
-      (mutable locals)
+      (mutable locals)       ; alist: (name . (index . type))
       (mutable local-count)
-      (mutable funcs))
+      (mutable funcs)        ; alist: (name . index)
+      (mutable blocks)       ; list of block-kind symbols for br depth
+      (mutable return-type)) ; wasm-type for current function
     (protocol (lambda (new)
-      (lambda () (new '() 0 '())))))
+      (lambda () (new '() 0 '() '() wasm-type-i32)))))
 
-  (define (context-add-local! ctx name)
-    (let ([idx (compile-context-local-count ctx)])
+  (define (context-add-local! ctx name . type-args)
+    (let ([type (if (null? type-args) wasm-type-i32 (car type-args))]
+          [idx (compile-context-local-count ctx)])
       (compile-context-locals-set! ctx
-        (cons (cons name idx) (compile-context-locals ctx)))
+        (cons (cons name (cons idx type)) (compile-context-locals ctx)))
       (compile-context-local-count-set! ctx (+ idx 1))
       idx))
 
   (define (context-local-index ctx name)
     (let ([entry (assq name (compile-context-locals ctx))])
-      (if entry
-        (cdr entry)
+      (if entry (cadr entry)
         (error 'context-local-index "unbound variable" name))))
+
+  (define (context-local-type ctx name)
+    (let ([entry (assq name (compile-context-locals ctx))])
+      (if entry (cddr entry) wasm-type-i32)))
 
   (define (context-add-func! ctx name)
     (let ([idx (length (compile-context-funcs ctx))])
@@ -311,95 +405,519 @@
 
   (define (context-func-index ctx name)
     (let ([entry (assq name (compile-context-funcs ctx))])
-      (if entry
-        (cdr entry)
+      (if entry (cdr entry)
         (error 'context-func-index "unbound function" name))))
+
+  (define (context-block-depth ctx)
+    (length (compile-context-blocks ctx)))
+
+  (define (context-push-block! ctx kind)
+    (compile-context-blocks-set! ctx
+      (cons kind (compile-context-blocks ctx))))
+
+  (define (context-pop-block! ctx)
+    (compile-context-blocks-set! ctx
+      (cdr (compile-context-blocks ctx))))
 
   ;;; ========== Expression compiler ==========
 
-  ;; Compile a let binding sequence into the given context
+  ;; Compile let bindings
   (define (compile-let bindings body ctx)
     (let* ([names (map car bindings)]
            [exprs (map cadr bindings)])
-      ;; Evaluate each expr then store in new local
       (let ([binding-code
              (bv-concat-list
                (map (lambda (name expr)
                       (let ([eval-bv (compile-expr expr ctx)]
                             [idx (context-add-local! ctx name)])
-                        (bv-concat
-                          eval-bv
+                        (bv-concat eval-bv
                           (bytevector wasm-opcode-local-set)
                           (encode-u32-leb128 idx))))
                     names exprs))])
-        (bv-concat
-          binding-code
-          (bv-concat-list (map (lambda (e) (compile-expr e ctx)) body))))))
+        (bv-concat binding-code
+          (compile-body body ctx)))))
 
-  ;; Binary operation: compile both operands and emit opcode
+  ;; Does the expression produce no value on the stack (void)?
+  (define (void-expr? expr)
+    (and (pair? expr)
+         (or (memq (car expr)
+                   '(set! while when unless i32.store i64.store f32.store f64.store
+                     i32.store8 i32.store16 global.set drop))
+             ;; let/let*/begin whose last body expr is void
+             (and (memq (car expr) '(let let* begin))
+                  (let ([body (case (car expr)
+                                [(begin) (cdr expr)]
+                                [(let let*) (cddr expr)])])
+                    (and (pair? body)
+                         (void-expr? (car (last-pair body)))))))))
+
+  ;; Compile a body (list of expressions, result is last)
+  (define (compile-body exprs ctx)
+    (cond
+      [(null? exprs) (bytevector wasm-opcode-nop)]
+      [(null? (cdr exprs)) (compile-expr (car exprs) ctx)]
+      [else
+       (bv-concat-list
+         (let loop ([es exprs])
+           (if (null? (cdr es))
+             (list (compile-expr (car es) ctx))
+             (cons (let ([code (compile-expr (car es) ctx)])
+                     (if (void-expr? (car es))
+                       code
+                       (bv-concat code (bytevector wasm-opcode-drop))))
+                   (loop (cdr es))))))]))
+
+  ;; Binary operation
   (define (compile-binop args ctx opcode)
     (bv-concat
       (compile-expr (car args) ctx)
       (compile-expr (cadr args) ctx)
       (bytevector opcode)))
 
+  ;; Unary operation
+  (define (compile-unop args ctx opcode)
+    (bv-concat
+      (compile-expr (car args) ctx)
+      (bytevector opcode)))
+
+  ;; Memory load: (type.load addr) or (type.load offset align addr)
+  (define (compile-mem-load args ctx opcode)
+    (let ([align 2] [offset 0] [addr-expr (car args)])
+      (bv-concat
+        (compile-expr addr-expr ctx)
+        (bytevector opcode)
+        (encode-u32-leb128 align)
+        (encode-u32-leb128 offset))))
+
+  ;; Memory store: (type.store addr val)
+  (define (compile-mem-store args ctx opcode)
+    (let ([align 2] [offset 0])
+      (bv-concat
+        (compile-expr (car args) ctx)
+        (compile-expr (cadr args) ctx)
+        (bytevector opcode)
+        (encode-u32-leb128 align)
+        (encode-u32-leb128 offset))))
+
   ;; compile-expr: Scheme expression -> bytevector of WASM instructions
   (define (compile-expr expr ctx)
     (cond
       ;; Integer literal -> i32.const
-      [(integer? expr)
-       (bv-concat
-         (bytevector wasm-opcode-i32-const)
-         (encode-i32-leb128 expr))]
+      [(and (integer? expr) (exact? expr))
+       (bv-concat (bytevector wasm-opcode-i32-const)
+                  (encode-i32-leb128 expr))]
+
+      ;; Float literal -> f64.const
+      [(flonum? expr)
+       (bv-concat (bytevector wasm-opcode-f64-const)
+                  (encode-f64 expr))]
+
+      ;; Boolean -> i32.const 0/1
+      [(boolean? expr)
+       (bv-concat (bytevector wasm-opcode-i32-const)
+                  (encode-i32-leb128 (if expr 1 0)))]
 
       ;; Symbol -> local.get
       [(symbol? expr)
-       (bv-concat
-         (bytevector wasm-opcode-local-get)
-         (encode-u32-leb128 (context-local-index ctx expr)))]
+       (bv-concat (bytevector wasm-opcode-local-get)
+                  (encode-u32-leb128 (context-local-index ctx expr)))]
 
       ;; Compound forms
       [(pair? expr)
        (let ([head (car expr)] [args (cdr expr)])
          (case head
-           ;; (begin e1 ... en)
+           ;; -- Explicit typed constants --
+           [(i32)
+            (bv-concat (bytevector wasm-opcode-i32-const)
+                       (encode-i32-leb128 (car args)))]
+           [(i64)
+            (bv-concat (bytevector wasm-opcode-i64-const)
+                       (encode-i64-leb128 (car args)))]
+           [(f32)
+            (bv-concat (bytevector wasm-opcode-f32-const)
+                       (encode-f32 (exact->inexact (car args))))]
+           [(f64)
+            (bv-concat (bytevector wasm-opcode-f64-const)
+                       (encode-f64 (exact->inexact (car args))))]
+
+           ;; -- Control flow --
            [(begin)
             (if (null? args)
               (bytevector wasm-opcode-nop)
-              (bv-concat-list (map (lambda (e) (compile-expr e ctx)) args)))]
+              (compile-body args ctx))]
 
-           ;; (if test then else)
            [(if)
             (let ([test (car args)]
                   [then (cadr args)]
-                  [else-part (if (null? (cddr args)) 0 (caddr args))])
+                  [else-part (if (null? (cddr args)) #f (caddr args))])
+              (if else-part
+                (bv-concat
+                  (compile-expr test ctx)
+                  (bytevector wasm-opcode-if wasm-type-i32)
+                  (compile-expr then ctx)
+                  (bytevector wasm-opcode-else)
+                  (compile-expr else-part ctx)
+                  (bytevector wasm-opcode-end))
+                ;; No else: void block type
+                (bv-concat
+                  (compile-expr test ctx)
+                  (bytevector wasm-opcode-if wasm-type-void)
+                  (compile-expr then ctx)
+                  (bytevector wasm-opcode-end))))]
+
+           [(cond)
+            (compile-cond args ctx)]
+
+           [(when)
+            (bv-concat
+              (compile-expr (car args) ctx)
+              (bytevector wasm-opcode-if wasm-type-void)
+              (compile-body (cdr args) ctx)
+              (bytevector wasm-opcode-end))]
+
+           [(unless)
+            (bv-concat
+              (compile-expr (car args) ctx)
+              (bytevector wasm-opcode-i32-eqz)
+              (bytevector wasm-opcode-if wasm-type-void)
+              (compile-body (cdr args) ctx)
+              (bytevector wasm-opcode-end))]
+
+           [(and)
+            (if (null? args)
+              (bv-concat (bytevector wasm-opcode-i32-const)
+                         (encode-i32-leb128 1))
+              (if (null? (cdr args))
+                (compile-expr (car args) ctx)
+                ;; (and a b) → (if a b 0)
+                (bv-concat
+                  (compile-expr (car args) ctx)
+                  (bytevector wasm-opcode-if wasm-type-i32)
+                  (compile-expr (cons 'and (cdr args)) ctx)
+                  (bytevector wasm-opcode-else)
+                  (bytevector wasm-opcode-i32-const) (encode-i32-leb128 0)
+                  (bytevector wasm-opcode-end))))]
+
+           [(or)
+            (if (null? args)
+              (bv-concat (bytevector wasm-opcode-i32-const)
+                         (encode-i32-leb128 0))
+              (if (null? (cdr args))
+                (compile-expr (car args) ctx)
+                ;; (or a b) → (if a 1 b)
+                (bv-concat
+                  (compile-expr (car args) ctx)
+                  (bytevector wasm-opcode-if wasm-type-i32)
+                  (bytevector wasm-opcode-i32-const) (encode-i32-leb128 1)
+                  (bytevector wasm-opcode-else)
+                  (compile-expr (cons 'or (cdr args)) ctx)
+                  (bytevector wasm-opcode-end))))]
+
+           [(not zero?)
+            (compile-unop args ctx wasm-opcode-i32-eqz)]
+
+           ;; -- Let bindings --
+           [(let)  (compile-let (car args) (cdr args) ctx)]
+           [(let*)
+            (if (null? (car args))
+              (compile-body (cdr args) ctx)
+              (compile-let (list (caar args))
+                (list (cons 'let* (cons (cdar args) (cdr args)))) ctx))]
+
+           ;; -- Set! --
+           [(set!)
+            (let ([name (car args)] [val (cadr args)])
+              (bv-concat (compile-expr val ctx)
+                (bytevector wasm-opcode-local-set)
+                (encode-u32-leb128 (context-local-index ctx name))))]
+
+           ;; -- Structured control --
+           [(block)
+            (context-push-block! ctx 'block)
+            (let ([body-bv (compile-body args ctx)])
+              (context-pop-block! ctx)
               (bv-concat
-                (compile-expr test ctx)
-                (bytevector wasm-opcode-if wasm-type-i32)
-                (compile-expr then ctx)
-                (bytevector wasm-opcode-else)
-                (compile-expr else-part ctx)
+                (bytevector wasm-opcode-block wasm-type-void)
+                body-bv
                 (bytevector wasm-opcode-end)))]
 
-           ;; (let ([x e] ...) body)
-           [(let)
-            (compile-let (car args) (cdr args) ctx)]
+           [(loop)
+            (context-push-block! ctx 'loop)
+            (let ([body-bv (compile-body args ctx)])
+              (context-pop-block! ctx)
+              (bv-concat
+                (bytevector wasm-opcode-loop wasm-type-void)
+                body-bv
+                (bytevector wasm-opcode-end)))]
 
-           ;; Arithmetic
+           [(br)
+            (bv-concat
+              (bytevector wasm-opcode-br)
+              (encode-u32-leb128 (car args)))]
+
+           [(br-if)
+            (bv-concat
+              (compile-expr (car args) ctx)
+              (bytevector wasm-opcode-br-if)
+              (encode-u32-leb128 (cadr args)))]
+
+           [(while)
+            ;; (while test body...) →
+            ;; (block (loop (br_if (eqz test) 1) body... (br 0)))
+            (context-push-block! ctx 'block)
+            (context-push-block! ctx 'loop)
+            (let ([test-bv (compile-expr (car args) ctx)]
+                  [body-bv (compile-body (cdr args) ctx)])
+              (context-pop-block! ctx)
+              (context-pop-block! ctx)
+              (bv-concat
+                (bytevector wasm-opcode-block wasm-type-void)
+                (bytevector wasm-opcode-loop wasm-type-void)
+                ;; Test: if false, break outer block
+                test-bv
+                (bytevector wasm-opcode-i32-eqz)
+                (bytevector wasm-opcode-br-if)
+                (encode-u32-leb128 1)  ; br 1 = exit outer block
+                ;; Body
+                body-bv
+                ;; Continue loop
+                (bytevector wasm-opcode-br)
+                (encode-u32-leb128 0)  ; br 0 = continue loop
+                (bytevector wasm-opcode-end)   ; end loop
+                (bytevector wasm-opcode-end)))] ; end block
+
+           [(return)
+            (if (null? args)
+              (bytevector wasm-opcode-return)
+              (bv-concat (compile-expr (car args) ctx)
+                         (bytevector wasm-opcode-return)))]
+
+           [(unreachable)
+            (bytevector wasm-opcode-unreachable)]
+
+           ;; -- i32 arithmetic (default for Scheme ops) --
            [(+)        (compile-binop args ctx wasm-opcode-i32-add)]
-           [(-)        (compile-binop args ctx wasm-opcode-i32-sub)]
+           [(-)
+            (if (null? (cdr args))
+              ;; Unary minus: (- x) → (0 - x)
+              (bv-concat
+                (bytevector wasm-opcode-i32-const) (encode-i32-leb128 0)
+                (compile-expr (car args) ctx)
+                (bytevector wasm-opcode-i32-sub))
+              (compile-binop args ctx wasm-opcode-i32-sub))]
            [(*)        (compile-binop args ctx wasm-opcode-i32-mul)]
            [(quotient) (compile-binop args ctx wasm-opcode-i32-div-s)]
            [(remainder)(compile-binop args ctx wasm-opcode-i32-rem-s)]
 
-           ;; Comparisons
-           [(=)  (compile-binop args ctx wasm-opcode-i32-eq)]
-           [(<)  (compile-binop args ctx wasm-opcode-i32-lt-s)]
-           [(>)  (compile-binop args ctx wasm-opcode-i32-gt-s)]
-           [(<=) (compile-binop args ctx wasm-opcode-i32-le-s)]
-           [(>=) (compile-binop args ctx wasm-opcode-i32-ge-s)]
+           ;; -- i32 bitwise --
+           [(bitwise-and logand)  (compile-binop args ctx wasm-opcode-i32-and)]
+           [(bitwise-or  logor)   (compile-binop args ctx wasm-opcode-i32-or)]
+           [(bitwise-xor logxor)  (compile-binop args ctx wasm-opcode-i32-xor)]
+           [(shl)                  (compile-binop args ctx wasm-opcode-i32-shl)]
+           [(shr)                  (compile-binop args ctx wasm-opcode-i32-shr-s)]
+           [(shr-u)                (compile-binop args ctx wasm-opcode-i32-shr-u)]
+           [(rotl)                 (compile-binop args ctx wasm-opcode-i32-rotl)]
+           [(rotr)                 (compile-binop args ctx wasm-opcode-i32-rotr)]
+           [(clz)                  (compile-unop args ctx wasm-opcode-i32-clz)]
+           [(ctz)                  (compile-unop args ctx wasm-opcode-i32-ctz)]
+           [(popcnt)               (compile-unop args ctx wasm-opcode-i32-popcnt)]
 
-           ;; Function call (symbol in head position)
+           ;; -- i32 comparisons --
+           [(=  i32.eq)  (compile-binop args ctx wasm-opcode-i32-eq)]
+           [(!= i32.ne)  (compile-binop args ctx wasm-opcode-i32-ne)]
+           [(<)          (compile-binop args ctx wasm-opcode-i32-lt-s)]
+           [(>)          (compile-binop args ctx wasm-opcode-i32-gt-s)]
+           [(<=)         (compile-binop args ctx wasm-opcode-i32-le-s)]
+           [(>=)         (compile-binop args ctx wasm-opcode-i32-ge-s)]
+
+           ;; -- Explicit typed i32 ops --
+           [(i32.add)    (compile-binop args ctx wasm-opcode-i32-add)]
+           [(i32.sub)    (compile-binop args ctx wasm-opcode-i32-sub)]
+           [(i32.mul)    (compile-binop args ctx wasm-opcode-i32-mul)]
+           [(i32.div_s)  (compile-binop args ctx wasm-opcode-i32-div-s)]
+           [(i32.div_u)  (compile-binop args ctx wasm-opcode-i32-div-u)]
+           [(i32.rem_s)  (compile-binop args ctx wasm-opcode-i32-rem-s)]
+           [(i32.rem_u)  (compile-binop args ctx wasm-opcode-i32-rem-u)]
+           [(i32.and)    (compile-binop args ctx wasm-opcode-i32-and)]
+           [(i32.or)     (compile-binop args ctx wasm-opcode-i32-or)]
+           [(i32.xor)    (compile-binop args ctx wasm-opcode-i32-xor)]
+           [(i32.shl)    (compile-binop args ctx wasm-opcode-i32-shl)]
+           [(i32.shr_s)  (compile-binop args ctx wasm-opcode-i32-shr-s)]
+           [(i32.shr_u)  (compile-binop args ctx wasm-opcode-i32-shr-u)]
+           [(i32.rotl)   (compile-binop args ctx wasm-opcode-i32-rotl)]
+           [(i32.rotr)   (compile-binop args ctx wasm-opcode-i32-rotr)]
+           [(i32.clz)    (compile-unop args ctx wasm-opcode-i32-clz)]
+           [(i32.ctz)    (compile-unop args ctx wasm-opcode-i32-ctz)]
+           [(i32.popcnt) (compile-unop args ctx wasm-opcode-i32-popcnt)]
+           [(i32.eqz)    (compile-unop args ctx wasm-opcode-i32-eqz)]
+           [(i32.lt_s)   (compile-binop args ctx wasm-opcode-i32-lt-s)]
+           [(i32.lt_u)   (compile-binop args ctx wasm-opcode-i32-lt-u)]
+           [(i32.gt_s)   (compile-binop args ctx wasm-opcode-i32-gt-s)]
+           [(i32.gt_u)   (compile-binop args ctx wasm-opcode-i32-gt-u)]
+           [(i32.le_s)   (compile-binop args ctx wasm-opcode-i32-le-s)]
+           [(i32.le_u)   (compile-binop args ctx wasm-opcode-i32-le-u)]
+           [(i32.ge_s)   (compile-binop args ctx wasm-opcode-i32-ge-s)]
+           [(i32.ge_u)   (compile-binop args ctx wasm-opcode-i32-ge-u)]
+           [(i32.wrap_i64)    (compile-unop args ctx wasm-opcode-i32-wrap-i64)]
+
+           ;; -- i64 ops --
+           [(i64.add)    (compile-binop args ctx wasm-opcode-i64-add)]
+           [(i64.sub)    (compile-binop args ctx wasm-opcode-i64-sub)]
+           [(i64.mul)    (compile-binop args ctx wasm-opcode-i64-mul)]
+           [(i64.div_s)  (compile-binop args ctx wasm-opcode-i64-div-s)]
+           [(i64.div_u)  (compile-binop args ctx wasm-opcode-i64-div-u)]
+           [(i64.rem_s)  (compile-binop args ctx wasm-opcode-i64-rem-s)]
+           [(i64.rem_u)  (compile-binop args ctx wasm-opcode-i64-rem-u)]
+           [(i64.and)    (compile-binop args ctx wasm-opcode-i64-and)]
+           [(i64.or)     (compile-binop args ctx wasm-opcode-i64-or)]
+           [(i64.xor)    (compile-binop args ctx wasm-opcode-i64-xor)]
+           [(i64.shl)    (compile-binop args ctx wasm-opcode-i64-shl)]
+           [(i64.shr_s)  (compile-binop args ctx wasm-opcode-i64-shr-s)]
+           [(i64.shr_u)  (compile-binop args ctx wasm-opcode-i64-shr-u)]
+           [(i64.rotl)   (compile-binop args ctx wasm-opcode-i64-rotl)]
+           [(i64.rotr)   (compile-binop args ctx wasm-opcode-i64-rotr)]
+           [(i64.clz)    (compile-unop args ctx wasm-opcode-i64-clz)]
+           [(i64.ctz)    (compile-unop args ctx wasm-opcode-i64-ctz)]
+           [(i64.popcnt) (compile-unop args ctx wasm-opcode-i64-popcnt)]
+           [(i64.eqz)    (compile-unop args ctx wasm-opcode-i64-eqz)]
+           [(i64.eq)     (compile-binop args ctx wasm-opcode-i64-eq)]
+           [(i64.ne)     (compile-binop args ctx wasm-opcode-i64-ne)]
+           [(i64.lt_s)   (compile-binop args ctx wasm-opcode-i64-lt-s)]
+           [(i64.lt_u)   (compile-binop args ctx wasm-opcode-i64-lt-u)]
+           [(i64.gt_s)   (compile-binop args ctx wasm-opcode-i64-gt-s)]
+           [(i64.gt_u)   (compile-binop args ctx wasm-opcode-i64-gt-u)]
+           [(i64.le_s)   (compile-binop args ctx wasm-opcode-i64-le-s)]
+           [(i64.le_u)   (compile-binop args ctx wasm-opcode-i64-le-u)]
+           [(i64.ge_s)   (compile-binop args ctx wasm-opcode-i64-ge-s)]
+           [(i64.ge_u)   (compile-binop args ctx wasm-opcode-i64-ge-u)]
+           [(i64.extend_i32_s) (compile-unop args ctx wasm-opcode-i64-extend-i32-s)]
+           [(i64.extend_i32_u) (compile-unop args ctx wasm-opcode-i64-extend-i32-u)]
+
+           ;; -- f32 ops --
+           [(f32.add)    (compile-binop args ctx wasm-opcode-f32-add)]
+           [(f32.sub)    (compile-binop args ctx wasm-opcode-f32-sub)]
+           [(f32.mul)    (compile-binop args ctx wasm-opcode-f32-mul)]
+           [(f32.div)    (compile-binop args ctx wasm-opcode-f32-div)]
+           [(f32.min)    (compile-binop args ctx wasm-opcode-f32-min)]
+           [(f32.max)    (compile-binop args ctx wasm-opcode-f32-max)]
+           [(f32.abs)    (compile-unop args ctx wasm-opcode-f32-abs)]
+           [(f32.neg)    (compile-unop args ctx wasm-opcode-f32-neg)]
+           [(f32.sqrt)   (compile-unop args ctx wasm-opcode-f32-sqrt)]
+           [(f32.ceil)   (compile-unop args ctx wasm-opcode-f32-ceil)]
+           [(f32.floor)  (compile-unop args ctx wasm-opcode-f32-floor)]
+           [(f32.trunc)  (compile-unop args ctx wasm-opcode-f32-trunc)]
+           [(f32.nearest)(compile-unop args ctx wasm-opcode-f32-nearest)]
+           [(f32.copysign)(compile-binop args ctx wasm-opcode-f32-copysign)]
+           [(f32.eq)     (compile-binop args ctx wasm-opcode-f32-eq)]
+           [(f32.ne)     (compile-binop args ctx wasm-opcode-f32-ne)]
+           [(f32.lt)     (compile-binop args ctx wasm-opcode-f32-lt)]
+           [(f32.gt)     (compile-binop args ctx wasm-opcode-f32-gt)]
+           [(f32.le)     (compile-binop args ctx wasm-opcode-f32-le)]
+           [(f32.ge)     (compile-binop args ctx wasm-opcode-f32-ge)]
+           [(f32.demote_f64)     (compile-unop args ctx wasm-opcode-f32-demote-f64)]
+           [(f32.convert_i32_s)  (compile-unop args ctx wasm-opcode-f32-convert-i32-s)]
+           [(f32.convert_i32_u)  (compile-unop args ctx wasm-opcode-f32-convert-i32-u)]
+           [(f32.convert_i64_s)  (compile-unop args ctx wasm-opcode-f32-convert-i64-s)]
+           [(f32.convert_i64_u)  (compile-unop args ctx wasm-opcode-f32-convert-i64-u)]
+
+           ;; -- f64 ops --
+           [(f64.add)    (compile-binop args ctx wasm-opcode-f64-add)]
+           [(f64.sub)    (compile-binop args ctx wasm-opcode-f64-sub)]
+           [(f64.mul)    (compile-binop args ctx wasm-opcode-f64-mul)]
+           [(f64.div)    (compile-binop args ctx wasm-opcode-f64-div)]
+           [(f64.min)    (compile-binop args ctx wasm-opcode-f64-min)]
+           [(f64.max)    (compile-binop args ctx wasm-opcode-f64-max)]
+           [(f64.abs)    (compile-unop args ctx wasm-opcode-f64-abs)]
+           [(f64.neg)    (compile-unop args ctx wasm-opcode-f64-neg)]
+           [(f64.sqrt)   (compile-unop args ctx wasm-opcode-f64-sqrt)]
+           [(f64.ceil)   (compile-unop args ctx wasm-opcode-f64-ceil)]
+           [(f64.floor)  (compile-unop args ctx wasm-opcode-f64-floor)]
+           [(f64.trunc)  (compile-unop args ctx wasm-opcode-f64-trunc)]
+           [(f64.nearest)(compile-unop args ctx wasm-opcode-f64-nearest)]
+           [(f64.copysign)(compile-binop args ctx wasm-opcode-f64-copysign)]
+           [(f64.eq)     (compile-binop args ctx wasm-opcode-f64-eq)]
+           [(f64.ne)     (compile-binop args ctx wasm-opcode-f64-ne)]
+           [(f64.lt)     (compile-binop args ctx wasm-opcode-f64-lt)]
+           [(f64.gt)     (compile-binop args ctx wasm-opcode-f64-gt)]
+           [(f64.le)     (compile-binop args ctx wasm-opcode-f64-le)]
+           [(f64.ge)     (compile-binop args ctx wasm-opcode-f64-ge)]
+           [(f64.promote_f32)    (compile-unop args ctx wasm-opcode-f64-promote-f32)]
+           [(f64.convert_i32_s)  (compile-unop args ctx wasm-opcode-f64-convert-i32-s)]
+           [(f64.convert_i32_u)  (compile-unop args ctx wasm-opcode-f64-convert-i32-u)]
+           [(f64.convert_i64_s)  (compile-unop args ctx wasm-opcode-f64-convert-i64-s)]
+           [(f64.convert_i64_u)  (compile-unop args ctx wasm-opcode-f64-convert-i64-u)]
+
+           ;; -- Reinterpret --
+           [(i32.reinterpret_f32) (compile-unop args ctx wasm-opcode-i32-reinterpret-f32)]
+           [(i64.reinterpret_f64) (compile-unop args ctx wasm-opcode-i64-reinterpret-f64)]
+           [(f32.reinterpret_i32) (compile-unop args ctx wasm-opcode-f32-reinterpret-i32)]
+           [(f64.reinterpret_i64) (compile-unop args ctx wasm-opcode-f64-reinterpret-i64)]
+
+           ;; -- Truncation --
+           [(i32.trunc_f32_s) (compile-unop args ctx wasm-opcode-i32-trunc-f32-s)]
+           [(i32.trunc_f32_u) (compile-unop args ctx wasm-opcode-i32-trunc-f32-u)]
+           [(i32.trunc_f64_s) (compile-unop args ctx wasm-opcode-i32-trunc-f64-s)]
+           [(i32.trunc_f64_u) (compile-unop args ctx wasm-opcode-i32-trunc-f64-u)]
+           [(i64.trunc_f32_s) (compile-unop args ctx wasm-opcode-i64-trunc-f32-s)]
+           [(i64.trunc_f32_u) (compile-unop args ctx wasm-opcode-i64-trunc-f32-u)]
+           [(i64.trunc_f64_s) (compile-unop args ctx wasm-opcode-i64-trunc-f64-s)]
+           [(i64.trunc_f64_u) (compile-unop args ctx wasm-opcode-i64-trunc-f64-u)]
+
+           ;; -- Memory operations --
+           [(i32.load)   (compile-mem-load args ctx wasm-opcode-i32-load)]
+           [(i64.load)   (compile-mem-load args ctx wasm-opcode-i64-load)]
+           [(f32.load)   (compile-mem-load args ctx wasm-opcode-f32-load)]
+           [(f64.load)   (compile-mem-load args ctx wasm-opcode-f64-load)]
+           [(i32.load8_s)  (compile-mem-load args ctx wasm-opcode-i32-load8-s)]
+           [(i32.load8_u)  (compile-mem-load args ctx wasm-opcode-i32-load8-u)]
+           [(i32.load16_s) (compile-mem-load args ctx wasm-opcode-i32-load16-s)]
+           [(i32.load16_u) (compile-mem-load args ctx wasm-opcode-i32-load16-u)]
+           [(i32.store)  (compile-mem-store args ctx wasm-opcode-i32-store)]
+           [(i64.store)  (compile-mem-store args ctx wasm-opcode-i64-store)]
+           [(f32.store)  (compile-mem-store args ctx wasm-opcode-f32-store)]
+           [(f64.store)  (compile-mem-store args ctx wasm-opcode-f64-store)]
+           [(i32.store8)  (compile-mem-store args ctx wasm-opcode-i32-store8)]
+           [(i32.store16) (compile-mem-store args ctx wasm-opcode-i32-store16)]
+
+           [(memory.size)
+            (bv-concat (bytevector wasm-opcode-memory-size) (bytevector #x00))]
+           [(memory.grow)
+            (bv-concat (compile-expr (car args) ctx)
+                       (bytevector wasm-opcode-memory-grow) (bytevector #x00))]
+
+           ;; -- Global access --
+           [(global.get)
+            (bv-concat (bytevector wasm-opcode-global-get)
+                       (encode-u32-leb128 (car args)))]
+           [(global.set)
+            (bv-concat (compile-expr (cadr args) ctx)
+                       (bytevector wasm-opcode-global-set)
+                       (encode-u32-leb128 (car args)))]
+
+           ;; -- Parametric --
+           [(select)
+            (bv-concat
+              (compile-expr (car args) ctx)    ; val1
+              (compile-expr (cadr args) ctx)   ; val2
+              (compile-expr (caddr args) ctx)  ; condition
+              (bytevector wasm-opcode-select))]
+
+           [(drop)
+            (bv-concat (compile-expr (car args) ctx)
+                       (bytevector wasm-opcode-drop))]
+
+           ;; -- Indirect call --
+           [(call-indirect)
+            ;; (call-indirect type-idx arg1 ... argn table-idx-expr)
+            (let ([type-idx (car args)]
+                  [call-args (cdr args)])
+              (bv-concat
+                (bv-concat-list (map (lambda (a) (compile-expr a ctx)) call-args))
+                (bytevector wasm-opcode-call-indirect)
+                (encode-u32-leb128 type-idx)
+                (encode-u32-leb128 0)))] ; table 0
+
+           ;; -- Function call (symbol in head position) --
            [else
             (if (symbol? head)
               (let ([fidx (context-func-index ctx head)])
@@ -411,24 +929,121 @@
 
       [else (error 'compile-expr "unsupported expression" expr)]))
 
+  ;; Compile a cond form
+  (define (compile-cond clauses ctx)
+    (cond
+      [(null? clauses)
+       ;; No matching clause → 0
+       (bv-concat (bytevector wasm-opcode-i32-const) (encode-i32-leb128 0))]
+      [(and (pair? (car clauses)) (eq? (caar clauses) 'else))
+       (compile-body (cdar clauses) ctx)]
+      [else
+       (let ([test (caar clauses)]
+             [body (cdar clauses)])
+         (bv-concat
+           (compile-expr test ctx)
+           (bytevector wasm-opcode-if wasm-type-i32)
+           (compile-body body ctx)
+           (bytevector wasm-opcode-else)
+           (compile-cond (cdr clauses) ctx)
+           (bytevector wasm-opcode-end)))]))
+
   ;;; ========== Program compiler ==========
 
-  ;; compile-program: list of top-level (define ...) forms -> binary WASM bytevector
-  ;; All values are i32 (integer-only subset).
+  ;; Parse a function parameter: symbol or (name type)
+  (define (parse-param p)
+    (if (pair? p)
+      (cons (car p) (scheme->wasm-type (cadr p)))
+      (cons p wasm-type-i32)))
+
+  ;; Parse return type from define signature
+  ;; Returns (values return-type body-forms)
+  (define (parse-return-type body)
+    (if (and (pair? body) (pair? (car body)) (eq? (caar body) '->))
+      (values (scheme->wasm-type (cadar body)) (cdr body))
+      (values wasm-type-i32 body)))
+
+  ;; compile-program: list of top-level forms -> binary WASM bytevector
   (define (compile-program forms)
     (let ([mod (make-wasm-module)]
-          [global-ctx (make-compile-context)])
+          [global-ctx (make-compile-context)]
+          [import-count 0]
+          [func-names '()]
+          [func-sigs '()])
 
-      ;; First pass: register all function names (so mutual calls work)
+      ;; Pass 0: Process imports, memory, table, global declarations
+      (for-each
+        (lambda (form)
+          (when (pair? form)
+            (case (car form)
+              [(define-import)
+               ;; (define-import mod name (param-types) (result-types))
+               (let* ([mod-name (cadr form)]
+                      [fn-name (caddr form)]
+                      [ptypes (map scheme->wasm-type (cadddr form))]
+                      [rtypes (map scheme->wasm-type (car (cddddr form)))]
+                      [type (make-wasm-type ptypes rtypes)]
+                      [type-idx (length (wasm-module-types mod))])
+                 (wasm-module-add-type! mod type)
+                 (wasm-module-add-import! mod
+                   (make-wasm-import mod-name (symbol->string fn-name)
+                     (cons 0 type-idx)))
+                 (context-add-func! global-ctx fn-name)
+                 (set! import-count (+ import-count 1)))]
+              [(define-memory)
+               (let ([min (cadr form)]
+                     [max (if (null? (cddr form)) #f (caddr form))])
+                 (wasm-module-add-memory! mod min max))]
+              [(define-table)
+               (let ([min (cadr form)]
+                     [max (if (null? (cddr form)) #f (caddr form))])
+                 (wasm-module-add-table! mod wasm-type-funcref min max))]
+              [(define-global)
+               ;; (define-global name type mut? init)
+               (let* ([gname (cadr form)]
+                      [gtype (scheme->wasm-type (caddr form))]
+                      [mut? (cadddr form)]
+                      [init-val (car (cddddr form))]
+                      [init-bv (case gtype
+                                 [(#x7F) (bv-concat (bytevector wasm-opcode-i32-const)
+                                                    (encode-i32-leb128 init-val))]
+                                 [(#x7E) (bv-concat (bytevector wasm-opcode-i64-const)
+                                                    (encode-i64-leb128 init-val))]
+                                 [(#x7D) (bv-concat (bytevector wasm-opcode-f32-const)
+                                                    (encode-f32 (exact->inexact init-val)))]
+                                 [(#x7C) (bv-concat (bytevector wasm-opcode-f64-const)
+                                                    (encode-f64 (exact->inexact init-val)))]
+                                 [else (error 'compile-program "unsupported global type" gtype)])])
+                 (wasm-module-add-global! mod gtype mut? init-bv))]
+              [else (void)])))
+        forms)
+
+      ;; Pass 1: Register function names (for mutual recursion)
       (for-each
         (lambda (form)
           (when (and (pair? form) (eq? (car form) 'define))
             (let ([sig (cadr form)])
               (when (pair? sig)
-                (context-add-func! global-ctx (car sig))))))
+                (let* ([name (car sig)]
+                       [raw-params (cdr sig)]
+                       ;; Filter out -> return type annotation
+                       [params (let loop ([ps raw-params])
+                                 (cond [(null? ps) '()]
+                                       [(eq? (car ps) '->) '()]
+                                       [else (cons (parse-param (car ps))
+                                                   (loop (cdr ps)))]))]
+                       [rtype (let loop ([ps raw-params])
+                                (cond [(null? ps) wasm-type-i32]
+                                      [(eq? (car ps) '->) (scheme->wasm-type (cadr ps))]
+                                      [else (loop (cdr ps))]))])
+                  (context-add-func! global-ctx name)
+                  (set! func-names (cons name func-names))
+                  (set! func-sigs (cons (cons params rtype) func-sigs)))))))
         forms)
+      (set! func-names (reverse func-names))
+      (set! func-sigs (reverse func-sigs))
 
-      ;; Second pass: compile each define into a WASM function
+      ;; Pass 2: Compile function bodies
       (for-each
         (lambda (form)
           (when (and (pair? form) (eq? (car form) 'define))
@@ -436,45 +1051,87 @@
                    [body-forms (cddr form)])
               (when (pair? sig)
                 (let* ([name (car sig)]
-                       [params (cdr sig)]
-                       ;; Create per-function context with all function names
+                       [sig-entry (let loop ([ns func-names] [ss func-sigs])
+                                    (if (eq? (car ns) name) (car ss)
+                                      (loop (cdr ns) (cdr ss))))]
+                       [params (car sig-entry)]
+                       [rtype (cdr sig-entry)]
+                       ;; Create per-function context
                        [ctx (make-compile-context)]
                        [_ (compile-context-funcs-set! ctx
                             (compile-context-funcs global-ctx))]
-                       ;; Add params as locals (indices 0..n-1)
-                       [_ (for-each (lambda (p) (context-add-local! ctx p)) params)]
-                       ;; Compile body (multiple forms -> begin)
-                       [body-bv (if (= (length body-forms) 1)
-                                  (compile-expr (car body-forms) ctx)
-                                  (bv-concat-list
-                                    (map (lambda (e) (compile-expr e ctx)) body-forms)))]
-                       ;; Append end opcode
+                       [_ (compile-context-return-type-set! ctx rtype)]
+                       ;; Add params as locals
+                       [_ (for-each
+                            (lambda (p) (context-add-local! ctx (car p) (cdr p)))
+                            params)]
+                       ;; Compile body
+                       [body-bv (compile-body body-forms ctx)]
                        [full-body (bv-concat body-bv (bytevector wasm-opcode-end))]
-                       ;; Collect let-bound locals (index >= param count)
+                       ;; Collect extra locals (beyond params)
                        [all-locals (compile-context-locals ctx)]
                        [let-locals
-                        (filter (lambda (pair) (>= (cdr pair) (length params)))
+                        (filter (lambda (entry)
+                                  (>= (cadr entry) (length params)))
                                 all-locals)]
-                       [local-types (map (lambda (_) wasm-type-i32) let-locals)]
+                       [local-types (map cddr let-locals)]
                        [func (make-wasm-func local-types full-body)]
-                       ;; Type signature: all i32 params, i32 result
-                       [param-types (map (lambda (_) wasm-type-i32) params)]
+                       ;; Type signature
+                       [param-types (map cdr params)]
+                       [result-types (if (= rtype wasm-type-void) '() (list rtype))]
                        [type-idx (length (wasm-module-types mod))]
-                       [type (make-wasm-type param-types (list wasm-type-i32))])
+                       [type (make-wasm-type param-types result-types)])
 
                   (wasm-module-add-type! mod type)
                   (wasm-module-add-function! mod type-idx func))))))
         forms)
 
-      ;; Add exports for all registered functions
-      ;; The global-ctx funcs list is in reverse order of registration
-      ;; (context-add-func! prepends, so first func is at end of list)
+      ;; Add exports for all user-defined functions
       (let ([funcs (reverse (compile-context-funcs global-ctx))])
         (for-each
           (lambda (pair)
-            (wasm-module-add-export! mod
-              (wasm-export-func (symbol->string (car pair)) (cdr pair))))
+            (let ([idx (cdr pair)])
+              (when (>= idx import-count)
+                (wasm-module-add-export! mod
+                  (wasm-export-func (symbol->string (car pair)) idx)))))
           funcs))
+
+      ;; Process data segments
+      (for-each
+        (lambda (form)
+          (when (and (pair? form) (eq? (car form) 'define-data))
+            (let* ([offset (cadr form)]
+                   [data (caddr form)]
+                   [offset-bv (bv-concat (bytevector wasm-opcode-i32-const)
+                                         (encode-i32-leb128 offset))]
+                   [data-bv (cond
+                              [(bytevector? data) data]
+                              [(string? data) (string->utf8 data)]
+                              [else (error 'compile-program
+                                      "data must be bytevector or string" data)])])
+              (wasm-module-add-data! mod 0 offset-bv data-bv))))
+        forms)
+
+      ;; Process element segments
+      (for-each
+        (lambda (form)
+          (when (and (pair? form) (eq? (car form) 'define-element))
+            (let* ([offset (cadr form)]
+                   [func-names-list (caddr form)]
+                   [offset-bv (bv-concat (bytevector wasm-opcode-i32-const)
+                                         (encode-i32-leb128 offset))]
+                   [func-idxs (map (lambda (n) (context-func-index global-ctx n))
+                                   func-names-list)])
+              (wasm-module-add-element! mod 0 offset-bv func-idxs))))
+        forms)
+
+      ;; Process start section
+      (for-each
+        (lambda (form)
+          (when (and (pair? form) (eq? (car form) 'start))
+            (wasm-module-set-start! mod
+              (context-func-index global-ctx (cadr form)))))
+        forms)
 
       (wasm-module-encode mod)))
 
