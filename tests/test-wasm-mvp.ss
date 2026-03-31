@@ -1319,6 +1319,173 @@
 
 
 ;;; ============================================================
+;;; Gap: i64 clz/ctz/popcnt/rotl/rotr
+;;; ============================================================
+
+;; Helper: concatenate bytevectors
+(define (bv-cat . bvs)
+  (let* ([total (apply + (map bytevector-length bvs))]
+         [result (make-bytevector total)])
+    (let loop ([bvs bvs] [pos 0])
+      (unless (null? bvs)
+        (let ([bv (car bvs)] [len (bytevector-length (car bvs))])
+          (bytevector-copy! bv 0 result pos len)
+          (loop (cdr bvs) (+ pos len)))))
+    result))
+
+;; Build a WASM module: (i64) -> i64 applying one unary opcode
+(define (make-i64-unary-module opcode)
+  (let* ([body (bytevector #x00 #x20 #x00 opcode #x0B)]  ; 0 locals, local.get 0, op, end
+         [body-len-bv (encode-u32-leb128 (bytevector-length body))])
+    (bv-cat
+      (bytevector #x00 #x61 #x73 #x6D #x01 #x00 #x00 #x00)  ; header
+      ;; type section: 1 type (i64)->i64
+      (bytevector 1 6 1 #x60 1 #x7E 1 #x7E)
+      ;; func section: 1 func, type 0
+      (bytevector 3 2 1 0)
+      ;; export section: export "f" as func 0
+      (bytevector 7 5 1 1 #x66 0 0)  ; "f"
+      ;; code section
+      (bv-cat (bytevector 10) (encode-u32-leb128 (+ (bytevector-length body-len-bv) (bytevector-length body) 1))
+              (bytevector 1) body-len-bv body))))
+
+;; Build a WASM module: (i64, i64) -> i64 applying one binary opcode
+(define (make-i64-binary-module opcode)
+  (let* ([body (bytevector #x00 #x20 #x00 #x20 #x01 opcode #x0B)]
+         [body-len-bv (encode-u32-leb128 (bytevector-length body))])
+    (bv-cat
+      (bytevector #x00 #x61 #x73 #x6D #x01 #x00 #x00 #x00)
+      (bytevector 1 7 1 #x60 2 #x7E #x7E 1 #x7E)  ; type (i64,i64)->i64
+      (bytevector 3 2 1 0)
+      (bytevector 7 5 1 1 #x66 0 0)
+      (bv-cat (bytevector 10) (encode-u32-leb128 (+ (bytevector-length body-len-bv) (bytevector-length body) 1))
+              (bytevector 1) body-len-bv body))))
+
+(define (run-i64-unary opcode arg)
+  (let ([rt (make-wasm-runtime)])
+    (wasm-runtime-load rt (make-i64-unary-module opcode))
+    (wasm-runtime-call rt "f" arg)))
+
+(define (run-i64-binary opcode a b)
+  (let ([rt (make-wasm-runtime)])
+    (wasm-runtime-load rt (make-i64-binary-module opcode))
+    (wasm-runtime-call rt "f" a b)))
+
+;; i64.clz
+(test "i64.clz of 0" (run-i64-unary #x79 0) 64)
+(test "i64.clz of 1" (run-i64-unary #x79 1) 63)
+(test "i64.clz of 0x8000000000000000" (run-i64-unary #x79 (- (expt 2 63))) 0)
+(test "i64.clz of 0xFF" (run-i64-unary #x79 #xFF) 56)
+
+;; i64.ctz
+(test "i64.ctz of 0" (run-i64-unary #x7A 0) 64)
+(test "i64.ctz of 1" (run-i64-unary #x7A 1) 0)
+(test "i64.ctz of 0x80" (run-i64-unary #x7A #x80) 7)
+
+;; i64.popcnt
+(test "i64.popcnt of 0" (run-i64-unary #x7B 0) 0)
+(test "i64.popcnt of 0xFF" (run-i64-unary #x7B #xFF) 8)
+(test "i64.popcnt of 0x5555" (run-i64-unary #x7B #x5555) 8)
+
+;; i64.rotl
+(test "i64.rotl basic" (run-i64-binary #x89 1 1) 2)
+(test "i64.rotl wrap" (run-i64-binary #x89 (- (expt 2 63)) 1) 1)
+
+;; i64.rotr
+(test "i64.rotr basic" (run-i64-binary #x8A 2 1) 1)
+(test "i64.rotr wrap" (run-i64-binary #x8A 1 1) (- (expt 2 63)))
+
+;;; ============================================================
+;;; Gap: data/element segment bounds checking
+;;; ============================================================
+
+;; Data segment OOB should raise wasm-trap
+(test "data segment out of bounds raises wasm-trap"
+  (guard (exn
+    [(wasm-trap? exn)
+     (and (string-contains (wasm-trap-message exn) "data segment out of bounds")
+          'trapped)]
+    [#t 'other-error])
+    ;; 1 page = 65536 bytes, data at offset 65500 with 100 bytes overflows
+    (compile-and-run
+      '((define-memory 1)
+        (define-data 65500 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        (define (f) 42))
+      "f"))
+  'trapped)
+
+;; Element segment OOB should raise wasm-trap
+(test "element segment out of bounds raises wasm-trap"
+  (guard (exn
+    [(wasm-trap? exn)
+     (and (string-contains (wasm-trap-message exn) "element segment out of bounds")
+          'trapped)]
+    [#t 'other-error])
+    ;; Table of size 2, element at offset 1 with 2 entries overflows
+    (compile-and-run
+      '((define-table 2 2)
+        (define (a) 1)
+        (define (b) 2)
+        (define-element 1 (a b))  ;; offset 1 + 2 entries > table size 2
+        (define (f) 0))
+      "f"))
+  'trapped)
+
+;;; ============================================================
+;;; Gap: call_indirect type signature check
+;;; ============================================================
+
+;; Correct type match should work
+(test "call_indirect correct type works"
+  (compile-and-run
+    '((define-table 4 4)
+      (define (double (x i32) -> i32) (* x 2))
+      (define-element 0 (double))
+      (define (f (x i32) -> i32)
+        (call-indirect 0 x 0)))  ;; type 0, arg x, table index 0
+    "f" 5)
+  10)
+
+;; Type mismatch should trap
+(test "call_indirect type mismatch raises wasm-trap"
+  (guard (exn
+    [(wasm-trap? exn)
+     (and (string-contains (wasm-trap-message exn) "type mismatch")
+          'trapped)]
+    [#t 'other-error])
+    ;; Build a module where we call with the wrong type index
+    ;; We need two different types: type 0 = (i32)->i32, type 1 = (i32,i32)->i32
+    ;; Put a type-0 function in the table, then call_indirect with type 1
+    (compile-and-run
+      '((define-table 4 4)
+        (define (single (x i32) -> i32) x)
+        (define (adder (x i32) (y i32) -> i32) (+ x y))
+        (define-element 0 (single))
+        (define (f (x i32) (y i32) -> i32)
+          ;; call_indirect type-idx=1 (adder's type), but slot 0 has single (type 0)
+          (call-indirect 1 x y 0)))
+      "f" 3 4))
+  'trapped)
+
+;;; ============================================================
+;;; Gap: Type error conversion to wasm-trap
+;;; ============================================================
+
+;; Passing wrong type (e.g. float where int expected) should produce wasm-trap
+(test "type error produces wasm-trap not Chez condition"
+  (guard (exn
+    [(wasm-trap? exn) 'trapped]
+    [#t 'chez-error])
+    ;; Call an i32 function with a string (should fail in arithmetic)
+    (let* ([bv (compile-program
+                 '((define (add (a i32) (b i32) -> i32) (+ a b))))]
+           [rt (make-wasm-runtime)])
+      (wasm-runtime-load rt bv)
+      (wasm-runtime-call rt "add" "not-a-number" 1)))
+  'trapped)
+
+
+;;; ============================================================
 ;;; Summary
 ;;; ============================================================
 

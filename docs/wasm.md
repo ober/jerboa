@@ -118,7 +118,9 @@ Setting any limit to `#f` uses the default. All violations raise `wasm-trap`.
 | **No stack smashing** | Value stack is a Scheme list; overflow = `wasm-trap`, not native stack corruption |
 | **No code injection** | Interpreter dispatches known opcodes only; unknown opcode = `wasm-trap` |
 | **Address safety** | `read-memarg` clamps base+offset to u32 via `bitwise-and #xFFFFFFFF` to prevent bignum addresses |
-| **Consistent error surface** | All 35 error sites in the runtime use `(raise (make-wasm-trap ...))` — zero `(error ...)` calls |
+| **Segment bounds** | Data and element segment initialization validates offset+length against memory/table size; OOB = `wasm-trap` |
+| **Indirect call safety** | `call_indirect` verifies callee type signature matches expected type index; mismatch = `wasm-trap` |
+| **Consistent error surface** | All error sites use `(raise (make-wasm-trap ...))` — Chez type conditions during execution are caught and converted |
 
 ### Module Validation
 
@@ -141,17 +143,17 @@ Setting any limit to `#f` uses the default. All violations raise `wasm-trap`.
 | Memory exhaustion via grow | Yes | Configurable page limit |
 | Code injection | Yes | Interpreter-only, no JIT |
 | Host system access | Yes | No FFI/IO paths from WASM |
-| Malformed module crash | Mostly | Validation catches structural issues |
+| Malformed module crash | Yes | Validation + bounds-checked segment init + type error conversion |
 | Integer overflow in addresses | Yes | u32 clamping |
 
 ### Known Gaps
 
-| Gap | Severity | Notes |
-|---|---|---|
-| No type stack validation | Low | A full WASM type checker would verify operand types at validation time (e.g., i32.add expects two i32s). Currently, type mismatches produce Chez conditions rather than wasm-traps at runtime. |
-| data/element segment bounds | Medium | Crafted offset values could cause `bytevector-copy!` or `vector-set!` to raise a Chez error rather than a wasm-trap during instantiation. Cannot cause memory corruption. |
-| call_indirect type check | Medium | The spec requires checking callee type signature against the call_indirect type index. Currently only checks for null table entries, not type mismatches. |
-| i64 clz/ctz/popcnt/rotl/rotr | Low | Return stub values (0). Correctness issue, not security. |
+All previously identified gaps have been resolved:
+
+- **data/element segment bounds**: Bounds-checked during instantiation; OOB raises `wasm-trap`.
+- **call_indirect type check**: Callee type signature is verified against the expected type index; mismatches raise `wasm-trap`.
+- **i64 clz/ctz/popcnt/rotl/rotr**: Fully implemented with correct 64-bit semantics.
+- **Type error surface**: Chez Scheme type conditions during execution are caught and re-raised as `wasm-trap` with opcode context.
 
 ## Runtime API Reference
 
@@ -243,13 +245,13 @@ The `compile-program` function accepts a list of top-level forms:
 
 ## Tests
 
-235 tests across 4 suites:
+254 tests across 4 suites:
 
 ```
 tests/test-wasm-format.ss    --  42 tests (encoding, opcodes, LEB128)
 tests/test-wasm-codegen.ss   --  30 tests (compiler structure, code emission)
 tests/test-wasm-runtime.ss   --  28 tests (interpreter, store, instantiation)
-tests/test-wasm-mvp.ss       -- 135 tests (end-to-end: compile + run + security)
+tests/test-wasm-mvp.ss       -- 154 tests (end-to-end: compile + run + security)
 ```
 
 Run all:

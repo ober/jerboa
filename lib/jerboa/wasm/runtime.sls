@@ -48,11 +48,12 @@
   (define-record-type wasm-instance
     (fields
       exports        ; alist: name -> (kind idx)
-      funcs          ; vector of (param-count code local-count)
+      funcs          ; vector of (param-count code local-count type-idx)
       (mutable memory-box)  ; (vector bytevector) -- boxed for memory.grow
       globals        ; vector
       tables         ; vector of vectors (funcref tables)
-      imports))      ; vector of import procedures
+      imports        ; vector of import entries (param-count result-count proc type-idx)
+      types))        ; list of type signatures for call_indirect checking
 
   ;; Public accessor: returns the raw bytevector
   (define (wasm-instance-memory inst)
@@ -468,6 +469,44 @@
              (bitwise-arithmetic-shift-right v s)
              (bitwise-arithmetic-shift-left v (- 32 s))))))
 
+  ;; Count leading zeros for 64-bit
+  (define (clz64 n)
+    (let ([n (u64 n)])
+      (if (= n 0) 64
+        (let loop ([bits 0] [mask #x8000000000000000])
+          (if (not (= (bitwise-and n mask) 0)) bits
+            (loop (+ bits 1) (bitwise-arithmetic-shift-right mask 1)))))))
+
+  ;; Count trailing zeros for 64-bit
+  (define (ctz64 n)
+    (let ([n (u64 n)])
+      (if (= n 0) 64
+        (let loop ([bits 0] [mask 1])
+          (if (not (= (bitwise-and n mask) 0)) bits
+            (loop (+ bits 1) (bitwise-arithmetic-shift-left mask 1)))))))
+
+  ;; Population count for 64-bit
+  (define (popcnt64 n)
+    (let ([n (u64 n)])
+      (let loop ([n n] [count 0])
+        (if (= n 0) count
+          (loop (bitwise-arithmetic-shift-right n 1)
+                (+ count (bitwise-and n 1)))))))
+
+  ;; Rotate left 64-bit
+  (define (rotl64 val k)
+    (let ([v (u64 val)] [s (bitwise-and k 63)])
+      (i64 (bitwise-ior
+             (bitwise-arithmetic-shift-left v s)
+             (bitwise-arithmetic-shift-right v (- 64 s))))))
+
+  ;; Rotate right 64-bit
+  (define (rotr64 val k)
+    (let ([v (u64 val)] [s (bitwise-and k 63)])
+      (i64 (bitwise-ior
+             (bitwise-arithmetic-shift-right v s)
+             (bitwise-arithmetic-shift-left v (- 64 s))))))
+
   ;; Unsigned division/remainder for i32
   (define (i32-div-u a b)
     (when (= b 0) (raise (make-wasm-trap "integer divide by zero")))
@@ -611,7 +650,7 @@
 
   ;; limits = (vector fuel max-call-depth max-stack-depth max-memory-pages)
   ;; memory-box = (vector bytevector) -- shared mutable reference
-  (define (execute-func code-bv locals-vec all-funcs memory-box globals tables imports limits depth)
+  (define (execute-func code-bv locals-vec all-funcs memory-box globals tables imports limits depth types)
     ;; Check call depth
     (let ([max-depth (vector-ref limits 1)])
       (when (> depth max-depth)
@@ -694,6 +733,15 @@
               (vector-set! limits 0 (- fuel 1)))
             (let ([op (bytevector-u8-ref code-bv pos)])
               (set! pos (+ pos 1))
+              (guard (exn
+                [(wasm-trap? exn) (raise exn)]
+                [(wasm-branch? exn) (raise exn)]
+                [(condition? exn)
+                 (raise (make-wasm-trap
+                   (string-append "type error at opcode 0x"
+                     (number->string op 16) ": "
+                     (call-with-string-output-port
+                       (lambda (p) (display-condition exn p))))))])
               (cond
                 ;; ---- end ----
                 [(= op #x0B) (void)] ; return from this block level
@@ -822,7 +870,7 @@
                            (unless (null? args)
                              (vector-set! new-lv i (car args))
                              (lp (+ i 1) (cdr args))))
-                         (push! (execute-func code new-lv all-funcs memory-box globals tables imports limits (+ depth 1))))))
+                         (push! (execute-func code new-lv all-funcs memory-box globals tables imports limits (+ depth 1) types)))))
                    (step))]
 
                 ;; ---- call_indirect ----
@@ -838,6 +886,17 @@
                      (when (not fidx)
                        (raise (make-wasm-trap
                          (string-append "call_indirect: null table entry " (number->string elem-idx)))))
+                     ;; Check callee type signature against expected type
+                     (let ([callee-type-idx
+                            (if (< fidx (vector-length imports))
+                              (cadddr (vector-ref imports fidx))
+                              (cadddr (vector-ref all-funcs (- fidx (vector-length imports)))))])
+                       (unless (= callee-type-idx type-idx)
+                         (raise (make-wasm-trap
+                           (string-append "call_indirect: type mismatch, expected type "
+                                          (number->string type-idx)
+                                          " but callee has type "
+                                          (number->string callee-type-idx))))))
                      (let* ([local-fidx (- fidx (vector-length imports))]
                             [fi (vector-ref all-funcs local-fidx)]
                             [param-count (car fi)]
@@ -850,7 +909,7 @@
                          (unless (null? args)
                            (vector-set! new-lv i (car args))
                            (lp (+ i 1) (cdr args))))
-                       (push! (execute-func code new-lv all-funcs memory-box globals tables imports limits (+ depth 1))))))
+                       (push! (execute-func code new-lv all-funcs memory-box globals tables imports limits (+ depth 1) types)))))
                  (step)]
 
                 ;; ---- drop ----
@@ -1048,9 +1107,9 @@
                 [(= op #x5A) (let* ([b (pop!)] [a (pop!)]) (push! (i32-bool (>= (u64 a) (u64 b)))) (step))]
 
                 ;; ---- i64 arithmetic ----
-                [(= op #x79) (push! 0) (step)] ; clz (simplified)
-                [(= op #x7A) (push! 0) (step)] ; ctz (simplified)
-                [(= op #x7B) (push! 0) (step)] ; popcnt (simplified)
+                [(= op #x79) (push! (clz64 (pop!))) (step)]
+                [(= op #x7A) (push! (ctz64 (pop!))) (step)]
+                [(= op #x7B) (push! (popcnt64 (pop!))) (step)]
                 [(= op #x7C) (let* ([b (pop!)] [a (pop!)]) (push! (i64 (+ a b))) (step))]
                 [(= op #x7D) (let* ([b (pop!)] [a (pop!)]) (push! (i64 (- a b))) (step))]
                 [(= op #x7E) (let* ([b (pop!)] [a (pop!)]) (push! (i64 (* a b))) (step))]
@@ -1072,8 +1131,8 @@
                 [(= op #x86) (let* ([b (pop!)] [a (pop!)]) (push! (i64 (bitwise-arithmetic-shift-left a (bitwise-and b 63)))) (step))]
                 [(= op #x87) (let* ([b (pop!)] [a (pop!)]) (push! (i64 (bitwise-arithmetic-shift-right a (bitwise-and b 63)))) (step))]
                 [(= op #x88) (let* ([b (pop!)] [a (pop!)]) (push! (i64 (bitwise-arithmetic-shift-right (u64 a) (bitwise-and b 63)))) (step))]
-                [(= op #x89) (push! 0) (step)] ; i64.rotl (simplified)
-                [(= op #x8A) (push! 0) (step)] ; i64.rotr (simplified)
+                [(= op #x89) (let* ([b (pop!)] [a (pop!)]) (push! (rotl64 a b)) (step))]
+                [(= op #x8A) (let* ([b (pop!)] [a (pop!)]) (push! (rotr64 a b)) (step))]
 
                 ;; ---- f32 arithmetic ----
                 [(= op #x8B) (push! (flabs (pop!))) (step)]         ; abs
@@ -1188,7 +1247,7 @@
                 ;; ---- unknown ----
                 [else
                  (raise (make-wasm-trap
-                   (string-append "unsupported opcode: 0x" (number->string op 16))))])))))
+                   (string-append "unsupported opcode: 0x" (number->string op 16))))]))))))
 
       ;; Start execution
       (run-until-end)
@@ -1350,7 +1409,7 @@
                  [type (list-ref types tidx)]
                  [pc (length (car type))]
                  [rc (length (cdr type))])
-            (vector-set! imports-vec i (list pc rc #f))
+            (vector-set! imports-vec i (list pc rc #f tidx))
             (loop (+ i 1) (cdr fi)))))
 
       ;; Build function table
@@ -1362,7 +1421,7 @@
                  [ce (car codes)]
                  [lc (length (car ce))]
                  [cb (cdr ce)])
-            (vector-set! all-funcs i (list pc cb lc))
+            (vector-set! all-funcs i (list pc cb lc ti))
             (loop (+ i 1) (cdr tidxs) (cdr codes)))))
 
       ;; Memory
@@ -1379,20 +1438,30 @@
           (let* ([table-list (if table-sec (parse-table-section (cdr table-sec)) '())]
                  [tables (list->vector
                            (map (lambda (t)
-                                  (let ([min-size (cadr (cadr t))])
+                                  (let ([min-size (car (cadr t))])
                                     (make-vector min-size #f)))
                                 table-list))])
 
-            ;; Initialize data segments
+            ;; Initialize data segments (with bounds checking)
             (when data-sec
               (let ([data-segs (parse-data-section (cdr data-sec))])
                 (for-each
                   (lambda (seg)
-                    (let ([offset (cadr seg)] [data (caddr seg)])
-                      (bytevector-copy! data 0 memory offset (bytevector-length data))))
+                    (let* ([offset (cadr seg)]
+                           [data (caddr seg)]
+                           [dlen (bytevector-length data)]
+                           [mem-len (bytevector-length memory)])
+                      (when (or (< offset 0)
+                                (> (+ offset dlen) mem-len))
+                        (raise (make-wasm-trap
+                          (string-append "data segment out of bounds: offset "
+                                         (number->string offset)
+                                         " + length " (number->string dlen)
+                                         " exceeds memory size " (number->string mem-len)))))
+                      (bytevector-copy! data 0 memory offset dlen)))
                   data-segs)))
 
-            ;; Initialize element segments
+            ;; Initialize element segments (with bounds checking)
             (when elem-sec
               (let ([elems (parse-element-section (cdr elem-sec))])
                 (for-each
@@ -1400,12 +1469,24 @@
                     (let ([tidx (car seg)]
                           [offset (cadr seg)]
                           [func-idxs (caddr seg)])
-                      (when (< tidx (vector-length tables))
-                        (let ([table (vector-ref tables tidx)])
-                          (let loop ([i 0] [idxs func-idxs])
-                            (unless (null? idxs)
-                              (vector-set! table (+ offset i) (car idxs))
-                              (loop (+ i 1) (cdr idxs))))))))
+                      (when (>= tidx (vector-length tables))
+                        (raise (make-wasm-trap
+                          (string-append "element segment table index out of bounds: "
+                                         (number->string tidx)))))
+                      (let ([table (vector-ref tables tidx)]
+                            [nidxs (length func-idxs)])
+                        (when (or (< offset 0)
+                                  (> (+ offset nidxs) (vector-length table)))
+                          (raise (make-wasm-trap
+                            (string-append "element segment out of bounds: offset "
+                                           (number->string offset)
+                                           " + count " (number->string nidxs)
+                                           " exceeds table size "
+                                           (number->string (vector-length table))))))
+                        (let loop ([i 0] [idxs func-idxs])
+                          (unless (null? idxs)
+                            (vector-set! table (+ offset i) (car idxs))
+                            (loop (+ i 1) (cdr idxs)))))))
                   elems)))
 
             ;; Build memory box (shared mutable reference)
@@ -1418,7 +1499,7 @@
                               (cons name (list kind idx))))
                           exports)])
 
-                (let ([inst (make-wasm-instance exp-alist all-funcs memory-box globals tables imports-vec)])
+                (let ([inst (make-wasm-instance exp-alist all-funcs memory-box globals tables imports-vec types)])
 
                   ;; Run start function if present
                   (when start-sec
@@ -1431,7 +1512,7 @@
                                [lc (caddr fi)]
                                [lv (make-vector lc 0)])
                           (execute-func code lv all-funcs memory-box globals tables imports-vec
-                                        default-limits 0)))))
+                                        default-limits 0 types)))))
 
                   inst))))))))
 
@@ -1458,6 +1539,7 @@
              [globals (wasm-instance-globals inst)]
              [tables (wasm-instance-tables inst)]
              [imports (wasm-instance-imports inst)]
+             [types (wasm-instance-types inst)]
              ;; Resource limits
              [fuel (or (wasm-runtime-fuel rt) 10000000)]
              [max-depth (or (wasm-runtime-max-depth rt) 1000)]
@@ -1475,7 +1557,7 @@
             (unless (null? args)
               (vector-set! lv i (car args))
               (lp (+ i 1) (cdr args))))
-          (execute-func code lv all-funcs memory-box globals tables imports limits 0)))))
+          (execute-func code lv all-funcs memory-box globals tables imports limits 0 types)))))
 
   (define (wasm-runtime-memory-ref rt offset)
     (bytevector-u8-ref (wasm-instance-memory (wasm-runtime-instance rt)) offset))
