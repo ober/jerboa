@@ -1,5 +1,6 @@
 #[allow(deprecated)]
 use ring::{digest, hmac, rand, aead, constant_time, pbkdf2};
+use argon2::{Argon2, Algorithm, Version, Params};
 use crate::panic::{ffi_wrap, set_last_error};
 use std::num::NonZeroU32;
 
@@ -442,6 +443,86 @@ pub extern "C" fn jerboa_pbkdf2_verify(
         match pbkdf2::verify(pbkdf2::PBKDF2_HMAC_SHA256, iters, s, pw, exp) {
             Ok(()) => 1,
             Err(_) => 0,
+        }
+    })
+}
+
+// --- Argon2id ---
+
+/// Derive a key using Argon2id.
+/// m_cost: memory in KiB (e.g., 65536 = 64 MB)
+/// t_cost: time cost (iterations, e.g., 3)
+/// p_cost: parallelism (e.g., 4)
+/// output_len: desired hash length (e.g., 32)
+#[no_mangle]
+pub extern "C" fn jerboa_argon2id_hash(
+    password: *const u8, password_len: usize,
+    salt: *const u8, salt_len: usize,
+    m_cost: u32, t_cost: u32, p_cost: u32,
+    output: *mut u8, output_len: usize,
+) -> i32 {
+    ffi_wrap(|| {
+        if password.is_null() || salt.is_null() || output.is_null() { return -1; }
+        if salt_len < 8 {
+            set_last_error("salt must be at least 8 bytes".to_string());
+            return -1;
+        }
+        if output_len == 0 { return -1; }
+
+        let pw = unsafe { std::slice::from_raw_parts(password, password_len) };
+        let s = unsafe { std::slice::from_raw_parts(salt, salt_len) };
+        let out = unsafe { std::slice::from_raw_parts_mut(output, output_len) };
+
+        let params = match Params::new(m_cost, t_cost, p_cost, Some(output_len)) {
+            Ok(p) => p,
+            Err(e) => {
+                set_last_error(format!("invalid argon2id parameters: {}", e));
+                return -1;
+            }
+        };
+
+        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+        match argon2.hash_password_into(pw, s, out) {
+            Ok(()) => 0,
+            Err(e) => {
+                set_last_error(format!("argon2id hash failed: {}", e));
+                -1
+            }
+        }
+    })
+}
+
+/// Verify a password against an Argon2id hash.
+/// Returns 1 if matches, 0 if not, -1 on error.
+#[no_mangle]
+pub extern "C" fn jerboa_argon2id_verify(
+    password: *const u8, password_len: usize,
+    salt: *const u8, salt_len: usize,
+    m_cost: u32, t_cost: u32, p_cost: u32,
+    expected: *const u8, expected_len: usize,
+) -> i32 {
+    ffi_wrap(|| {
+        if password.is_null() || salt.is_null() || expected.is_null() { return -1; }
+        if salt_len < 8 || expected_len == 0 { return -1; }
+
+        let pw = unsafe { std::slice::from_raw_parts(password, password_len) };
+        let s = unsafe { std::slice::from_raw_parts(salt, salt_len) };
+        let exp = unsafe { std::slice::from_raw_parts(expected, expected_len) };
+
+        let params = match Params::new(m_cost, t_cost, p_cost, Some(expected_len)) {
+            Ok(p) => p,
+            Err(_) => return -1,
+        };
+
+        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+        let mut computed = vec![0u8; expected_len];
+        match argon2.hash_password_into(pw, s, &mut computed) {
+            Ok(()) => {
+                // Constant-time comparison
+                #[allow(deprecated)]
+                if constant_time::verify_slices_are_equal(&computed, exp).is_ok() { 1 } else { 0 }
+            }
+            Err(_) => -1,
         }
     })
 }

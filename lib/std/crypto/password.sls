@@ -1,16 +1,21 @@
 #!chezscheme
-;;; (std crypto password) — Password hashing via PBKDF2
+;;; (std crypto password) — Password hashing via Argon2id and PBKDF2
 ;;;
-;;; Uses PKCS5_PBKDF2_HMAC from libcrypto for password hashing.
-;;; PBKDF2-HMAC-SHA256 with configurable iterations and salt.
-;;; Argon2id would be preferred but requires libargon2 — PBKDF2 is
-;;; universally available via OpenSSL.
+;;; Preferred: Argon2id via Rust native library (memory-hard, GPU-resistant).
+;;; Fallback:  PBKDF2-HMAC-SHA256 via OpenSSL (universally available).
+;;;
+;;; password-hash defaults to Argon2id when libjerboa_native.so is available,
+;;; falls back to PBKDF2 otherwise. password-verify auto-detects the algorithm
+;;; from the hash string prefix ($argon2id$ or $pbkdf2-sha256$).
 
 (library (std crypto password)
   (export
     password-hash
     password-verify
-    make-password-salt)
+    make-password-salt
+    password-hash-argon2id
+    password-verify-argon2id
+    argon2id-available?)
 
   (import (chezscheme)
           (std crypto random)
@@ -32,6 +37,36 @@
       (foreign-procedure "EVP_sha256" () uptr)
       (lambda () 0)))
 
+  ;; ========== Argon2id Support (via Rust native library) ==========
+
+  ;; Try to load libjerboa_native.so for Argon2id
+  (define *argon2id-loaded*
+    (or (guard (e [#t #f]) (load-shared-object "libjerboa_native.so") #t)
+        (guard (e [#t #f]) (load-shared-object "lib/libjerboa_native.so") #t)
+        #f))
+
+  (define c-jerboa-argon2id-hash
+    (if *argon2id-loaded*
+      (guard (e [#t #f])
+        (foreign-procedure "jerboa_argon2id_hash"
+          (u8* size_t u8* size_t unsigned-32 unsigned-32 unsigned-32 u8* size_t) int))
+      #f))
+
+  (define c-jerboa-argon2id-verify
+    (if *argon2id-loaded*
+      (guard (e [#t #f])
+        (foreign-procedure "jerboa_argon2id_verify"
+          (u8* size_t u8* size_t unsigned-32 unsigned-32 unsigned-32 u8* size_t) int))
+      #f))
+
+  (define (argon2id-available?)
+    (and c-jerboa-argon2id-hash c-jerboa-argon2id-verify #t))
+
+  ;; OWASP 2023 recommended Argon2id parameters
+  (define default-argon2id-m-cost 19456)  ;; 19 MiB
+  (define default-argon2id-t-cost 2)      ;; 2 iterations
+  (define default-argon2id-p-cost 1)      ;; 1 thread
+
   ;; ========== Public API ==========
 
   (define default-iterations 600000)  ;; OWASP 2023 recommendation for PBKDF2-SHA256
@@ -42,10 +77,77 @@
     ;; Generate a random salt for password hashing.
     (random-bytes default-salt-len))
 
+  (define (password-hash-argon2id password . opts)
+    ;; Hash a password with Argon2id.
+    ;; Returns a string: "$argon2id$m=M,t=T,p=P$salt-hex$hash-hex"
+    (unless (argon2id-available?)
+      (error 'password-hash-argon2id "argon2id not available — libjerboa_native.so not loaded"))
+    (let* ([pass-bv (if (string? password) (string->utf8 password) password)]
+           [m-cost (kwarg 'memory: opts default-argon2id-m-cost)]
+           [t-cost (kwarg 'time: opts default-argon2id-t-cost)]
+           [p-cost (kwarg 'parallelism: opts default-argon2id-p-cost)]
+           [salt (kwarg 'salt: opts (make-password-salt))]
+           [out (make-bytevector default-key-len)])
+      (let ([rc (c-jerboa-argon2id-hash pass-bv (bytevector-length pass-bv)
+                                         salt (bytevector-length salt)
+                                         m-cost t-cost p-cost
+                                         out default-key-len)])
+        (when (< rc 0)
+          (error 'password-hash-argon2id "argon2id hash failed"))
+        (string-append "$argon2id$"
+          "m=" (number->string m-cost)
+          ",t=" (number->string t-cost)
+          ",p=" (number->string p-cost) "$"
+          (bytevector->hex salt) "$"
+          (bytevector->hex out)))))
+
+  (define (password-verify-argon2id password hash-string)
+    ;; Verify a password against an Argon2id hash string.
+    (unless (argon2id-available?)
+      (error 'password-verify-argon2id "argon2id not available"))
+    (let ([parts (string-split-dollar hash-string)])
+      (unless (and (>= (length parts) 5)
+                   (string=? (cadr parts) "argon2id"))
+        (error 'password-verify-argon2id "invalid hash format" hash-string))
+      (let* ([params-str (caddr parts)]
+             [m-cost (parse-argon2-param params-str "m=")]
+             [t-cost (parse-argon2-param params-str "t=")]
+             [p-cost (parse-argon2-param params-str "p=")]
+             [salt (hex->bytevector (cadddr parts))]
+             [expected (hex->bytevector (list-ref parts 4))]
+             [pass-bv (if (string? password) (string->utf8 password) password)])
+        (let ([rc (c-jerboa-argon2id-verify pass-bv (bytevector-length pass-bv)
+                                             salt (bytevector-length salt)
+                                             m-cost t-cost p-cost
+                                             expected (bytevector-length expected))])
+          (= rc 1)))))
+
+  (define (parse-argon2-param str prefix)
+    ;; Extract numeric value after prefix from "m=19456,t=2,p=1"
+    (let* ([plen (string-length prefix)]
+           [slen (string-length str)])
+      (let loop ([i 0])
+        (cond
+          [(> (+ i plen) slen)
+           (error 'parse-argon2-param "parameter not found" prefix str)]
+          [(string=? (substring str i (+ i plen)) prefix)
+           (let num-loop ([j (+ i plen)] [acc '()])
+             (if (or (>= j slen)
+                     (char=? (string-ref str j) #\,))
+               (string->number (list->string (reverse acc)))
+               (num-loop (+ j 1) (cons (string-ref str j) acc))))]
+          [else (loop (+ i 1))]))))
+
   (define (password-hash password . opts)
+    ;; Hash a password. Prefers Argon2id when available, falls back to PBKDF2.
+    ;; Returns a string with algorithm prefix for auto-detection on verify.
+    (if (argon2id-available?)
+      (apply password-hash-argon2id password opts)
+      (password-hash-pbkdf2 password opts)))
+
+  (define (password-hash-pbkdf2 password opts)
     ;; Hash a password with PBKDF2-HMAC-SHA256.
     ;; Returns a string: "$pbkdf2-sha256$iterations$salt-hex$hash-hex"
-    ;; opts: iterations: N (default 600000), salt: bytevector
     (let* ([pass-bv (if (string? password) (string->utf8 password) password)]
            [iterations (kwarg 'iterations: opts default-iterations)]
            [salt (kwarg 'salt: opts (make-password-salt))]
@@ -59,7 +161,6 @@
                  out)])
         (when (not (= r 1))
           (error 'password-hash "PKCS5_PBKDF2_HMAC failed"))
-        ;; Format: $pbkdf2-sha256$iterations$salt$hash
         (string-append "$pbkdf2-sha256$"
           (number->string iterations) "$"
           (bytevector->hex salt) "$"
@@ -67,27 +168,34 @@
 
   (define (password-verify password hash-string)
     ;; Verify a password against a hash string.
-    ;; Uses timing-safe comparison to prevent timing attacks.
+    ;; Auto-detects algorithm from prefix ($argon2id$ or $pbkdf2-sha256$).
     (let ([parts (string-split-dollar hash-string)])
-      (unless (and (= (length parts) 5)
-                   (string=? (cadr parts) "pbkdf2-sha256"))
-        (error 'password-verify "invalid hash format" hash-string))
-      (let* ([iterations (string->number (caddr parts))]
-             [salt (hex->bytevector (cadddr parts))]
-             [expected-hash (list-ref parts 4)]
-             [pass-bv (if (string? password) (string->utf8 password) password)]
-             [out (make-bytevector default-key-len)]
-             [r (c-PKCS5_PBKDF2_HMAC
-                  pass-bv (bytevector-length pass-bv)
-                  salt (bytevector-length salt)
-                  iterations
-                  (c-EVP_sha256)
-                  default-key-len
-                  out)])
-        (when (not (= r 1))
-          (error 'password-verify "PKCS5_PBKDF2_HMAC failed"))
-        ;; Timing-safe comparison
-        (timing-safe-string=? (bytevector->hex out) expected-hash))))
+      (cond
+        [(and (>= (length parts) 5)
+              (string=? (cadr parts) "argon2id"))
+         (password-verify-argon2id password hash-string)]
+        [(and (= (length parts) 5)
+              (string=? (cadr parts) "pbkdf2-sha256"))
+         (password-verify-pbkdf2 password parts)]
+        [else
+         (error 'password-verify "unknown hash format" hash-string)])))
+
+  (define (password-verify-pbkdf2 password parts)
+    (let* ([iterations (string->number (caddr parts))]
+           [salt (hex->bytevector (cadddr parts))]
+           [expected-hash (list-ref parts 4)]
+           [pass-bv (if (string? password) (string->utf8 password) password)]
+           [out (make-bytevector default-key-len)]
+           [r (c-PKCS5_PBKDF2_HMAC
+                pass-bv (bytevector-length pass-bv)
+                salt (bytevector-length salt)
+                iterations
+                (c-EVP_sha256)
+                default-key-len
+                out)])
+      (when (not (= r 1))
+        (error 'password-verify "PKCS5_PBKDF2_HMAC failed"))
+      (timing-safe-string=? (bytevector->hex out) expected-hash)))
 
   ;; ========== Helpers ==========
 

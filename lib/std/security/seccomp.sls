@@ -57,11 +57,35 @@
         (if (= loc 0) 0
             (foreign-ref 'int loc 0)))))
 
+  ;; ========== Architecture Detection ==========
+
+  ;; Architecture validation constants
+  ;; AUDIT_ARCH_X86_64 = 0xC000003E (EM_X86_64 | __AUDIT_ARCH_64BIT | __AUDIT_ARCH_LE)
+  ;; AUDIT_ARCH_AARCH64 = 0xC00000B7 (EM_AARCH64 | __AUDIT_ARCH_64BIT | __AUDIT_ARCH_LE)
+  (define AUDIT_ARCH_X86_64  #xC000003E)
+  (define AUDIT_ARCH_AARCH64 #xC00000B7)
+
+  ;; Detect current architecture at load time
+  (define *current-arch*
+    (case (machine-type)
+      [(a6le ta6le)     'x86_64]
+      [(arm64le)        'aarch64]
+      [else             'x86_64]))  ;; conservative default
+
+  (define (current-audit-arch)
+    (case *current-arch*
+      [(x86_64)  AUDIT_ARCH_X86_64]
+      [(aarch64) AUDIT_ARCH_AARCH64]
+      [else      AUDIT_ARCH_X86_64]))
+
   ;; prctl constants
   (define PR_SET_NO_NEW_PRIVS 38)
 
-  ;; seccomp syscall number (x86_64)
-  (define SYS_seccomp 317)
+  ;; seccomp syscall number (architecture-dependent)
+  (define SYS_seccomp
+    (case *current-arch*
+      [(aarch64) 277]
+      [else      317]))  ;; x86_64
 
   ;; seccomp operations
   (define SECCOMP_SET_MODE_FILTER 1)
@@ -73,10 +97,6 @@
   (define SECCOMP_RET_ERRNO        #x00050000)
   (define SECCOMP_RET_LOG          #x7ffc0000)
   (define SECCOMP_RET_ALLOW        #x7fff0000)
-
-  ;; Architecture validation
-  ;; AUDIT_ARCH_X86_64 = 0xC000003E (EM_X86_64 | __AUDIT_ARCH_64BIT | __AUDIT_ARCH_LE)
-  (define AUDIT_ARCH_X86_64 #xC000003E)
 
   ;; ========== BPF Constants ==========
 
@@ -156,9 +176,9 @@
                ;; [0] Load architecture from seccomp_data
                (list (bpf-stmt (bitwise-ior BPF_LD BPF_W BPF_ABS)
                                SECCOMP_DATA_ARCH))
-               ;; [1] Check arch == x86_64; if yes skip 1, if no fall through to kill
+               ;; [1] Check arch matches current platform; if yes skip 1, if no fall through to kill
                (list (bpf-jump (bitwise-ior BPF_JMP BPF_JEQ BPF_K)
-                               AUDIT_ARCH_X86_64
+                               (current-audit-arch)
                                1    ;; jt: skip 1 instruction (over the kill)
                                0))  ;; jf: fall through to kill
                ;; [2] Kill on wrong architecture
@@ -183,9 +203,10 @@
                (list (bpf-stmt (bitwise-ior BPF_RET BPF_K) SECCOMP_RET_ALLOW)))])
       insns))
 
-  ;; ========== Syscall Table ==========
+  ;; ========== Syscall Tables ==========
 
-  (define *syscall-table*
+  ;; x86_64 syscall numbers (Linux)
+  (define *syscall-table-x86_64*
     '((read . 0) (write . 1) (close . 3) (fstat . 5)
       (mmap . 9) (mprotect . 10) (munmap . 11) (brk . 12)
       (rt_sigaction . 13) (rt_sigprocmask . 14) (rt_sigreturn . 15)
@@ -214,12 +235,51 @@
       (rseq . 334) (clone3 . 435)
       (close_range . 436) (prlimit64 . 302)))
 
+  ;; aarch64 (ARM64) syscall numbers (Linux)
+  ;; ARM64 uses a clean numbering starting from the generic Linux asm-generic/unistd.h.
+  ;; Many legacy x86_64 syscalls (fork, access, pipe, select, etc.) don't exist on ARM64;
+  ;; their modern replacements (clone, faccessat, pipe2, pselect6, etc.) are used instead.
+  (define *syscall-table-aarch64*
+    '((read . 63) (write . 64) (close . 57) (fstat . 80)
+      (mmap . 222) (mprotect . 226) (munmap . 215) (brk . 214)
+      (rt_sigaction . 134) (rt_sigprocmask . 135) (rt_sigreturn . 139)
+      (ioctl . 29) (access . 439) (pipe . 59)       ;; access=faccessat2, pipe=pipe2
+      (select . 72) (sched_yield . 124)              ;; select=pselect6
+      (mremap . 216) (madvise . 233) (nanosleep . 101)
+      (getpid . 172) (socket . 198) (connect . 203)
+      (accept . 202) (sendto . 206) (recvfrom . 207)
+      (bind . 200) (listen . 201) (getsockname . 204)
+      (setsockopt . 208) (clone . 220) (fork . 220)  ;; ARM64: use clone for fork
+      (execve . 221) (exit . 93) (wait4 . 260)
+      (kill . 129) (uname . 160) (fcntl . 25)
+      (ftruncate . 46) (getdents . 61) (getcwd . 17)
+      (chdir . 49) (rename . 38) (mkdir . 34)        ;; rename=renameat, mkdir=mkdirat
+      (rmdir . 35) (creat . 56) (link . 37)          ;; rmdir=unlinkat, link=linkat
+      (unlink . 35) (readlink . 78)                   ;; unlink=unlinkat, readlink=readlinkat
+      (gettimeofday . 169) (getuid . 174)
+      (getgid . 176) (setuid . 146) (setgid . 144)
+      (getppid . 173) (setsid . 157)
+      (sigaltstack . 132) (prctl . 167) (arch_prctl . 167)  ;; no arch_prctl on ARM64, map to prctl
+      (futex . 98) (clock_gettime . 113)
+      (set_tid_address . 96) (exit_group . 94)
+      (epoll_create1 . 20) (epoll_ctl . 21) (epoll_wait . 22)  ;; epoll_wait=epoll_pwait
+      (openat . 56) (newfstatat . 79)
+      (set_robust_list . 99) (getrandom . 278)
+      (rseq . 293) (clone3 . 435)
+      (close_range . 436) (prlimit64 . 261)))
+
+  ;; Select table based on detected architecture
+  (define *syscall-table*
+    (case *current-arch*
+      [(aarch64) *syscall-table-aarch64*]
+      [else      *syscall-table-x86_64*]))
+
   (define (syscall-name->number name)
     (let ([pair (assq name *syscall-table*)])
       (if pair
         (cdr pair)
         (error 'syscall-name->number
-          (format "unknown syscall name: ~a" name)))))
+          (format "unknown syscall name: ~a (arch: ~a)" name *current-arch*)))))
 
   ;; ========== Action Constructors ==========
 

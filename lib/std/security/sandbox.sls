@@ -60,6 +60,7 @@
     sandbox-config-seatbelt
     sandbox-config-capsicum
     sandbox-config-capabilities
+    sandbox-config-max-output-size
 
     ;; Condition type
     &sandbox-error make-sandbox-error sandbox-error?
@@ -141,7 +142,8 @@
       (immutable landlock  %sandbox-config-landlock)
       (immutable seatbelt  %sandbox-config-seatbelt)
       (immutable capsicum  %sandbox-config-capsicum)
-      (immutable capabilities %sandbox-config-capabilities)))
+      (immutable capabilities %sandbox-config-capabilities)
+      (immutable max-output-size %sandbox-config-max-output-size)))
 
   ;; Public accessors
   (define sandbox-config-timeout      %sandbox-config-timeout)
@@ -150,11 +152,15 @@
   (define sandbox-config-seatbelt     %sandbox-config-seatbelt)
   (define sandbox-config-capsicum     %sandbox-config-capsicum)
   (define sandbox-config-capabilities %sandbox-config-capabilities)
+  (define sandbox-config-max-output-size %sandbox-config-max-output-size)
 
   ;; make-sandbox-config: key-value pairs → sandbox-config record
   ;; (make-sandbox-config 'timeout 10 'seccomp 'io-only)
   ;; (make-sandbox-config 'timeout 10 'seatbelt 'no-write)
   ;; (make-sandbox-config 'timeout 10 'capsicum #t)
+  ;; Default max output size: 1 MB
+  (define *sandbox-max-output-size* (make-parameter (* 1 1024 1024)))
+
   (define (make-sandbox-config . args)
     (let loop ([rest args]
                [timeout  (*sandbox-timeout*)]
@@ -162,9 +168,10 @@
                [landlock (*sandbox-landlock*)]
                [seatbelt (*sandbox-seatbelt*)]
                [capsicum (*sandbox-capsicum*)]
-               [caps '()])
+               [caps '()]
+               [max-output (*sandbox-max-output-size*)])
       (if (null? rest)
-        (%make-sandbox-config timeout seccomp landlock seatbelt capsicum caps)
+        (%make-sandbox-config timeout seccomp landlock seatbelt capsicum caps max-output)
         (begin
           (when (null? (cdr rest))
             (error 'make-sandbox-config "key missing value" (car rest)))
@@ -173,20 +180,22 @@
                 [remaining (cddr rest)])
             (cond
               [(eq? key 'timeout)
-               (loop remaining val seccomp landlock seatbelt capsicum caps)]
+               (loop remaining val seccomp landlock seatbelt capsicum caps max-output)]
               [(eq? key 'seccomp)
-               (loop remaining timeout val landlock seatbelt capsicum caps)]
+               (loop remaining timeout val landlock seatbelt capsicum caps max-output)]
               [(eq? key 'landlock)
-               (loop remaining timeout seccomp val seatbelt capsicum caps)]
+               (loop remaining timeout seccomp val seatbelt capsicum caps max-output)]
               [(eq? key 'seatbelt)
-               (loop remaining timeout seccomp landlock val capsicum caps)]
+               (loop remaining timeout seccomp landlock val capsicum caps max-output)]
               [(eq? key 'capsicum)
-               (loop remaining timeout seccomp landlock seatbelt val caps)]
+               (loop remaining timeout seccomp landlock seatbelt val caps max-output)]
               [(eq? key 'capabilities)
-               (loop remaining timeout seccomp landlock seatbelt capsicum val)]
+               (loop remaining timeout seccomp landlock seatbelt capsicum val max-output)]
+              [(eq? key 'max-output-size)
+               (loop remaining timeout seccomp landlock seatbelt capsicum caps val)]
               [else
                (error 'make-sandbox-config
-                 "unknown key; expected timeout, seccomp, landlock, seatbelt, capsicum, or capabilities"
+                 "unknown key; expected timeout, seccomp, landlock, seatbelt, capsicum, capabilities, or max-output-size"
                  key)]))))))
 
   ;; ========== Seccomp filter resolution (Linux) ==========
@@ -264,7 +273,8 @@
           (%sandbox-config-landlock cfg)
           seatbelt-profile
           capsicum-mode
-          (%sandbox-config-capabilities cfg)))))
+          (%sandbox-config-capabilities cfg)
+          (%sandbox-config-max-output-size cfg)))))
 
   ;; FFI pipe(2) — creates a pair of connected file descriptors
   (define c-pipe
@@ -370,7 +380,8 @@
   ;; ========== Core sandbox implementation ==========
 
   (define (run-safe-internal thunk timeout seccomp-filter landlock-rules
-                             seatbelt-profile capsicum-mode capabilities)
+                             seatbelt-profile capsicum-mode capabilities
+                             max-output-size)
     ;; Communication via pipe: child writes result, parent reads it.
     ;; HARDENED: Uses pipe(2) instead of temp files to prevent symlink attacks,
     ;; TOCTOU races, and read-eval injection.
@@ -447,7 +458,7 @@
             (c-close write-fd)
             (let-values ([(wpid status) (waitpid pid)])
               (let* ([raw-data (guard (exn [#t (make-bytevector 0)])
-                                 (fd-read-all read-fd (* 1 1024 1024)))] ;; 1MB max
+                                 (fd-read-all read-fd max-output-size))]
                      [_ (c-close read-fd)]
                      [result-sexp
                        (if (> (bytevector-length raw-data) 0)
@@ -510,6 +521,7 @@
           (%sandbox-config-landlock cfg)
           seatbelt-profile
           capsicum-mode
-          (%sandbox-config-capabilities cfg)))))
+          (%sandbox-config-capabilities cfg)
+          (%sandbox-config-max-output-size cfg)))))
 
 ) ;; end library

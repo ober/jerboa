@@ -22,6 +22,8 @@
     rust-scrypt
     ;; PBKDF2
     rust-pbkdf2-derive rust-pbkdf2-verify
+    ;; Argon2id
+    rust-argon2id-hash rust-argon2id-verify
     ;; Error
     rust-last-error)
 
@@ -266,6 +268,42 @@
                                          s (bytevector-length s)
                                          iterations
                                          expected (bytevector-length expected))])
+        (= rc 1))))
+
+  ;; --- Argon2id ---
+
+  (define c-jerboa-argon2id-hash
+    (foreign-procedure "jerboa_argon2id_hash"
+      (u8* size_t u8* size_t unsigned-32 unsigned-32 unsigned-32 u8* size_t) int))
+
+  ;; Derive key using Argon2id.
+  ;; m-cost: memory in KiB (e.g. 65536 = 64 MB)
+  ;; t-cost: time cost (iterations, e.g. 3)
+  ;; p-cost: parallelism (e.g. 4)
+  ;; OWASP 2023 recommended minimum: m=19456 (19 MiB), t=2, p=1
+  (define (rust-argon2id-hash password salt output-len m-cost t-cost p-cost)
+    (let ([out (make-bytevector output-len)]
+          [pw (if (string? password) (string->utf8 password) password)]
+          [s  (if (string? salt) (string->utf8 salt) salt)])
+      (let ([rc (c-jerboa-argon2id-hash pw (bytevector-length pw)
+                                         s (bytevector-length s)
+                                         m-cost t-cost p-cost
+                                         out output-len)])
+        (when (< rc 0) (error 'rust-argon2id-hash "hash failed" (rust-last-error)))
+        out)))
+
+  (define c-jerboa-argon2id-verify
+    (foreign-procedure "jerboa_argon2id_verify"
+      (u8* size_t u8* size_t unsigned-32 unsigned-32 unsigned-32 u8* size_t) int))
+
+  ;; Verify password against Argon2id hash. Returns #t if match, #f otherwise.
+  (define (rust-argon2id-verify password salt expected m-cost t-cost p-cost)
+    (let ([pw (if (string? password) (string->utf8 password) password)]
+          [s  (if (string? salt) (string->utf8 salt) salt)])
+      (let ([rc (c-jerboa-argon2id-verify pw (bytevector-length pw)
+                                           s (bytevector-length s)
+                                           m-cost t-cost p-cost
+                                           expected (bytevector-length expected))])
         (= rc 1))))
 
   ) ;; end library

@@ -144,9 +144,10 @@
                                             (string-length node-id))))]
         [else (loop (fx- i 1))])))
 
-  ;; -------- 7C: HMAC-SHA256 Authentication --------
+  ;; -------- 7C: HMAC-SHA256 Authentication + Per-Message Integrity --------
 
   (define NONCE_SIZE 32)  ;; 256-bit nonces
+  (define HMAC_SIZE 32)   ;; HMAC-SHA256 output size
 
   ;; Compute HMAC-SHA256(cookie, nonce1 || nonce2 || node-id)
   (define (auth-hmac cookie nonce1 nonce2 node-id)
@@ -157,9 +158,54 @@
       (bytevector-copy! id-bv 0 data (* 2 NONCE_SIZE) (bytevector-length id-bv))
       (native-hmac-sha256 (string->utf8 cookie) data)))
 
+  ;; Derive a session key from the shared cookie and both nonces.
+  ;; Uses HMAC-SHA256(cookie, "session" || client-nonce || server-nonce) as KDF.
+  (define (derive-session-key cookie client-nonce server-nonce)
+    (let* ([label (string->utf8 "jerboa-session-key-v1")]
+           [data (make-bytevector (+ (bytevector-length label) NONCE_SIZE NONCE_SIZE))])
+      (bytevector-copy! label 0 data 0 (bytevector-length label))
+      (bytevector-copy! client-nonce 0 data (bytevector-length label) NONCE_SIZE)
+      (bytevector-copy! server-nonce 0 data (+ (bytevector-length label) NONCE_SIZE) NONCE_SIZE)
+      (native-hmac-sha256 (string->utf8 cookie) data)))
+
+  ;; Write an HMAC-authenticated framed message.
+  ;; Wire format: [4-byte length][N-byte fasl body][32-byte HMAC]
+  ;; The HMAC covers: length bytes || fasl body (everything before the HMAC).
+  (define (write-authenticated-message fd session-key msg)
+    (let* ([frame (message->bytes msg)]
+           [hmac (native-hmac-sha256 session-key frame)]
+           [total (make-bytevector (+ (bytevector-length frame) HMAC_SIZE))])
+      (bytevector-copy! frame 0 total 0 (bytevector-length frame))
+      (bytevector-copy! hmac 0 total (bytevector-length frame) HMAC_SIZE)
+      (tcp-write fd total)))
+
+  ;; Read and verify an HMAC-authenticated framed message.
+  ;; Returns the deserialized message, or raises error on HMAC failure.
+  (define (read-authenticated-message fd session-key)
+    (let ([header (make-bytevector 4 0)])
+      (read-exact-into-buf fd header 0 4)
+      (let ([n (fx+ (fx+ (fx+ (fxsll (bytevector-u8-ref header 0) 24)
+                               (fxsll (bytevector-u8-ref header 1) 16))
+                          (fxsll (bytevector-u8-ref header 2) 8))
+                    (bytevector-u8-ref header 3))])
+        ;; Read body + HMAC
+        (let ([body (make-bytevector n 0)]
+              [received-hmac (make-bytevector HMAC_SIZE 0)])
+          (read-exact-into-buf fd body 0 n)
+          (read-exact-into-buf fd received-hmac 0 HMAC_SIZE)
+          ;; Reconstruct the frame (header || body) for HMAC verification
+          (let* ([frame (make-bytevector (+ 4 n))])
+            (bytevector-copy! header 0 frame 0 4)
+            (bytevector-copy! body 0 frame 4 n)
+            (let ([expected-hmac (native-hmac-sha256 session-key frame)])
+              (unless (native-crypto-memcmp received-hmac expected-hmac)
+                (error 'read-authenticated-message
+                  "message HMAC verification failed — possible tampering")))
+            (fasl-read (open-bytevector-input-port body)))))))
+
   ;; -------- 7D: Connection pool --------
 
-  ;; *connections*: node-id → #(fd write-mutex)
+  ;; *connections*: node-id → #(fd write-mutex session-key)
   (define *connections* (make-hashtable string-hash string=?))
   (define *conn-mutex*  (make-mutex))
 
@@ -181,7 +227,8 @@
         (hashtable-delete! *connections* node-id))))
 
   ;; Open a new TCP connection and complete HMAC-SHA256 challenge-response.
-  ;; Returns #(fd write-mutex).
+  ;; Returns #(fd write-mutex session-key).
+  ;; After handshake, derives a session key for per-message HMAC integrity.
   (define (open-connection! node-id)
     (let-values ([(host port) (node-id->host+port node-id)])
       (let ([fd           (tcp-connect host port)]
@@ -214,11 +261,15 @@
                   (unless (native-crypto-memcmp server-proof expected)
                     (tcp-close fd)
                     (error 'open-connection! "server auth failed — possible MITM" node-id))
-                  (vector fd write-mutex)))))))))
+                  ;; Derive session key for per-message HMAC integrity
+                  (let ([session-key (derive-session-key (*node-cookie*)
+                                                         client-nonce server-nonce)])
+                    (vector fd write-mutex session-key))))))))))
 
   ;; -------- 7E: Remote send --------
 
   ;; Send msg to a remote actor. Called via set-remote-send-handler!.
+  ;; All post-handshake messages are HMAC-authenticated with the session key.
   (define (transport-remote-send! actor msg)
     (let ([node-id  (actor-ref-node actor)]
           [actor-id (actor-ref-id   actor)])
@@ -226,10 +277,12 @@
                    (drop-connection! node-id)
                    (raise exn)])
         (let ([conn (get-connection! node-id)])
-          (let ([fd           (vector-ref conn 0)]
-                [write-mutex  (vector-ref conn 1)])
+          (let ([fd          (vector-ref conn 0)]
+                [write-mutex (vector-ref conn 1)]
+                [session-key (vector-ref conn 2)])
             (with-mutex write-mutex
-              (write-framed-message fd (list 'send actor-id msg))))))))
+              (write-authenticated-message fd session-key
+                (list 'send actor-id msg))))))))
 
   ;; -------- 7F: Server --------
 
@@ -246,6 +299,7 @@
               (loop)))))))
 
   ;; Handle one incoming connection: HMAC-SHA256 challenge-response then dispatch.
+  ;; After authentication, all messages are verified with per-message HMAC.
   (define (handle-client! fd)
     (guard (exn [#t
                  (guard (e [#t (void)]) (tcp-close fd))])
@@ -281,12 +335,15 @@
                     (let ([our-proof (auth-hmac (*node-cookie*) server-nonce client-nonce
                                                 (current-node-id))])
                       (write-framed-message fd (list 'ok our-proof))
-                      (let loop ()
-                        (let ([msg (guard (exn [#t 'eof])
-                                     (read-framed-message fd))])
-                          (unless (eq? msg 'eof)
-                            (dispatch-remote-message! msg)
-                            (loop))))
+                      ;; Derive session key for per-message integrity
+                      (let ([session-key (derive-session-key (*node-cookie*)
+                                                              client-nonce server-nonce)])
+                        (let loop ()
+                          (let ([msg (guard (exn [#t 'eof])
+                                       (read-authenticated-message fd session-key))])
+                            (unless (eq? msg 'eof)
+                              (dispatch-remote-message! msg)
+                              (loop)))))
                       (tcp-close fd)))))))))))
 
   ;; Dispatch an inbound message to a local actor.

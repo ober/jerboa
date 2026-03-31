@@ -66,7 +66,8 @@
 
   (import (chezscheme)
           (std error conditions)
-          (std resource))
+          (std resource)
+          (only (std security taint) tainted? check-untainted!))
 
   ;; =========================================================================
   ;; Mode control
@@ -288,8 +289,9 @@
     (raw-sqlite-close db))
 
   (define (safe-sqlite-exec db sql)
-    ;; Pre: db is fixnum handle, sql is string
+    ;; Pre: db is fixnum handle, sql is string, not tainted
     ;; Post: returns 0 on success
+    (check-untainted! sql 'sqlite-exec)
     (check-fixnum! 'safe-sqlite-exec db)
     (check-string! 'safe-sqlite-exec sql)
     (check-sql-safety! 'safe-sqlite-exec sql)
@@ -310,6 +312,7 @@
     ;; Pre: db is fixnum handle, sql is string, params is list
     (check-fixnum! 'safe-sqlite-execute db)
     (check-string! 'safe-sqlite-execute sql)
+    (check-untainted! 'safe-sqlite-execute sql)
     (check-sql-safety! 'safe-sqlite-execute sql)
     (ensure-sqlite! 'safe-sqlite-execute)
     (apply raw-sqlite-execute db sql params))
@@ -319,6 +322,7 @@
     ;; Post: returns a list of alists
     (check-fixnum! 'safe-sqlite-query db)
     (check-string! 'safe-sqlite-query sql)
+    (check-untainted! 'safe-sqlite-query sql)
     (check-sql-safety! 'safe-sqlite-query sql)
     (ensure-sqlite! 'safe-sqlite-query)
     (let ([result (apply raw-sqlite-query db sql params)])
@@ -332,6 +336,7 @@
   (define (safe-sqlite-prepare db sql)
     (check-fixnum! 'safe-sqlite-prepare db)
     (check-string! 'safe-sqlite-prepare sql)
+    (check-untainted! 'safe-sqlite-prepare sql)
     (check-sql-safety! 'safe-sqlite-prepare sql)
     (ensure-sqlite! 'safe-sqlite-prepare)
     (let ([stmt (raw-sqlite-prepare db sql)])
@@ -483,6 +488,7 @@
   ;; =========================================================================
 
   (define (safe-open-input-file path)
+    (check-untainted! path 'open-input-file)
     (check-string! 'safe-open-input-file path)
     (unless (file-exists? path)
       (raise (condition
@@ -492,6 +498,7 @@
     (open-input-file path))
 
   (define (safe-open-output-file path)
+    (check-untainted! path 'open-output-file)
     (check-string! 'safe-open-output-file path)
     ;; Check parent directory exists
     (let ([dir (path-parent path)])
@@ -505,6 +512,7 @@
     (open-output-file path))
 
   (define (safe-call-with-input-file path proc)
+    (check-untainted! path 'call-with-input-file)
     (check-string! 'safe-call-with-input-file path)
     (unless (file-exists? path)
       (raise (condition
@@ -514,6 +522,7 @@
     (call-with-input-file path proc))
 
   (define (safe-call-with-output-file path proc)
+    (check-untainted! path 'call-with-output-file)
     (check-string! 'safe-call-with-output-file path)
     (call-with-output-file path proc))
 
