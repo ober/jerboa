@@ -13,6 +13,7 @@
     wasm-runtime-memory wasm-runtime-memory-size
     wasm-runtime-global-ref wasm-runtime-global-set!
     wasm-runtime-set-fuel! wasm-runtime-set-max-depth!
+    wasm-runtime-set-max-stack! wasm-runtime-set-max-memory-pages!
     make-wasm-trap wasm-trap? wasm-trap-message
     wasm-instance? wasm-instance-exports
     wasm-decode-module wasm-module-sections wasm-run-start
@@ -67,15 +68,23 @@
 
   (define-record-type wasm-runtime
     (fields (mutable instance)
-            (mutable fuel)       ; #f or integer (max fuel per call)
-            (mutable max-depth)) ; #f or integer (max call depth)
-    (protocol (lambda (new) (lambda () (new #f #f #f)))))
+            (mutable fuel)              ; #f or integer (max fuel per call)
+            (mutable max-depth)         ; #f or integer (max call depth)
+            (mutable max-stack)         ; #f or integer (max value stack depth)
+            (mutable max-memory-pages)) ; #f or integer (max memory pages for grow)
+    (protocol (lambda (new) (lambda () (new #f #f #f #f #f)))))
 
   (define (wasm-runtime-set-fuel! rt n)
     (wasm-runtime-fuel-set! rt n))
 
   (define (wasm-runtime-set-max-depth! rt n)
     (wasm-runtime-max-depth-set! rt n))
+
+  (define (wasm-runtime-set-max-stack! rt n)
+    (wasm-runtime-max-stack-set! rt n))
+
+  (define (wasm-runtime-set-max-memory-pages! rt n)
+    (wasm-runtime-max-memory-pages-set! rt n))
 
   ;;; ========== Binary section parsing helpers ==========
 
@@ -104,7 +113,7 @@
                    (= (bytevector-u8-ref bv 1) #x61)
                    (= (bytevector-u8-ref bv 2) #x73)
                    (= (bytevector-u8-ref bv 3) #x6D))
-        (error 'wasm-decode-module "invalid WASM magic"))
+        (raise (make-wasm-trap "invalid WASM magic")))
       (let loop ([pos 8] [sections '()])
         (if (>= pos len)
           (make-decoded-module (reverse sections))
@@ -204,7 +213,8 @@
                  (loop (+ i 1) pos4
                    (cons (list 'global mod-name name gtype gmut) acc)))]
               [else
-               (error 'parse-import-section "unknown import kind" kind)]))))))
+               (raise (make-wasm-trap
+                 (string-append "unknown import kind: " (number->string kind))))]))))))
 
   (define (parse-limits bv pos)
     (let ([flag (bytevector-u8-ref bv pos)])
@@ -250,7 +260,9 @@
          (let* ([r (read-u32 bv (+ pos 1))])
            (cons (list 'global.get (car r)) (+ (cdr r) 1)))]
         [else
-         (error 'eval-init-expr "unsupported init expression opcode" op)])))
+         (raise (make-wasm-trap
+           (string-append "unsupported init expression opcode: 0x"
+                          (number->string op 16))))])))
 
   (define (parse-memory-section bv)
     (let* ([cr (read-u32 bv 0)] [count (car cr)] [pos (cdr cr)])
@@ -372,7 +384,7 @@
   (define (skip-to-else-or-end bv pos len)
     (let loop ([pos pos] [depth 0])
       (if (>= pos len)
-        (error 'skip-to-else-or-end "unterminated if block")
+        (raise (make-wasm-trap "unterminated if block"))
         (let ([op (bytevector-u8-ref bv pos)])
           (cond
             [(= op #x0B) ; end
@@ -389,7 +401,7 @@
   (define (skip-to-end bv pos len)
     (let loop ([pos pos] [depth 0])
       (if (>= pos len)
-        (error 'skip-to-end "unterminated block")
+        (raise (make-wasm-trap "unterminated block"))
         (let ([op (bytevector-u8-ref bv pos)])
           (cond
             [(= op #x0B)
@@ -458,11 +470,11 @@
 
   ;; Unsigned division/remainder for i32
   (define (i32-div-u a b)
-    (when (= b 0) (error 'execute-func "integer divide by zero"))
+    (when (= b 0) (raise (make-wasm-trap "integer divide by zero")))
     (i32 (quotient (u32 a) (u32 b))))
 
   (define (i32-rem-u a b)
-    (when (= b 0) (error 'execute-func "remainder by zero"))
+    (when (= b 0) (raise (make-wasm-trap "integer remainder by zero")))
     (i32 (remainder (u32 a) (u32 b))))
 
   ;; Unsigned comparison helpers for i32
@@ -597,7 +609,7 @@
 
   ;;; ========== Interpreter ==========
 
-  ;; limits = (vector fuel-remaining max-call-depth)
+  ;; limits = (vector fuel max-call-depth max-stack-depth max-memory-pages)
   ;; memory-box = (vector bytevector) -- shared mutable reference
   (define (execute-func code-bv locals-vec all-funcs memory-box globals tables imports limits depth)
     ;; Check call depth
@@ -608,16 +620,25 @@
                          (number->string max-depth) ")")))))
 
     (let ([stack '()]
+          [stack-depth 0]
+          [max-stack (vector-ref limits 2)]
           [pos 0]
           [memory (vector-ref memory-box 0)]
           [len (bytevector-length code-bv)])
 
-      (define (push! v) (set! stack (cons v stack)))
+      (define (push! v)
+        (set! stack-depth (+ stack-depth 1))
+        (when (> stack-depth max-stack)
+          (raise (make-wasm-trap
+            (string-append "value stack overflow (limit "
+                           (number->string max-stack) ")"))))
+        (set! stack (cons v stack)))
       (define (pop!)
-        (when (null? stack) (error 'execute-func "stack underflow"))
+        (when (null? stack) (raise (make-wasm-trap "stack underflow")))
+        (set! stack-depth (- stack-depth 1))
         (let ([v (car stack)]) (set! stack (cdr stack)) v))
       (define (peek)
-        (when (null? stack) (error 'execute-func "stack underflow"))
+        (when (null? stack) (raise (make-wasm-trap "stack underflow")))
         (car stack))
 
       ;; Read a memory address: evaluate offset + addr from stack
@@ -627,8 +648,10 @@
                [r2 (decode-u32-leb128 code-bv (+ pos (cdr r1)))]
                [offset (car r2)])
           (set! pos (+ pos (cdr r1) (cdr r2)))
-          (let ([base (pop!)])
-            (+ base offset))))
+          (let* ([base (pop!)]
+                 ;; Clamp to u32 range to prevent Scheme bignum addresses
+                 [addr (bitwise-and (+ (bitwise-and base #xFFFFFFFF) offset) #xFFFFFFFF)])
+            addr)))
 
       ;; Execute a block body (between current pos and matching end).
       ;; Returns the position past the end opcode.
@@ -679,7 +702,7 @@
                 [(= op #x01) (step)]
 
                 ;; ---- unreachable ----
-                [(= op #x00) (error 'execute-func "unreachable")]
+                [(= op #x00) (raise (make-wasm-trap "unreachable executed"))]
 
                 ;; ---- block ----
                 [(= op #x02)
@@ -775,10 +798,17 @@
                    (set! pos (+ pos (cdr r)))
                    (let ([fidx (car r)])
                      (if (< fidx (vector-length imports))
-                       ;; Import call (placeholder)
-                       (let ([imp-fn (vector-ref imports fidx)])
-                         (when imp-fn
-                           (push! (imp-fn))))
+                       ;; Import call: pop args, call proc, push result
+                       (let* ([imp-entry (vector-ref imports fidx)]
+                              [param-count (car imp-entry)]
+                              [result-count (cadr imp-entry)]
+                              [proc (caddr imp-entry)]
+                              [args (let lp ([n param-count] [a '()])
+                                      (if (= n 0) a (lp (- n 1) (cons (pop!) a))))])
+                         (when proc
+                           (let ([result (apply proc args)])
+                             (when (> result-count 0)
+                               (push! result)))))
                        ;; Local function call
                        (let* ([local-fidx (- fidx (vector-length imports))]
                               [fi (vector-ref all-funcs local-fidx)]
@@ -911,9 +941,11 @@
                 [(= op #x40)
                  (set! pos (+ pos 1))
                  (let* ([pages (pop!)]
+                        [max-pages (vector-ref limits 3)]
                         [old-pages (quotient (bytevector-length memory) 65536)]
-                        [new-size (* (+ old-pages pages) 65536)])
-                   (if (or (< pages 0) (> new-size (* 256 65536))) ; max 256 pages = 16MB
+                        [new-pages (+ old-pages pages)]
+                        [new-size (* new-pages 65536)])
+                   (if (or (< pages 0) (> new-pages max-pages))
                      (begin (push! -1) (step))
                      (let ([new-mem (make-bytevector new-size 0)])
                        (bytevector-copy! memory 0 new-mem 0 (bytevector-length memory))
@@ -971,7 +1003,7 @@
                 [(= op #x6C) (let* ([b (pop!)] [a (pop!)]) (push! (i32 (* a b))) (step))]   ; mul
                 [(= op #x6D) ; div_s
                  (let* ([b (pop!)] [a (pop!)])
-                   (when (= b 0) (error 'execute-func "integer divide by zero"))
+                   (when (= b 0) (raise (make-wasm-trap "integer divide by zero")))
                    (push! (i32 (truncate (/ a b))))
                    (step))]
                 [(= op #x6E) ; div_u
@@ -980,7 +1012,7 @@
                    (step))]
                 [(= op #x6F) ; rem_s
                  (let* ([b (pop!)] [a (pop!)])
-                   (when (= b 0) (error 'execute-func "remainder by zero"))
+                   (when (= b 0) (raise (make-wasm-trap "integer remainder by zero")))
                    (push! (i32 (remainder a b)))
                    (step))]
                 [(= op #x70) ; rem_u
@@ -1023,16 +1055,16 @@
                 [(= op #x7D) (let* ([b (pop!)] [a (pop!)]) (push! (i64 (- a b))) (step))]
                 [(= op #x7E) (let* ([b (pop!)] [a (pop!)]) (push! (i64 (* a b))) (step))]
                 [(= op #x7F) (let* ([b (pop!)] [a (pop!)])
-                   (when (= b 0) (error 'execute-func "integer divide by zero"))
+                   (when (= b 0) (raise (make-wasm-trap "integer divide by zero")))
                    (push! (i64 (truncate (/ a b)))) (step))]
                 [(= op #x80) (let* ([b (pop!)] [a (pop!)])
-                   (when (= b 0) (error 'execute-func "integer divide by zero"))
+                   (when (= b 0) (raise (make-wasm-trap "integer divide by zero")))
                    (push! (i64 (quotient (u64 a) (u64 b)))) (step))]
                 [(= op #x81) (let* ([b (pop!)] [a (pop!)])
-                   (when (= b 0) (error 'execute-func "remainder by zero"))
+                   (when (= b 0) (raise (make-wasm-trap "integer remainder by zero")))
                    (push! (i64 (remainder a b))) (step))]
                 [(= op #x82) (let* ([b (pop!)] [a (pop!)])
-                   (when (= b 0) (error 'execute-func "remainder by zero"))
+                   (when (= b 0) (raise (make-wasm-trap "integer remainder by zero")))
                    (push! (i64 (remainder (u64 a) (u64 b)))) (step))]
                 [(= op #x83) (let* ([b (pop!)] [a (pop!)]) (push! (i64 (bitwise-and a b))) (step))]
                 [(= op #x84) (let* ([b (pop!)] [a (pop!)]) (push! (i64 (bitwise-ior a b))) (step))]
@@ -1155,8 +1187,8 @@
 
                 ;; ---- unknown ----
                 [else
-                 (error 'execute-func
-                   (string-append "unsupported opcode: 0x" (number->string op 16)))])))))
+                 (raise (make-wasm-trap
+                   (string-append "unsupported opcode: 0x" (number->string op 16))))])))))
 
       ;; Start execution
       (run-until-end)
@@ -1234,7 +1266,52 @@
             (when (>= start-idx total-funcs)
               (raise (make-wasm-trap
                 (string-append "start function index out of bounds: "
-                               (number->string start-idx))))))))))
+                               (number->string start-idx)))))))
+
+        ;; 7. Bytecode validation: check block nesting and opcode validity
+        (let ([func-idx 0])
+          (for-each
+            (lambda (code-entry)
+              (let* ([code-bv (cdr code-entry)]
+                     [len (bytevector-length code-bv)])
+                (validate-bytecode code-bv len func-idx)
+                (set! func-idx (+ func-idx 1))))
+            codes)))))
+
+  ;; Validate a function body's bytecode
+  (define (validate-bytecode bv len func-idx)
+    (let loop ([pos 0] [block-depth 0])
+      (when (< pos len)
+        (let ([op (bytevector-u8-ref bv pos)])
+          (cond
+            ;; end: decrements block depth
+            [(= op #x0B)
+             (when (< block-depth 0)
+               (raise (make-wasm-trap
+                 (string-append "unbalanced end in function " (number->string func-idx)))))
+             (loop (+ pos 1) (- block-depth 1))]
+            ;; block, loop, if: increment depth
+            [(or (= op #x02) (= op #x03) (= op #x04))
+             (if (< (+ pos 1) len)
+               (loop (+ pos 2) (+ block-depth 1))
+               (raise (make-wasm-trap
+                 (string-append "truncated block instruction in function "
+                                (number->string func-idx)))))]
+            ;; else: valid only inside a block
+            [(= op #x05)
+             (when (<= block-depth 0)
+               (raise (make-wasm-trap
+                 (string-append "else outside if block in function "
+                                (number->string func-idx)))))
+             (loop (+ pos 1) block-depth)]
+            ;; All other opcodes: advance using skip-instr
+            [else
+             (let ([next-pos (skip-instr bv pos len)])
+               (when (> next-pos len)
+                 (raise (make-wasm-trap
+                   (string-append "instruction reads past end of function "
+                                  (number->string func-idx)))))
+               (loop next-pos block-depth))])))))
 
   ;;; ========== Instantiation ==========
 
@@ -1262,7 +1339,19 @@
            [codes     (if code-sec (parse-code-section (cdr code-sec)) '())]
            [nfuncs    (length tidxs)]
            [all-funcs (make-vector nfuncs #f)]
+           ;; imports-vec entries: (param-count result-count . proc-or-#f)
            [imports-vec (make-vector nimports #f)])
+
+      ;; Initialize import entries with param counts from type signatures
+      (let loop ([i 0] [fi func-imports])
+        (when (< i nimports)
+          (let* ([imp (car fi)]
+                 [tidx (cadddr imp)]
+                 [type (list-ref types tidx)]
+                 [pc (length (car type))]
+                 [rc (length (cdr type))])
+            (vector-set! imports-vec i (list pc rc #f))
+            (loop (+ i 1) (cdr fi)))))
 
       ;; Build function table
       (let loop ([i 0] [tidxs tidxs] [codes codes])
@@ -1335,7 +1424,7 @@
                   (when start-sec
                     (let* ([start-idx (parse-start-section (cdr start-sec))]
                            [local-idx (- start-idx nimports)]
-                           [default-limits (vector 10000000 1000)])
+                           [default-limits (vector 10000000 1000 10000 256)])
                       (when (and (>= local-idx 0) (< local-idx nfuncs))
                         (let* ([fi (vector-ref all-funcs local-idx)]
                                [code (cadr fi)]
@@ -1359,7 +1448,7 @@
     (let* ([inst (wasm-runtime-instance rt)]
            [exp (assoc name (wasm-instance-exports inst))])
       (unless exp
-        (error 'wasm-runtime-call "export not found" name))
+        (raise (make-wasm-trap (string-append "export not found: " name))))
       (let* ([v (cdr exp)]
              [kind (car v)]
              [idx (cadr v)]
@@ -1372,9 +1461,11 @@
              ;; Resource limits
              [fuel (or (wasm-runtime-fuel rt) 10000000)]
              [max-depth (or (wasm-runtime-max-depth rt) 1000)]
-             [limits (vector fuel max-depth)])
+             [max-stack (or (wasm-runtime-max-stack rt) 10000)]
+             [max-mem-pages (or (wasm-runtime-max-memory-pages rt) 256)]
+             [limits (vector fuel max-depth max-stack max-mem-pages)])
         (unless (= kind 0)
-          (error 'wasm-runtime-call "not a function export" name))
+          (raise (make-wasm-trap (string-append "not a function export: " name))))
         (let* ([fi (vector-ref all-funcs idx)]
                [pc (car fi)]
                [code (cadr fi)]
