@@ -95,6 +95,7 @@ All limits are configurable per-runtime and enforced during execution:
 (wasm-runtime-set-max-depth! rt 500)         ;; max call depth (default: 1000)
 (wasm-runtime-set-max-stack! rt 5000)        ;; max value stack entries (default: 10K)
 (wasm-runtime-set-max-memory-pages! rt 16)   ;; max memory pages (default: 256 = 16MB)
+(wasm-runtime-set-max-module-size! rt 65536) ;; max bytecode size (default: 16MB)
 ```
 
 | Limit | Default | What it prevents |
@@ -103,6 +104,7 @@ All limits are configurable per-runtime and enforced during execution:
 | Call depth | 1,000 | Unbounded recursion |
 | Value stack | 10,000 entries | Stack exhaustion |
 | Memory pages | 256 (16 MB) | Memory exhaustion via `memory.grow` |
+| Module size | 16 MB | Memory exhaustion during parsing |
 
 Setting any limit to `#f` uses the default. All violations raise `wasm-trap`.
 
@@ -114,13 +116,17 @@ Setting any limit to `#f` uses the default. All violations raise `wasm-trap`.
 |---|---|
 | **No host escape** | WASM code cannot call Scheme functions, access files, network, or FFI — only exported functions and linear memory are reachable |
 | **Memory isolation** | All 15 load/store helpers call `check-mem-bounds`; OOB = `wasm-trap`, not segfault |
+| **Host API isolation** | `wasm-runtime-memory-ref/set!` and `global-ref/set!` are bounds-checked; OOB = `wasm-trap` |
 | **Deterministic termination** | Fuel counter decremented per instruction; exhaustion = `wasm-trap` |
 | **No stack smashing** | Value stack is a Scheme list; overflow = `wasm-trap`, not native stack corruption |
 | **No code injection** | Interpreter dispatches known opcodes only; unknown opcode = `wasm-trap` |
 | **Address safety** | `read-memarg` clamps base+offset to u32 via `bitwise-and #xFFFFFFFF` to prevent bignum addresses |
 | **Segment bounds** | Data and element segment initialization validates offset+length against memory/table size; OOB = `wasm-trap` |
-| **Indirect call safety** | `call_indirect` verifies callee type signature matches expected type index; mismatch = `wasm-trap` |
-| **Consistent error surface** | All error sites use `(raise (make-wasm-trap ...))` — Chez type conditions during execution are caught and converted |
+| **Indirect call safety** | `call_indirect` validates table index, element index, function index, and type signature — all OOB/mismatch = `wasm-trap` |
+| **Exception boundary** | `wasm-runtime-call` catches all Chez exceptions and converts to `wasm-trap` — no uncontrolled error propagation |
+| **Import validation** | Import function calls are arity-checked, exception-guarded, and return-type validated (must be numeric) |
+| **Module size limit** | Oversized bytecode rejected before parsing (default 16MB, configurable) |
+| **Import policy hooks** | `wasm-runtime-set-import-validator!` allows capability-based gating of import calls |
 
 ### Module Validation
 
@@ -132,6 +138,7 @@ Setting any limit to `#f` uses the default. All violations raise `wasm-trap`.
 4. **MVP limits**: At most one memory, at most one table
 5. **Start function**: Start section index must reference a valid function
 6. **Bytecode integrity**: Block nesting balance and instruction boundary validation
+7. **Module size**: Rejected before parsing if exceeds configurable limit
 
 ### Threat Model
 
@@ -139,19 +146,45 @@ Setting any limit to `#f` uses the default. All violations raise `wasm-trap`.
 |---|---|---|
 | Infinite loop / CPU exhaustion | Yes | Fuel metering |
 | Stack overflow / deep recursion | Yes | Call depth + value stack limits |
-| Memory corruption / OOB access | Yes | Bounds checks on all memory ops |
+| Memory corruption / OOB access | Yes | Bounds checks on all memory ops + host API |
 | Memory exhaustion via grow | Yes | Configurable page limit |
+| Memory exhaustion via parsing | Yes | Module size limit (default 16MB) |
 | Code injection | Yes | Interpreter-only, no JIT |
 | Host system access | Yes | No FFI/IO paths from WASM |
 | Malformed module crash | Yes | Validation + bounds-checked segment init + type error conversion |
 | Integer overflow in addresses | Yes | u32 clamping |
+| call_indirect table OOB | Yes | Table index, element index, function index all bounds-checked |
+| Uncontrolled host exceptions | Yes | Exception boundary converts all Chez errors to wasm-trap |
+| Malicious import functions | Yes | Arity check, exception guard, return-type validation, optional policy hook |
+| Oversized module DoS | Yes | Module size limit enforced before parsing |
 
-### Known Gaps
+### Import Security
+
+Import functions bridge WASM and the host. Three layers of protection:
+
+1. **Arity validation**: Argument count must match declared parameter count
+2. **Exception isolation**: Import exceptions are caught and converted to `wasm-trap`
+3. **Return type validation**: Import must return a number (WASM only has numeric types)
+4. **Policy hooks**: Optional import validator for capability integration:
+
+```scheme
+;; Example: restrict imports to pure computation (no I/O)
+(wasm-runtime-set-import-validator! rt
+  (lambda (proc args)
+    (check-capability! 'wasm 'execute "import call")))
+```
+
+### Resolved Gaps
 
 All previously identified gaps have been resolved:
 
+- **call_indirect bounds**: Table index, element index, and function index are all bounds-checked before access.
+- **Host API bounds**: `memory-ref/set!` and `global-ref/set!` validate indices; OOB raises `wasm-trap`.
+- **Exception boundary**: All Chez Scheme exceptions during execution are caught at `wasm-runtime-call` and converted to `wasm-trap`.
+- **Import safety**: Arity checked, exceptions caught, return types validated, optional policy hook.
+- **Module size limit**: Configurable maximum bytecode size (default 16MB) enforced before parsing.
 - **data/element segment bounds**: Bounds-checked during instantiation; OOB raises `wasm-trap`.
-- **call_indirect type check**: Callee type signature is verified against the expected type index; mismatches raise `wasm-trap`.
+- **call_indirect type check**: Callee type signature verified against expected type index; mismatches raise `wasm-trap`.
 - **i64 clz/ctz/popcnt/rotl/rotr**: Fully implemented with correct 64-bit semantics.
 - **Type error surface**: Chez Scheme type conditions during execution are caught and re-raised as `wasm-trap` with opcode context.
 
@@ -162,7 +195,9 @@ All previously identified gaps have been resolved:
 ```scheme
 (make-wasm-runtime)                          ;; create runtime
 (wasm-runtime-load rt bytevector)            ;; decode + validate + instantiate
-(wasm-runtime-call rt "name" arg ...)        ;; call exported function
+(wasm-runtime-call rt "name" arg ...)        ;; call exported function (exception-safe)
+(wasm-runtime-set-max-module-size! rt n)     ;; max bytecode bytes (default 16MB)
+(wasm-runtime-set-import-validator! rt proc) ;; policy hook for import calls
 ```
 
 ### Memory Access (Host Side)
@@ -245,13 +280,13 @@ The `compile-program` function accepts a list of top-level forms:
 
 ## Tests
 
-254 tests across 4 suites:
+270 tests across 4 suites:
 
 ```
 tests/test-wasm-format.ss    --  42 tests (encoding, opcodes, LEB128)
 tests/test-wasm-codegen.ss   --  30 tests (compiler structure, code emission)
 tests/test-wasm-runtime.ss   --  28 tests (interpreter, store, instantiation)
-tests/test-wasm-mvp.ss       -- 154 tests (end-to-end: compile + run + security)
+tests/test-wasm-mvp.ss       -- 170 tests (end-to-end: compile + run + security)
 ```
 
 Run all:

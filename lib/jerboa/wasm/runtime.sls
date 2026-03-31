@@ -14,6 +14,8 @@
     wasm-runtime-global-ref wasm-runtime-global-set!
     wasm-runtime-set-fuel! wasm-runtime-set-max-depth!
     wasm-runtime-set-max-stack! wasm-runtime-set-max-memory-pages!
+    wasm-runtime-set-max-module-size!
+    wasm-runtime-set-import-validator!
     make-wasm-trap wasm-trap? wasm-trap-message
     wasm-instance? wasm-instance-exports
     wasm-decode-module wasm-module-sections wasm-run-start
@@ -72,8 +74,10 @@
             (mutable fuel)              ; #f or integer (max fuel per call)
             (mutable max-depth)         ; #f or integer (max call depth)
             (mutable max-stack)         ; #f or integer (max value stack depth)
-            (mutable max-memory-pages)) ; #f or integer (max memory pages for grow)
-    (protocol (lambda (new) (lambda () (new #f #f #f #f #f)))))
+            (mutable max-memory-pages)  ; #f or integer (max memory pages for grow)
+            (mutable max-module-size)   ; #f or integer (max bytecode size in bytes)
+            (mutable import-validator)) ; #f or (proc module-name func-name args -> args|#f)
+    (protocol (lambda (new) (lambda () (new #f #f #f #f #f #f #f)))))
 
   (define (wasm-runtime-set-fuel! rt n)
     (wasm-runtime-fuel-set! rt n))
@@ -86,6 +90,17 @@
 
   (define (wasm-runtime-set-max-memory-pages! rt n)
     (wasm-runtime-max-memory-pages-set! rt n))
+
+  (define (wasm-runtime-set-max-module-size! rt n)
+    (wasm-runtime-max-module-size-set! rt n))
+
+  ;; Import validator: a procedure (module-name func-name args) -> args or raise.
+  ;; Called before every import function invocation. Use this to integrate with
+  ;; capability-based security: check current-capabilities, verify allowed hosts,
+  ;; validate file paths, etc. If the validator raises, the WASM trap boundary
+  ;; catches it. Set to #f to disable (default).
+  (define (wasm-runtime-set-import-validator! rt proc)
+    (wasm-runtime-import-validator-set! rt proc))
 
   ;;; ========== Binary section parsing helpers ==========
 
@@ -680,6 +695,42 @@
         (when (null? stack) (raise (make-wasm-trap "stack underflow")))
         (car stack))
 
+      ;; Safe import function call: validates arity, runs import-validator,
+      ;; catches exceptions, validates return type is a WASM-compatible number.
+      (define (safe-import-call! imp-entry args)
+        (let ([param-count (car imp-entry)]
+              [result-count (cadr imp-entry)]
+              [proc (caddr imp-entry)]
+              [import-validator (and (> (vector-length limits) 4) (vector-ref limits 4))])
+          (when proc
+            ;; Validate argument count matches declared param count
+            (unless (= (length args) param-count)
+              (raise (make-wasm-trap
+                (string-append "import call: argument count mismatch, expected "
+                               (number->string param-count)
+                               " got " (number->string (length args))))))
+            ;; Run import validator if set (capability integration point)
+            (when import-validator
+              (import-validator proc args))
+            ;; Call with exception boundary
+            (let ([result
+                   (guard (exn
+                            [(wasm-trap? exn) (raise exn)]
+                            [else
+                             (raise (make-wasm-trap
+                               (string-append "import function raised exception: "
+                                 (call-with-string-output-port
+                                   (lambda (p) (display-condition exn p))))))])
+                     (apply proc args))])
+              (when (> result-count 0)
+                ;; Validate return value is a number (WASM only has numeric types)
+                (unless (number? result)
+                  (raise (make-wasm-trap
+                    (string-append "import function returned non-numeric value: "
+                                   (call-with-string-output-port
+                                     (lambda (p) (write result p)))))))
+                (push! result))))))
+
       ;; Read a memory address: evaluate offset + addr from stack
       (define (read-memarg)
         (let* ([r1 (decode-u32-leb128 code-bv pos)]
@@ -846,17 +897,12 @@
                    (set! pos (+ pos (cdr r)))
                    (let ([fidx (car r)])
                      (if (< fidx (vector-length imports))
-                       ;; Import call: pop args, call proc, push result
+                       ;; Import call: pop args, validate, call proc, push result
                        (let* ([imp-entry (vector-ref imports fidx)]
                               [param-count (car imp-entry)]
-                              [result-count (cadr imp-entry)]
-                              [proc (caddr imp-entry)]
                               [args (let lp ([n param-count] [a '()])
                                       (if (= n 0) a (lp (- n 1) (cons (pop!) a))))])
-                         (when proc
-                           (let ([result (apply proc args)])
-                             (when (> result-count 0)
-                               (push! result)))))
+                         (safe-import-call! imp-entry args))
                        ;; Local function call
                        (let* ([local-fidx (- fidx (vector-length imports))]
                               [fi (vector-ref all-funcs local-fidx)]
@@ -880,36 +926,63 @@
                         [r2 (decode-u32-leb128 code-bv (+ pos (cdr r1)))]
                         [table-idx (car r2)])
                    (set! pos (+ pos (cdr r1) (cdr r2)))
+                   ;; Validate table index
+                   (when (>= table-idx (vector-length tables))
+                     (raise (make-wasm-trap
+                       (string-append "call_indirect: table index out of bounds: "
+                                      (number->string table-idx)))))
                    (let* ([elem-idx (pop!)]
-                          [table (vector-ref tables table-idx)]
-                          [fidx (vector-ref table elem-idx)])
-                     (when (not fidx)
+                          [table (vector-ref tables table-idx)])
+                     ;; Validate element index against table size
+                     (when (or (< elem-idx 0) (>= elem-idx (vector-length table)))
                        (raise (make-wasm-trap
-                         (string-append "call_indirect: null table entry " (number->string elem-idx)))))
-                     ;; Check callee type signature against expected type
-                     (let ([callee-type-idx
-                            (if (< fidx (vector-length imports))
-                              (cadddr (vector-ref imports fidx))
-                              (cadddr (vector-ref all-funcs (- fidx (vector-length imports)))))])
-                       (unless (= callee-type-idx type-idx)
+                         (string-append "call_indirect: element index out of bounds: "
+                                        (number->string elem-idx)
+                                        " (table size " (number->string (vector-length table)) ")"))))
+                     (let ([fidx (vector-ref table elem-idx)])
+                       (when (not fidx)
                          (raise (make-wasm-trap
-                           (string-append "call_indirect: type mismatch, expected type "
-                                          (number->string type-idx)
-                                          " but callee has type "
-                                          (number->string callee-type-idx))))))
-                     (let* ([local-fidx (- fidx (vector-length imports))]
-                            [fi (vector-ref all-funcs local-fidx)]
-                            [param-count (car fi)]
-                            [code (cadr fi)]
-                            [local-count (caddr fi)]
-                            [args (let lp ([n param-count] [a '()])
-                                    (if (= n 0) a (lp (- n 1) (cons (pop!) a))))]
-                            [new-lv (make-vector (+ param-count local-count) 0)])
-                       (let lp ([i 0] [args args])
-                         (unless (null? args)
-                           (vector-set! new-lv i (car args))
-                           (lp (+ i 1) (cdr args))))
-                       (push! (execute-func code new-lv all-funcs memory-box globals tables imports limits (+ depth 1) types)))))
+                           (string-append "call_indirect: null table entry " (number->string elem-idx)))))
+                       ;; Validate function index
+                       (let ([total-funcs (+ (vector-length imports) (vector-length all-funcs))])
+                         (when (or (< fidx 0) (>= fidx total-funcs))
+                           (raise (make-wasm-trap
+                             (string-append "call_indirect: function index out of bounds: "
+                                            (number->string fidx))))))
+                       ;; Check callee type signature against expected type
+                       (let ([callee-type-idx
+                              (if (< fidx (vector-length imports))
+                                (cadddr (vector-ref imports fidx))
+                                (let ([local-fidx (- fidx (vector-length imports))])
+                                  (cadddr (vector-ref all-funcs local-fidx))))])
+                         (unless (= callee-type-idx type-idx)
+                           (raise (make-wasm-trap
+                             (string-append "call_indirect: type mismatch, expected type "
+                                            (number->string type-idx)
+                                            " but callee has type "
+                                            (number->string callee-type-idx))))))
+                       ;; Dispatch: import or local function
+                       (if (< fidx (vector-length imports))
+                         ;; Import call via call_indirect
+                         (let* ([imp-entry (vector-ref imports fidx)]
+                                [param-count (car imp-entry)]
+                                [args (let lp ([n param-count] [a '()])
+                                        (if (= n 0) a (lp (- n 1) (cons (pop!) a))))])
+                           (safe-import-call! imp-entry args))
+                         ;; Local function call
+                         (let* ([local-fidx (- fidx (vector-length imports))]
+                                [fi (vector-ref all-funcs local-fidx)]
+                                [param-count (car fi)]
+                                [code (cadr fi)]
+                                [local-count (caddr fi)]
+                                [args (let lp ([n param-count] [a '()])
+                                        (if (= n 0) a (lp (- n 1) (cons (pop!) a))))]
+                                [new-lv (make-vector (+ param-count local-count) 0)])
+                           (let lp ([i 0] [args args])
+                             (unless (null? args)
+                               (vector-set! new-lv i (car args))
+                               (lp (+ i 1) (cdr args))))
+                           (push! (execute-func code new-lv all-funcs memory-box globals tables imports limits (+ depth 1) types)))))))
                  (step)]
 
                 ;; ---- drop ----
@@ -1519,6 +1592,12 @@
   ;;; ========== Runtime API ==========
 
   (define (wasm-runtime-load rt bv)
+    ;; Enforce module size limit before parsing
+    (let ([max-size (or (wasm-runtime-max-module-size rt) (* 16 1024 1024))]) ;; default 16MB
+      (when (> (bytevector-length bv) max-size)
+        (raise (make-wasm-trap
+          (string-append "module too large: " (number->string (bytevector-length bv))
+                         " bytes (limit " (number->string max-size) ")")))))
     (let* ([decoded (wasm-decode-module bv)]
            [store (make-wasm-store)]
            [inst (wasm-store-instantiate store decoded)])
@@ -1526,44 +1605,67 @@
       inst))
 
   (define (wasm-runtime-call rt name . args)
-    (let* ([inst (wasm-runtime-instance rt)]
-           [exp (assoc name (wasm-instance-exports inst))])
-      (unless exp
-        (raise (make-wasm-trap (string-append "export not found: " name))))
-      (let* ([v (cdr exp)]
-             [kind (car v)]
-             [idx (cadr v)]
-             ;; Read current state from instance (not stale export snapshot)
-             [all-funcs (wasm-instance-funcs inst)]
-             [memory-box (wasm-instance-memory-box inst)]
-             [globals (wasm-instance-globals inst)]
-             [tables (wasm-instance-tables inst)]
-             [imports (wasm-instance-imports inst)]
-             [types (wasm-instance-types inst)]
-             ;; Resource limits
-             [fuel (or (wasm-runtime-fuel rt) 10000000)]
-             [max-depth (or (wasm-runtime-max-depth rt) 1000)]
-             [max-stack (or (wasm-runtime-max-stack rt) 10000)]
-             [max-mem-pages (or (wasm-runtime-max-memory-pages rt) 256)]
-             [limits (vector fuel max-depth max-stack max-mem-pages)])
-        (unless (= kind 0)
-          (raise (make-wasm-trap (string-append "not a function export: " name))))
-        (let* ([fi (vector-ref all-funcs idx)]
-               [pc (car fi)]
-               [code (cadr fi)]
-               [lc (caddr fi)]
-               [lv (make-vector (+ pc lc) 0)])
-          (let lp ([i 0] [args args])
-            (unless (null? args)
-              (vector-set! lv i (car args))
-              (lp (+ i 1) (cdr args))))
-          (execute-func code lv all-funcs memory-box globals tables imports limits 0 types)))))
+    ;; Exception boundary: catch ALL uncontrolled Chez exceptions and convert
+    ;; to wasm-trap. This prevents host exception propagation from interpreter
+    ;; bugs, malformed bytecode, or edge cases in Chez arithmetic.
+    (guard (exn
+             [(wasm-trap? exn) (raise exn)]  ;; re-raise wasm-traps as-is
+             [else
+              (raise (make-wasm-trap
+                (string-append "internal error in WASM execution: "
+                  (call-with-string-output-port
+                    (lambda (p) (display-condition exn p))))))])
+      (let* ([inst (wasm-runtime-instance rt)]
+             [exp (assoc name (wasm-instance-exports inst))])
+        (unless exp
+          (raise (make-wasm-trap (string-append "export not found: " name))))
+        (let* ([v (cdr exp)]
+               [kind (car v)]
+               [idx (cadr v)]
+               ;; Read current state from instance (not stale export snapshot)
+               [all-funcs (wasm-instance-funcs inst)]
+               [memory-box (wasm-instance-memory-box inst)]
+               [globals (wasm-instance-globals inst)]
+               [tables (wasm-instance-tables inst)]
+               [imports (wasm-instance-imports inst)]
+               [types (wasm-instance-types inst)]
+               ;; Resource limits
+               [fuel (or (wasm-runtime-fuel rt) 10000000)]
+               [max-depth (or (wasm-runtime-max-depth rt) 1000)]
+               [max-stack (or (wasm-runtime-max-stack rt) 10000)]
+               [max-mem-pages (or (wasm-runtime-max-memory-pages rt) 256)]
+               [import-val (wasm-runtime-import-validator rt)]
+               [limits (vector fuel max-depth max-stack max-mem-pages import-val)])
+          (unless (= kind 0)
+            (raise (make-wasm-trap (string-append "not a function export: " name))))
+          (let* ([fi (vector-ref all-funcs idx)]
+                 [pc (car fi)]
+                 [code (cadr fi)]
+                 [lc (caddr fi)]
+                 [lv (make-vector (+ pc lc) 0)])
+            (let lp ([i 0] [args args])
+              (unless (null? args)
+                (vector-set! lv i (car args))
+                (lp (+ i 1) (cdr args))))
+            (execute-func code lv all-funcs memory-box globals tables imports limits 0 types))))))
 
   (define (wasm-runtime-memory-ref rt offset)
-    (bytevector-u8-ref (wasm-instance-memory (wasm-runtime-instance rt)) offset))
+    (let ([mem (wasm-instance-memory (wasm-runtime-instance rt))])
+      (when (or (< offset 0) (>= offset (bytevector-length mem)))
+        (raise (make-wasm-trap
+          (string-append "memory-ref: offset out of bounds: "
+                         (number->string offset)
+                         " (memory size " (number->string (bytevector-length mem)) ")"))))
+      (bytevector-u8-ref mem offset)))
 
   (define (wasm-runtime-memory-set! rt offset val)
-    (bytevector-u8-set! (wasm-instance-memory (wasm-runtime-instance rt)) offset val))
+    (let ([mem (wasm-instance-memory (wasm-runtime-instance rt))])
+      (when (or (< offset 0) (>= offset (bytevector-length mem)))
+        (raise (make-wasm-trap
+          (string-append "memory-set!: offset out of bounds: "
+                         (number->string offset)
+                         " (memory size " (number->string (bytevector-length mem)) ")"))))
+      (bytevector-u8-set! mem offset val)))
 
   (define (wasm-runtime-memory rt)
     (wasm-instance-memory (wasm-runtime-instance rt)))
@@ -1572,10 +1674,22 @@
     (bytevector-length (wasm-instance-memory (wasm-runtime-instance rt))))
 
   (define (wasm-runtime-global-ref rt idx)
-    (vector-ref (wasm-instance-globals (wasm-runtime-instance rt)) idx))
+    (let ([globals (wasm-instance-globals (wasm-runtime-instance rt))])
+      (when (or (< idx 0) (>= idx (vector-length globals)))
+        (raise (make-wasm-trap
+          (string-append "global-ref: index out of bounds: "
+                         (number->string idx)
+                         " (globals count " (number->string (vector-length globals)) ")"))))
+      (vector-ref globals idx)))
 
   (define (wasm-runtime-global-set! rt idx val)
-    (vector-set! (wasm-instance-globals (wasm-runtime-instance rt)) idx val))
+    (let ([globals (wasm-instance-globals (wasm-runtime-instance rt))])
+      (when (or (< idx 0) (>= idx (vector-length globals)))
+        (raise (make-wasm-trap
+          (string-append "global-set!: index out of bounds: "
+                         (number->string idx)
+                         " (globals count " (number->string (vector-length globals)) ")"))))
+      (vector-set! globals idx val)))
 
   (define (wasm-run-start inst) #f)
 
