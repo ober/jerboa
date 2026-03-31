@@ -49,6 +49,39 @@
 ;;;   (drop expr)             -> evaluate and discard
 ;;;   (call name args...)     -> direct call by name
 ;;;   (call-indirect ti args) -> indirect call via table
+;;;
+;;; Post-MVP:
+;;;   (i32.trunc_sat_f32_s v) -> saturating float-to-int (8 variants)
+;;;   (memory.fill d v n)     -> fill memory range
+;;;   (memory.copy d s n)     -> copy memory range
+;;;   (memory.init seg d s n) -> init from data segment
+;;;   (data.drop seg)         -> drop data segment
+;;;   (table.get ti idx)      -> get table element
+;;;   (table.set ti idx val)  -> set table element
+;;;   (table.size ti)         -> table size
+;;;   (table.grow ti init n)  -> grow table
+;;;   (table.fill ti i v n)   -> fill table range
+;;;   (ref.null type)         -> push null reference
+;;;   (ref.is_null expr)      -> test for null
+;;;   (ref.func idx)          -> push function reference
+;;;   (return-call f args...) -> tail call
+;;;   (throw tag args...)     -> throw exception
+;;;   (struct.new ti flds...) -> create GC struct
+;;;   (struct.get ti fi ref)  -> read struct field
+;;;   (struct.set ti fi r v)  -> write struct field
+;;;   (array.new ti init n)   -> create GC array
+;;;   (array.new_fixed ti ..) -> fixed-size array
+;;;   (array.get ti arr idx)  -> read array element
+;;;   (array.set ti a i v)    -> write array element
+;;;   (array.len arr)         -> array length
+;;;   (ref.i31 v)             -> wrap to i31ref
+;;;   (i31.get_s v)           -> unwrap i31 signed
+;;;   (i31.get_u v)           -> unwrap i31 unsigned
+;;;   (ref.test ti expr)      -> type test
+;;;   (ref.cast ti expr)      -> type cast
+;;;
+;;; Module declarations:
+;;;   (define-tag type-idx)   -> exception tag
 
 (library (jerboa wasm codegen)
   (export
@@ -63,6 +96,7 @@
     wasm-module-add-memory! wasm-module-add-global!
     wasm-module-add-table! wasm-module-add-data!
     wasm-module-add-element! wasm-module-set-start!
+    wasm-module-add-tag! wasm-module-tags
     ;; WASM function
     make-wasm-func wasm-func? wasm-func-locals wasm-func-body
     ;; WASM type (function signature)
@@ -129,9 +163,10 @@
       (mutable tables)         ; list of (type min . max-or-#f)
       (mutable data-segments)  ; list of (mem-idx offset-expr bytes)
       (mutable elements)       ; list of (table-idx offset-expr func-indices)
-      (mutable start))         ; #f or function index
+      (mutable start)          ; #f or function index
+      (mutable tags))          ; list of type-idx (exception tag types)
     (protocol (lambda (new)
-      (lambda () (new '() '() '() '() '() '() '() '() '() #f)))))
+      (lambda () (new '() '() '() '() '() '() '() '() '() #f '())))))
 
   (define (wasm-module-add-type! mod type)
     (wasm-module-types-set! mod (append (wasm-module-types mod) (list type))))
@@ -169,6 +204,9 @@
 
   (define (wasm-module-set-start! mod func-idx)
     (wasm-module-start-set! mod func-idx))
+
+  (define (wasm-module-add-tag! mod type-idx)
+    (wasm-module-tags-set! mod (append (wasm-module-tags mod) (list type-idx))))
 
   ;;; ========== Binary encoding helpers ==========
 
@@ -341,6 +379,22 @@
 
   ;;; ========== Module encoding ==========
 
+  ;; Encode tag section (section 13) for exception handling
+  (define (encode-tag-section tags)
+    (if (null? tags)
+      (bytevector)
+      (let ([content
+             (bv-concat
+               (encode-u32-leb128 (length tags))
+               (bv-concat-list
+                 (map (lambda (tidx)
+                        (bv-concat (bytevector #x00)  ; attribute: exception
+                                   (encode-u32-leb128 tidx)))
+                      tags)))])
+        (bv-concat (bytevector wasm-section-tag)
+                   (encode-u32-leb128 (bytevector-length content))
+                   content))))
+
   (define (wasm-module-encode mod)
     (bv-concat
       wasm-magic
@@ -355,7 +409,8 @@
       (encode-start-section (wasm-module-start mod))
       (encode-element-section (wasm-module-elements mod))
       (encode-code-section (wasm-module-functions mod))
-      (encode-data-section (wasm-module-data-segments mod))))
+      (encode-data-section (wasm-module-data-segments mod))
+      (encode-tag-section (wasm-module-tags mod))))
 
   ;;; ========== Type conversion ==========
 
@@ -442,14 +497,21 @@
     (and (pair? expr)
          (or (memq (car expr)
                    '(set! while when unless i32.store i64.store f32.store f64.store
-                     i32.store8 i32.store16 global.set drop))
+                     i32.store8 i32.store16 global.set drop
+                     memory.fill memory.copy memory.init data.drop
+                     table.set table.fill struct.set array.set throw))
              ;; let/let*/begin whose last body expr is void
              (and (memq (car expr) '(let let* begin))
                   (let ([body (case (car expr)
                                 [(begin) (cdr expr)]
                                 [(let let*) (cddr expr)])])
                     (and (pair? body)
-                         (void-expr? (car (last-pair body)))))))))
+                         (void-expr? (car (last-pair body))))))
+             ;; if/else where both branches are void
+             (and (eq? (car expr) 'if)
+                  (>= (length (cdr expr)) 3)
+                  (void-expr? (caddr expr))
+                  (void-expr? (cadddr expr))))))
 
   ;; Compile a body (list of expressions, result is last)
   (define (compile-body exprs ctx)
@@ -551,13 +613,17 @@
                   [then (cadr args)]
                   [else-part (if (null? (cddr args)) #f (caddr args))])
               (if else-part
-                (bv-concat
-                  (compile-expr test ctx)
-                  (bytevector wasm-opcode-if wasm-type-i32)
-                  (compile-expr then ctx)
-                  (bytevector wasm-opcode-else)
-                  (compile-expr else-part ctx)
-                  (bytevector wasm-opcode-end))
+                ;; if/else: void when both branches are void, i32 otherwise
+                (let ([block-type (if (and (void-expr? then) (void-expr? else-part))
+                                    wasm-type-void
+                                    wasm-type-i32)])
+                  (bv-concat
+                    (compile-expr test ctx)
+                    (bytevector wasm-opcode-if block-type)
+                    (compile-expr then ctx)
+                    (bytevector wasm-opcode-else)
+                    (compile-expr else-part ctx)
+                    (bytevector wasm-opcode-end)))
                 ;; No else: void block type
                 (bv-concat
                   (compile-expr test ctx)
@@ -906,6 +972,205 @@
             (bv-concat (compile-expr (car args) ctx)
                        (bytevector wasm-opcode-drop))]
 
+           ;; =============== POST-MVP EXPRESSION FORMS ===============
+
+           ;; -- Saturating float-to-int conversions --
+           ;; (i32.trunc_sat_f32_s expr) etc.
+           [(i32.trunc_sat_f32_s)
+            (bv-concat (compile-expr (car args) ctx) (bytevector wasm-prefix-fc) (encode-u32-leb128 0))]
+           [(i32.trunc_sat_f32_u)
+            (bv-concat (compile-expr (car args) ctx) (bytevector wasm-prefix-fc) (encode-u32-leb128 1))]
+           [(i32.trunc_sat_f64_s)
+            (bv-concat (compile-expr (car args) ctx) (bytevector wasm-prefix-fc) (encode-u32-leb128 2))]
+           [(i32.trunc_sat_f64_u)
+            (bv-concat (compile-expr (car args) ctx) (bytevector wasm-prefix-fc) (encode-u32-leb128 3))]
+           [(i64.trunc_sat_f32_s)
+            (bv-concat (compile-expr (car args) ctx) (bytevector wasm-prefix-fc) (encode-u32-leb128 4))]
+           [(i64.trunc_sat_f32_u)
+            (bv-concat (compile-expr (car args) ctx) (bytevector wasm-prefix-fc) (encode-u32-leb128 5))]
+           [(i64.trunc_sat_f64_s)
+            (bv-concat (compile-expr (car args) ctx) (bytevector wasm-prefix-fc) (encode-u32-leb128 6))]
+           [(i64.trunc_sat_f64_u)
+            (bv-concat (compile-expr (car args) ctx) (bytevector wasm-prefix-fc) (encode-u32-leb128 7))]
+
+           ;; -- Bulk memory operations --
+           ;; (memory.fill dest val count)
+           [(memory.fill)
+            (bv-concat (compile-expr (car args) ctx)
+                       (compile-expr (cadr args) ctx)
+                       (compile-expr (caddr args) ctx)
+                       (bytevector wasm-prefix-fc) (encode-u32-leb128 11)
+                       (bytevector #x00))]  ; reserved byte
+           ;; (memory.copy dest src count)
+           [(memory.copy)
+            (bv-concat (compile-expr (car args) ctx)
+                       (compile-expr (cadr args) ctx)
+                       (compile-expr (caddr args) ctx)
+                       (bytevector wasm-prefix-fc) (encode-u32-leb128 10)
+                       (bytevector #x00 #x00))]  ; 2 reserved bytes
+           ;; (memory.init seg-idx dest src count)
+           [(memory.init)
+            (bv-concat (compile-expr (cadr args) ctx)     ; dest
+                       (compile-expr (caddr args) ctx)    ; src
+                       (compile-expr (cadddr args) ctx)   ; count
+                       (bytevector wasm-prefix-fc) (encode-u32-leb128 8)
+                       (encode-u32-leb128 (car args))     ; seg-idx
+                       (bytevector #x00))]                 ; reserved
+           ;; (data.drop seg-idx)
+           [(data.drop)
+            (bv-concat (bytevector wasm-prefix-fc) (encode-u32-leb128 9)
+                       (encode-u32-leb128 (car args)))]
+
+           ;; -- Table operations --
+           ;; (table.get table-idx idx-expr)
+           [(table.get)
+            (bv-concat (compile-expr (cadr args) ctx)
+                       (bytevector wasm-opcode-table-get) (encode-u32-leb128 (car args)))]
+           ;; (table.set table-idx idx-expr val-expr)
+           [(table.set)
+            (bv-concat (compile-expr (cadr args) ctx)
+                       (compile-expr (caddr args) ctx)
+                       (bytevector wasm-opcode-table-set) (encode-u32-leb128 (car args)))]
+           ;; (table.size table-idx)
+           [(table.size)
+            (bv-concat (bytevector wasm-prefix-fc) (encode-u32-leb128 16)
+                       (encode-u32-leb128 (car args)))]
+           ;; (table.grow table-idx init-expr count-expr)
+           [(table.grow)
+            (bv-concat (compile-expr (cadr args) ctx)
+                       (compile-expr (caddr args) ctx)
+                       (bytevector wasm-prefix-fc) (encode-u32-leb128 15)
+                       (encode-u32-leb128 (car args)))]
+           ;; (table.fill table-idx start-expr val-expr count-expr)
+           [(table.fill)
+            (bv-concat (compile-expr (cadr args) ctx)
+                       (compile-expr (caddr args) ctx)
+                       (compile-expr (cadddr args) ctx)
+                       (bytevector wasm-prefix-fc) (encode-u32-leb128 17)
+                       (encode-u32-leb128 (car args)))]
+
+           ;; -- Reference types --
+           ;; (ref.null type)  -- type is a numeric type code
+           [(ref.null)
+            (bv-concat (bytevector wasm-opcode-ref-null) (encode-u32-leb128 (car args)))]
+           ;; (ref.is_null expr)
+           [(ref.is_null)
+            (bv-concat (compile-expr (car args) ctx) (bytevector wasm-opcode-ref-is-null))]
+           ;; (ref.func func-idx)
+           [(ref.func)
+            (bv-concat (bytevector wasm-opcode-ref-func) (encode-u32-leb128 (car args)))]
+
+           ;; -- Tail calls --
+           ;; (return-call name args...)
+           [(return-call)
+            (let ([fidx (context-func-index ctx (car args))])
+              (bv-concat
+                (bv-concat-list (map (lambda (a) (compile-expr a ctx)) (cdr args)))
+                (bytevector wasm-opcode-return-call)
+                (encode-u32-leb128 fidx)))]
+           ;; (return-call-indirect type-idx args... table-idx-expr)
+           [(return-call-indirect)
+            (let ([type-idx (car args)]
+                  [call-args (cdr args)])
+              (bv-concat
+                (bv-concat-list (map (lambda (a) (compile-expr a ctx)) call-args))
+                (bytevector wasm-opcode-return-call-indirect)
+                (encode-u32-leb128 type-idx)
+                (encode-u32-leb128 0)))]  ; table 0
+
+           ;; -- Exception handling --
+           ;; (throw tag-idx args...)
+           [(throw)
+            (bv-concat
+              (bv-concat-list (map (lambda (a) (compile-expr a ctx)) (cdr args)))
+              (bytevector wasm-opcode-throw) (encode-u32-leb128 (car args)))]
+
+           ;; -- GC: struct operations --
+           ;; (struct.new type-idx field-exprs...)
+           [(struct.new)
+            (bv-concat
+              (bv-concat-list (map (lambda (a) (compile-expr a ctx)) (cdr args)))
+              (bytevector wasm-prefix-fb) (encode-u32-leb128 wasm-fb-struct-new)
+              (encode-u32-leb128 (car args)))]
+           ;; (struct.new_default type-idx)
+           [(struct.new_default)
+            (bv-concat (bytevector wasm-prefix-fb) (encode-u32-leb128 wasm-fb-struct-new-default)
+                       (encode-u32-leb128 (car args)))]
+           ;; (struct.get type-idx field-idx ref-expr)
+           [(struct.get)
+            (bv-concat (compile-expr (caddr args) ctx)
+                       (bytevector wasm-prefix-fb) (encode-u32-leb128 wasm-fb-struct-get)
+                       (encode-u32-leb128 (car args)) (encode-u32-leb128 (cadr args)))]
+           ;; (struct.set type-idx field-idx ref-expr val-expr)
+           [(struct.set)
+            (bv-concat (compile-expr (caddr args) ctx)
+                       (compile-expr (cadddr args) ctx)
+                       (bytevector wasm-prefix-fb) (encode-u32-leb128 wasm-fb-struct-set)
+                       (encode-u32-leb128 (car args)) (encode-u32-leb128 (cadr args)))]
+
+           ;; -- GC: array operations --
+           ;; (array.new type-idx init-expr count-expr)
+           [(array.new)
+            (bv-concat (compile-expr (cadr args) ctx)
+                       (compile-expr (caddr args) ctx)
+                       (bytevector wasm-prefix-fb) (encode-u32-leb128 wasm-fb-array-new)
+                       (encode-u32-leb128 (car args)))]
+           ;; (array.new_default type-idx count-expr)
+           [(array.new_default)
+            (bv-concat (compile-expr (cadr args) ctx)
+                       (bytevector wasm-prefix-fb) (encode-u32-leb128 wasm-fb-array-new-default)
+                       (encode-u32-leb128 (car args)))]
+           ;; (array.new_fixed type-idx elem-exprs...)
+           [(array.new_fixed)
+            (let ([elems (cdr args)])
+              (bv-concat
+                (bv-concat-list (map (lambda (a) (compile-expr a ctx)) elems))
+                (bytevector wasm-prefix-fb) (encode-u32-leb128 wasm-fb-array-new-fixed)
+                (encode-u32-leb128 (car args)) (encode-u32-leb128 (length elems))))]
+           ;; (array.get type-idx arr-expr idx-expr)
+           [(array.get)
+            (bv-concat (compile-expr (cadr args) ctx)
+                       (compile-expr (caddr args) ctx)
+                       (bytevector wasm-prefix-fb) (encode-u32-leb128 wasm-fb-array-get)
+                       (encode-u32-leb128 (car args)))]
+           ;; (array.set type-idx arr-expr idx-expr val-expr)
+           [(array.set)
+            (bv-concat (compile-expr (cadr args) ctx)
+                       (compile-expr (caddr args) ctx)
+                       (compile-expr (cadddr args) ctx)
+                       (bytevector wasm-prefix-fb) (encode-u32-leb128 wasm-fb-array-set)
+                       (encode-u32-leb128 (car args)))]
+           ;; (array.len arr-expr)
+           [(array.len)
+            (bv-concat (compile-expr (car args) ctx)
+                       (bytevector wasm-prefix-fb) (encode-u32-leb128 wasm-fb-array-len))]
+
+           ;; -- GC: i31 operations --
+           ;; (ref.i31 expr)
+           [(ref.i31)
+            (bv-concat (compile-expr (car args) ctx)
+                       (bytevector wasm-prefix-fb) (encode-u32-leb128 wasm-fb-ref-i31))]
+           ;; (i31.get_s expr)
+           [(i31.get_s)
+            (bv-concat (compile-expr (car args) ctx)
+                       (bytevector wasm-prefix-fb) (encode-u32-leb128 wasm-fb-i31-get-s))]
+           ;; (i31.get_u expr)
+           [(i31.get_u)
+            (bv-concat (compile-expr (car args) ctx)
+                       (bytevector wasm-prefix-fb) (encode-u32-leb128 wasm-fb-i31-get-u))]
+
+           ;; -- GC: ref.test / ref.cast --
+           ;; (ref.test type-idx expr)
+           [(ref.test)
+            (bv-concat (compile-expr (cadr args) ctx)
+                       (bytevector wasm-prefix-fb) (encode-u32-leb128 wasm-fb-ref-test)
+                       (encode-u32-leb128 (car args)))]
+           ;; (ref.cast type-idx expr)
+           [(ref.cast)
+            (bv-concat (compile-expr (cadr args) ctx)
+                       (bytevector wasm-prefix-fb) (encode-u32-leb128 wasm-fb-ref-cast)
+                       (encode-u32-leb128 (car args)))]
+
            ;; -- Indirect call --
            [(call-indirect)
             ;; (call-indirect type-idx arg1 ... argn table-idx-expr)
@@ -1015,6 +1280,9 @@
                                                     (encode-f64 (exact->inexact init-val)))]
                                  [else (error 'compile-program "unsupported global type" gtype)])])
                  (wasm-module-add-global! mod gtype mut? init-bv))]
+              [(define-tag)
+               ;; (define-tag type-idx)
+               (wasm-module-add-tag! mod (cadr form))]
               [else (void)])))
         forms)
 
@@ -1026,14 +1294,20 @@
               (when (pair? sig)
                 (let* ([name (car sig)]
                        [raw-params (cdr sig)]
-                       ;; Filter out -> return type annotation
+                       [body-forms (cddr form)]
+                       ;; Filter out -> return type annotation from params
                        [params (let loop ([ps raw-params])
                                  (cond [(null? ps) '()]
                                        [(eq? (car ps) '->) '()]
                                        [else (cons (parse-param (car ps))
                                                    (loop (cdr ps)))]))]
+                       ;; Check both param list and body forms for -> rtype
                        [rtype (let loop ([ps raw-params])
-                                (cond [(null? ps) wasm-type-i32]
+                                (cond [(null? ps)
+                                       ;; Not in params — check body forms
+                                       (if (and (pair? body-forms) (eq? (car body-forms) '->))
+                                         (scheme->wasm-type (cadr body-forms))
+                                         wasm-type-i32)]
                                       [(eq? (car ps) '->) (scheme->wasm-type (cadr ps))]
                                       [else (loop (cdr ps))]))])
                   (context-add-func! global-ctx name)
@@ -1048,7 +1322,11 @@
         (lambda (form)
           (when (and (pair? form) (eq? (car form) 'define))
             (let* ([sig (cadr form)]
-                   [body-forms (cddr form)])
+                   [raw-body (cddr form)]
+                   ;; Strip -> return type annotation from body forms
+                   [body-forms (if (and (pair? raw-body) (eq? (car raw-body) '->))
+                                 (cddr raw-body)  ; skip -> and type
+                                 raw-body)])
               (when (pair? sig)
                 (let* ([name (car sig)]
                        [sig-entry (let loop ([ns func-names] [ss func-sigs])

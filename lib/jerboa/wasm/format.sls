@@ -142,6 +142,64 @@
     wasm-opcode-i32-extend8-s wasm-opcode-i32-extend16-s
     wasm-opcode-i64-extend8-s wasm-opcode-i64-extend16-s wasm-opcode-i64-extend32-s
 
+    ;; ---- Post-MVP: GC value types ----
+    wasm-type-anyref wasm-type-eqref wasm-type-i31ref
+    wasm-type-structref wasm-type-arrayref
+    wasm-type-nullref wasm-type-nullfuncref wasm-type-nullexternref
+    wasm-type-noneref
+
+    ;; ---- Post-MVP: Composite type tags ----
+    wasm-composite-func wasm-composite-struct wasm-composite-array
+    wasm-type-rec wasm-type-sub wasm-type-sub-final
+
+    ;; ---- Post-MVP: Tag section ----
+    wasm-section-tag
+
+    ;; ---- Post-MVP: Prefix bytes ----
+    wasm-prefix-fc wasm-prefix-fb
+
+    ;; ---- Post-MVP: Tail call opcodes ----
+    wasm-opcode-return-call wasm-opcode-return-call-indirect
+
+    ;; ---- Post-MVP: Exception handling opcodes ----
+    wasm-opcode-try wasm-opcode-catch wasm-opcode-throw
+    wasm-opcode-rethrow wasm-opcode-delegate wasm-opcode-catch-all
+
+    ;; ---- Post-MVP: Typed select ----
+    wasm-opcode-select-t
+
+    ;; ---- Post-MVP: Reference opcodes ----
+    wasm-opcode-ref-null wasm-opcode-ref-is-null wasm-opcode-ref-func
+
+    ;; ---- Post-MVP: Table opcodes ----
+    wasm-opcode-table-get wasm-opcode-table-set
+
+    ;; ---- Post-MVP: 0xFC sub-opcodes ----
+    wasm-fc-i32-trunc-sat-f32-s wasm-fc-i32-trunc-sat-f32-u
+    wasm-fc-i32-trunc-sat-f64-s wasm-fc-i32-trunc-sat-f64-u
+    wasm-fc-i64-trunc-sat-f32-s wasm-fc-i64-trunc-sat-f32-u
+    wasm-fc-i64-trunc-sat-f64-s wasm-fc-i64-trunc-sat-f64-u
+    wasm-fc-memory-init wasm-fc-data-drop
+    wasm-fc-memory-copy wasm-fc-memory-fill
+    wasm-fc-table-init wasm-fc-elem-drop wasm-fc-table-copy
+    wasm-fc-table-grow wasm-fc-table-size wasm-fc-table-fill
+
+    ;; ---- Post-MVP: 0xFB sub-opcodes (GC proposal) ----
+    wasm-fb-struct-new wasm-fb-struct-new-default
+    wasm-fb-struct-get wasm-fb-struct-get-s wasm-fb-struct-get-u
+    wasm-fb-struct-set
+    wasm-fb-array-new wasm-fb-array-new-default
+    wasm-fb-array-new-fixed wasm-fb-array-new-data wasm-fb-array-new-elem
+    wasm-fb-array-get wasm-fb-array-get-s wasm-fb-array-get-u
+    wasm-fb-array-set wasm-fb-array-len
+    wasm-fb-array-fill wasm-fb-array-copy
+    wasm-fb-array-init-data wasm-fb-array-init-elem
+    wasm-fb-ref-test wasm-fb-ref-test-null
+    wasm-fb-ref-cast wasm-fb-ref-cast-null
+    wasm-fb-br-on-cast wasm-fb-br-on-cast-fail
+    wasm-fb-extern-internalize wasm-fb-extern-externalize
+    wasm-fb-ref-i31 wasm-fb-i31-get-s wasm-fb-i31-get-u
+
     ;; Bytevector builder
     make-bytevector-builder
     bytevector-builder-append-u8!
@@ -403,6 +461,120 @@
   (define wasm-opcode-i64-extend8-s   #xC2)
   (define wasm-opcode-i64-extend16-s  #xC3)
   (define wasm-opcode-i64-extend32-s  #xC4)
+
+  ;;; ========== Post-MVP: GC value types ==========
+
+  (define wasm-type-anyref         #x6E)
+  (define wasm-type-eqref          #x6D)
+  (define wasm-type-i31ref         #x6C)
+  (define wasm-type-structref      #x6B)
+  (define wasm-type-arrayref       #x6A)
+  (define wasm-type-nullref        #x69)
+  (define wasm-type-nullfuncref    #x68)
+  (define wasm-type-nullexternref  #x67)
+  (define wasm-type-noneref        #x65)
+
+  ;;; ========== Post-MVP: Composite type tags ==========
+
+  (define wasm-composite-func    #x60)
+  (define wasm-composite-struct  #x5F)
+  (define wasm-composite-array   #x5E)
+  (define wasm-type-rec          #x4E)
+  (define wasm-type-sub          #x50)
+  (define wasm-type-sub-final    #x4F)
+
+  ;;; ========== Post-MVP: Tag section ==========
+
+  (define wasm-section-tag 13)
+
+  ;;; ========== Post-MVP: Prefix bytes ==========
+
+  (define wasm-prefix-fc #xFC)
+  (define wasm-prefix-fb #xFB)
+
+  ;;; ========== Post-MVP: Tail call opcodes ==========
+
+  (define wasm-opcode-return-call          #x12)
+  (define wasm-opcode-return-call-indirect #x13)
+
+  ;;; ========== Post-MVP: Exception handling opcodes ==========
+
+  (define wasm-opcode-try        #x06)
+  (define wasm-opcode-catch      #x07)
+  (define wasm-opcode-throw      #x08)
+  (define wasm-opcode-rethrow    #x09)
+  (define wasm-opcode-delegate   #x18)
+  (define wasm-opcode-catch-all  #x19)
+
+  ;;; ========== Post-MVP: Typed select ==========
+
+  (define wasm-opcode-select-t   #x1C)
+
+  ;;; ========== Post-MVP: Reference opcodes ==========
+
+  (define wasm-opcode-ref-null    #xD0)
+  (define wasm-opcode-ref-is-null #xD1)
+  (define wasm-opcode-ref-func    #xD2)
+
+  ;;; ========== Post-MVP: Table opcodes ==========
+
+  (define wasm-opcode-table-get   #x25)
+  (define wasm-opcode-table-set   #x26)
+
+  ;;; ========== Post-MVP: 0xFC sub-opcodes ==========
+
+  (define wasm-fc-i32-trunc-sat-f32-s 0)
+  (define wasm-fc-i32-trunc-sat-f32-u 1)
+  (define wasm-fc-i32-trunc-sat-f64-s 2)
+  (define wasm-fc-i32-trunc-sat-f64-u 3)
+  (define wasm-fc-i64-trunc-sat-f32-s 4)
+  (define wasm-fc-i64-trunc-sat-f32-u 5)
+  (define wasm-fc-i64-trunc-sat-f64-s 6)
+  (define wasm-fc-i64-trunc-sat-f64-u 7)
+  (define wasm-fc-memory-init  8)
+  (define wasm-fc-data-drop    9)
+  (define wasm-fc-memory-copy 10)
+  (define wasm-fc-memory-fill 11)
+  (define wasm-fc-table-init  12)
+  (define wasm-fc-elem-drop   13)
+  (define wasm-fc-table-copy  14)
+  (define wasm-fc-table-grow  15)
+  (define wasm-fc-table-size  16)
+  (define wasm-fc-table-fill  17)
+
+  ;;; ========== Post-MVP: 0xFB sub-opcodes (GC proposal) ==========
+
+  (define wasm-fb-struct-new         #x00)
+  (define wasm-fb-struct-new-default #x01)
+  (define wasm-fb-struct-get         #x02)
+  (define wasm-fb-struct-get-s       #x03)
+  (define wasm-fb-struct-get-u       #x04)
+  (define wasm-fb-struct-set         #x05)
+  (define wasm-fb-array-new          #x06)
+  (define wasm-fb-array-new-default  #x07)
+  (define wasm-fb-array-new-fixed    #x08)
+  (define wasm-fb-array-new-data     #x09)
+  (define wasm-fb-array-new-elem     #x0A)
+  (define wasm-fb-array-get          #x0B)
+  (define wasm-fb-array-get-s        #x0C)
+  (define wasm-fb-array-get-u        #x0D)
+  (define wasm-fb-array-set          #x0E)
+  (define wasm-fb-array-len          #x0F)
+  (define wasm-fb-array-fill         #x10)
+  (define wasm-fb-array-copy         #x11)
+  (define wasm-fb-array-init-data    #x12)
+  (define wasm-fb-array-init-elem    #x13)
+  (define wasm-fb-ref-test           #x14)
+  (define wasm-fb-ref-test-null      #x15)
+  (define wasm-fb-ref-cast           #x16)
+  (define wasm-fb-ref-cast-null      #x17)
+  (define wasm-fb-br-on-cast         #x18)
+  (define wasm-fb-br-on-cast-fail    #x19)
+  (define wasm-fb-extern-internalize #x1A)
+  (define wasm-fb-extern-externalize #x1B)
+  (define wasm-fb-ref-i31            #x1C)
+  (define wasm-fb-i31-get-s          #x1D)
+  (define wasm-fb-i31-get-u          #x1E)
 
   ;;; ========== Bytevector builder ==========
 

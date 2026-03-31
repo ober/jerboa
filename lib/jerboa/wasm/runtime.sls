@@ -20,7 +20,13 @@
     wasm-instance? wasm-instance-exports
     wasm-decode-module wasm-module-sections wasm-run-start
     wasm-validate-module
-    make-wasm-store wasm-store? wasm-store-instantiate)
+    make-wasm-store wasm-store? wasm-store-instantiate
+    ;; Post-MVP: GC types
+    make-wasm-struct wasm-struct? wasm-struct-type-idx wasm-struct-fields
+    make-wasm-array wasm-array? wasm-array-type-idx wasm-array-data
+    make-wasm-i31 wasm-i31? wasm-i31-value
+    ;; Post-MVP: Exception handling
+    make-wasm-tag wasm-tag? wasm-tag-type-idx)
 
   (import (chezscheme)
           (jerboa wasm format))
@@ -36,6 +42,34 @@
     make-wasm-branch wasm-branch?
     (depth wasm-branch-depth)
     (val   wasm-branch-val))
+
+  ;;; ========== Post-MVP: GC record types ==========
+
+  (define-record-type wasm-struct
+    (fields type-idx (mutable fields)))  ; fields = vector
+
+  (define-record-type wasm-array
+    (fields type-idx (mutable data)))    ; data = vector
+
+  (define-record-type wasm-i31
+    (fields value))                      ; 31-bit signed integer
+
+  ;;; ========== Post-MVP: Exception handling types ==========
+
+  (define-record-type wasm-tag
+    (fields type-idx))
+
+  (define-condition-type &wasm-exception &condition
+    make-wasm-exception wasm-exception?
+    (tag-idx wasm-exception-tag-idx)
+    (values  wasm-exception-values))
+
+  ;;; ========== Post-MVP: Tail call condition ==========
+
+  (define-condition-type &wasm-tail-call &condition
+    make-wasm-tail-call wasm-tail-call?
+    (func-idx wasm-tail-call-func-idx)
+    (args     wasm-tail-call-args))
 
   ;;; ========== Decoded module ==========
 
@@ -55,7 +89,10 @@
       globals        ; vector
       tables         ; vector of vectors (funcref tables)
       imports        ; vector of import entries (param-count result-count proc type-idx)
-      types))        ; list of type signatures for call_indirect checking
+      types          ; list of type signatures for call_indirect checking
+      (mutable data-segments)  ; vector of bytevectors (for memory.init/data.drop)
+      (mutable elem-segments)  ; vector of vectors (for table.init/elem.drop)
+      tags))         ; vector of wasm-tag records (for throw/catch)
 
   ;; Public accessor: returns the raw bytevector
   (define (wasm-instance-memory inst)
@@ -351,13 +388,20 @@
           ;; No immediates
           [(or (= op #x00) (= op #x01) (= op #x0F) (= op #x1A) (= op #x1B)
                (and (>= op #x45) (<= op #xC4))
-               (= op #x0B) (= op #x05))
+               (= op #x0B) (= op #x05)
+               (= op #xD1))  ; ref.is_null
            (+ pos 1)]
           ;; One LEB128 immediate
           [(or (= op #x0C) (= op #x0D)  ; br, br_if
                (= op #x10)              ; call
+               (= op #x12)              ; return_call
                (= op #x20) (= op #x21) (= op #x22)  ; local ops
-               (= op #x23) (= op #x24))             ; global ops
+               (= op #x23) (= op #x24)               ; global ops
+               (= op #x25) (= op #x26)               ; table.get, table.set
+               (= op #x08)              ; throw (tag index)
+               (= op #x09)              ; rethrow (depth)
+               (= op #xD0)              ; ref.null (type)
+               (= op #xD2))             ; ref.func (func index)
            (let* ([r (decode-u32-leb128 bv (+ pos 1))])
              (+ pos 1 (cdr r)))]
           ;; i32.const / i64.const (signed LEB128)
@@ -371,14 +415,29 @@
           [(= op #x43) (+ pos 5)]
           ;; f64.const: 8 bytes
           [(= op #x44) (+ pos 9)]
-          ;; block/loop: 1 byte block type
-          [(or (= op #x02) (= op #x03)) (+ pos 2)]
+          ;; block/loop/try: 1 byte block type
+          [(or (= op #x02) (= op #x03) (= op #x06)) (+ pos 2)]
           ;; if: 1 byte block type
           [(= op #x04) (+ pos 2)]
+          ;; catch: 1 LEB128 (tag index)
+          [(= op #x07)
+           (let* ([r (decode-u32-leb128 bv (+ pos 1))])
+             (+ pos 1 (cdr r)))]
+          ;; delegate: 1 LEB128 (depth)
+          [(= op #x18)
+           (let* ([r (decode-u32-leb128 bv (+ pos 1))])
+             (+ pos 1 (cdr r)))]
+          ;; catch_all: no immediates
+          [(= op #x19) (+ pos 1)]
+          ;; select_t: 1 LEB128 count + count type bytes
+          [(= op #x1C)
+           (let* ([r (decode-u32-leb128 bv (+ pos 1))]
+                  [count (car r)])
+             (+ pos 1 (cdr r) count))]
           ;; memory.size, memory.grow: 1 byte (reserved)
           [(or (= op #x3F) (= op #x40)) (+ pos 2)]
-          ;; call_indirect: 2 LEB128
-          [(= op #x11)
+          ;; call_indirect / return_call_indirect: 2 LEB128
+          [(or (= op #x11) (= op #x13))
            (let* ([r1 (decode-u32-leb128 bv (+ pos 1))]
                   [r2 (decode-u32-leb128 bv (+ pos 1 (cdr r1)))])
              (+ pos 1 (cdr r1) (cdr r2)))]
@@ -395,6 +454,100 @@
            (let* ([r1 (decode-u32-leb128 bv (+ pos 1))]
                   [r2 (decode-u32-leb128 bv (+ pos 1 (cdr r1)))])
              (+ pos 1 (cdr r1) (cdr r2)))]
+          ;; 0xFC prefix: sub-opcode LEB128 + varying immediates
+          [(= op #xFC)
+           (let* ([r (decode-u32-leb128 bv (+ pos 1))]
+                  [sub (car r)]
+                  [p (+ pos 1 (cdr r))])
+             (cond
+               [(<= sub 7) p]  ; sat truncations: no extra immediates
+               [(= sub 8)   ; memory.init: data-idx + 0x00
+                (let* ([r2 (decode-u32-leb128 bv p)]) (+ p (cdr r2) 1))]
+               [(= sub 9)   ; data.drop: data-idx
+                (let* ([r2 (decode-u32-leb128 bv p)]) (+ p (cdr r2)))]
+               [(= sub 10)  ; memory.copy: 0x00 0x00
+                (+ p 2)]
+               [(= sub 11)  ; memory.fill: 0x00
+                (+ p 1)]
+               [(= sub 12)  ; table.init: elem-idx + table-idx
+                (let* ([r2 (decode-u32-leb128 bv p)]
+                       [r3 (decode-u32-leb128 bv (+ p (cdr r2)))])
+                  (+ p (cdr r2) (cdr r3)))]
+               [(= sub 13)  ; elem.drop: elem-idx
+                (let* ([r2 (decode-u32-leb128 bv p)]) (+ p (cdr r2)))]
+               [(= sub 14)  ; table.copy: dst-table + src-table
+                (let* ([r2 (decode-u32-leb128 bv p)]
+                       [r3 (decode-u32-leb128 bv (+ p (cdr r2)))])
+                  (+ p (cdr r2) (cdr r3)))]
+               [(= sub 15)  ; table.grow: table-idx
+                (let* ([r2 (decode-u32-leb128 bv p)]) (+ p (cdr r2)))]
+               [(= sub 16)  ; table.size: table-idx
+                (let* ([r2 (decode-u32-leb128 bv p)]) (+ p (cdr r2)))]
+               [(= sub 17)  ; table.fill: table-idx
+                (let* ([r2 (decode-u32-leb128 bv p)]) (+ p (cdr r2)))]
+               [else p]))]
+          ;; 0xFB prefix: sub-opcode LEB128 + varying immediates
+          [(= op #xFB)
+           (let* ([r (decode-u32-leb128 bv (+ pos 1))]
+                  [sub (car r)]
+                  [p (+ pos 1 (cdr r))])
+             (cond
+               ;; struct.new, struct.new_default: type-idx
+               [(or (= sub #x00) (= sub #x01))
+                (let* ([r2 (decode-u32-leb128 bv p)]) (+ p (cdr r2)))]
+               ;; struct.get/get_s/get_u/set: type-idx + field-idx
+               [(and (>= sub #x02) (<= sub #x05))
+                (let* ([r2 (decode-u32-leb128 bv p)]
+                       [r3 (decode-u32-leb128 bv (+ p (cdr r2)))])
+                  (+ p (cdr r2) (cdr r3)))]
+               ;; array.new, array.new_default: type-idx
+               [(or (= sub #x06) (= sub #x07))
+                (let* ([r2 (decode-u32-leb128 bv p)]) (+ p (cdr r2)))]
+               ;; array.new_fixed: type-idx + count
+               [(= sub #x08)
+                (let* ([r2 (decode-u32-leb128 bv p)]
+                       [r3 (decode-u32-leb128 bv (+ p (cdr r2)))])
+                  (+ p (cdr r2) (cdr r3)))]
+               ;; array.new_data/new_elem: type-idx + data/elem-idx
+               [(or (= sub #x09) (= sub #x0A))
+                (let* ([r2 (decode-u32-leb128 bv p)]
+                       [r3 (decode-u32-leb128 bv (+ p (cdr r2)))])
+                  (+ p (cdr r2) (cdr r3)))]
+               ;; array.get/get_s/get_u/set: type-idx
+               [(and (>= sub #x0B) (<= sub #x0E))
+                (let* ([r2 (decode-u32-leb128 bv p)]) (+ p (cdr r2)))]
+               ;; array.len: no immediates
+               [(= sub #x0F) p]
+               ;; array.fill: type-idx
+               [(= sub #x10)
+                (let* ([r2 (decode-u32-leb128 bv p)]) (+ p (cdr r2)))]
+               ;; array.copy: dst-type + src-type
+               [(= sub #x11)
+                (let* ([r2 (decode-u32-leb128 bv p)]
+                       [r3 (decode-u32-leb128 bv (+ p (cdr r2)))])
+                  (+ p (cdr r2) (cdr r3)))]
+               ;; array.init_data/init_elem: type-idx + seg-idx
+               [(or (= sub #x12) (= sub #x13))
+                (let* ([r2 (decode-u32-leb128 bv p)]
+                       [r3 (decode-u32-leb128 bv (+ p (cdr r2)))])
+                  (+ p (cdr r2) (cdr r3)))]
+               ;; ref.test/cast/test_null/cast_null: type-idx
+               [(and (>= sub #x14) (<= sub #x17))
+                (let* ([r2 (decode-u32-leb128 bv p)]) (+ p (cdr r2)))]
+               ;; br_on_cast/br_on_cast_fail: flags + label + type1 + type2
+               [(or (= sub #x18) (= sub #x19))
+                (let* ([flags (+ p 1)]  ; 1 byte flags
+                       [r2 (decode-u32-leb128 bv flags)]
+                       [r3 (decode-u32-leb128 bv (+ flags (cdr r2)))]
+                       [r4 (decode-u32-leb128 bv (+ flags (cdr r2) (cdr r3)))])
+                  (+ flags (cdr r2) (cdr r3) (cdr r4)))]
+               ;; extern.internalize/externalize: no immediates
+               [(or (= sub #x1A) (= sub #x1B)) p]
+               ;; ref.i31: no immediates
+               [(= sub #x1C) p]
+               ;; i31.get_s/get_u: no immediates
+               [(or (= sub #x1D) (= sub #x1E)) p]
+               [else p]))]
           [else (+ pos 1)]))))
 
   (define (skip-to-else-or-end bv pos len)
@@ -665,7 +818,7 @@
 
   ;; limits = (vector fuel max-call-depth max-stack-depth max-memory-pages)
   ;; memory-box = (vector bytevector) -- shared mutable reference
-  (define (execute-func code-bv locals-vec all-funcs memory-box globals tables imports limits depth types)
+  (define (execute-func code-bv locals-vec all-funcs memory-box globals tables imports limits depth types data-segs elem-segs tags)
     ;; Check call depth
     (let ([max-depth (vector-ref limits 1)])
       (when (> depth max-depth)
@@ -787,6 +940,8 @@
               (guard (exn
                 [(wasm-trap? exn) (raise exn)]
                 [(wasm-branch? exn) (raise exn)]
+                [(wasm-tail-call? exn) (raise exn)]
+                [(wasm-exception? exn) (raise exn)]
                 [(condition? exn)
                  (raise (make-wasm-trap
                    (string-append "type error at opcode 0x"
@@ -916,7 +1071,7 @@
                            (unless (null? args)
                              (vector-set! new-lv i (car args))
                              (lp (+ i 1) (cdr args))))
-                         (push! (execute-func code new-lv all-funcs memory-box globals tables imports limits (+ depth 1) types)))))
+                         (push! (execute-func code new-lv all-funcs memory-box globals tables imports limits (+ depth 1) types data-segs elem-segs tags)))))
                    (step))]
 
                 ;; ---- call_indirect ----
@@ -982,7 +1137,7 @@
                              (unless (null? args)
                                (vector-set! new-lv i (car args))
                                (lp (+ i 1) (cdr args))))
-                           (push! (execute-func code new-lv all-funcs memory-box globals tables imports limits (+ depth 1) types)))))))
+                           (push! (execute-func code new-lv all-funcs memory-box globals tables imports limits (+ depth 1) types data-segs elem-segs tags)))))))
                  (step)]
 
                 ;; ---- drop ----
@@ -1317,13 +1472,715 @@
                  (let ([v (bitwise-and (pop!) #xFFFFFFFF)])
                    (push! (if (>= v #x80000000) (- v #x100000000) v)) (step))]
 
+                ;; =============== POST-MVP OPCODES ===============
+
+                ;; ---- return_call (tail call) ----
+                [(= op #x12)
+                 (let* ([r (decode-u32-leb128 code-bv pos)])
+                   (set! pos (+ pos (cdr r)))
+                   (let ([fidx (car r)])
+                     (if (< fidx (vector-length imports))
+                       ;; Tail call to import: just call normally (no trampoline needed)
+                       (let* ([imp-entry (vector-ref imports fidx)]
+                              [param-count (car imp-entry)]
+                              [args (let lp ([n param-count] [a '()])
+                                      (if (= n 0) a (lp (- n 1) (cons (pop!) a))))])
+                         (safe-import-call! imp-entry args))
+                       ;; Tail call to local: raise tail-call condition
+                       (let* ([local-fidx (- fidx (vector-length imports))]
+                              [fi (vector-ref all-funcs local-fidx)]
+                              [param-count (car fi)]
+                              [args (let lp ([n param-count] [a '()])
+                                      (if (= n 0) a (lp (- n 1) (cons (pop!) a))))])
+                         (raise (make-wasm-tail-call fidx args))))))]
+
+                ;; ---- return_call_indirect (tail call) ----
+                [(= op #x13)
+                 (let* ([r1 (decode-u32-leb128 code-bv pos)]
+                        [type-idx (car r1)]
+                        [r2 (decode-u32-leb128 code-bv (+ pos (cdr r1)))]
+                        [table-idx (car r2)])
+                   (set! pos (+ pos (cdr r1) (cdr r2)))
+                   (when (>= table-idx (vector-length tables))
+                     (raise (make-wasm-trap "return_call_indirect: table index OOB")))
+                   (let* ([elem-idx (pop!)]
+                          [table (vector-ref tables table-idx)])
+                     (when (or (< elem-idx 0) (>= elem-idx (vector-length table)))
+                       (raise (make-wasm-trap "return_call_indirect: element index OOB")))
+                     (let ([fidx (vector-ref table elem-idx)])
+                       (when (not fidx)
+                         (raise (make-wasm-trap "return_call_indirect: null table entry")))
+                       (let* ([local-fidx (- fidx (vector-length imports))]
+                              [fi (vector-ref all-funcs local-fidx)]
+                              [param-count (car fi)]
+                              [args (let lp ([n param-count] [a '()])
+                                      (if (= n 0) a (lp (- n 1) (cons (pop!) a))))])
+                         (raise (make-wasm-tail-call fidx args))))))]
+
+                ;; ---- try (exception handling) ----
+                [(= op #x06)
+                 (let ([bt (bytevector-u8-ref code-bv pos)])
+                   (set! pos (+ pos 1))
+                   ;; Execute try body; on wasm-exception, scan for catch/catch_all
+                   (guard (exn
+                     [(wasm-exception? exn)
+                      (let ([tag (wasm-exception-tag-idx exn)]
+                            [vals (wasm-exception-values exn)])
+                        ;; Skip to matching catch or catch_all
+                        (let scan ([p pos] [d 0])
+                          (if (>= p len)
+                            (raise exn)  ; no handler found, propagate
+                            (let ([o (bytevector-u8-ref code-bv p)])
+                              (cond
+                                [(and (= o #x07) (= d 0))  ; catch
+                                 (let* ([r (decode-u32-leb128 code-bv (+ p 1))]
+                                        [catch-tag (car r)])
+                                   (if (= catch-tag tag)
+                                     (begin
+                                       (set! pos (+ p 1 (cdr r)))
+                                       (for-each (lambda (v) (push! v)) (reverse vals))
+                                       (execute-block bt 'block))
+                                     (scan (+ p 1 (cdr r)) d)))]
+                                [(and (= o #x19) (= d 0))  ; catch_all
+                                 (set! pos (+ p 1))
+                                 (execute-block bt 'block)]
+                                [(or (= o #x02) (= o #x03) (= o #x04) (= o #x06))
+                                 (scan (skip-instr code-bv p len) (+ d 1))]
+                                [(= o #x0B)
+                                 (if (= d 0)
+                                   (raise exn)  ; end of try without matching catch
+                                   (scan (+ p 1) (- d 1)))]
+                                [else (scan (skip-instr code-bv p len) d)])))))])
+                     (execute-block bt 'block))
+                   (step))]
+
+                ;; ---- throw ----
+                [(= op #x08)
+                 (let* ([r (decode-u32-leb128 code-bv pos)]
+                        [tag-idx (car r)])
+                   (set! pos (+ pos (cdr r)))
+                   (when (>= tag-idx (vector-length tags))
+                     (raise (make-wasm-trap
+                       (string-append "throw: tag index OOB: " (number->string tag-idx)))))
+                   (let* ([tag (vector-ref tags tag-idx)]
+                          [tidx (wasm-tag-type-idx tag)]
+                          [type (list-ref types tidx)]
+                          [param-count (length (car type))]
+                          [vals (let lp ([n param-count] [a '()])
+                                  (if (= n 0) a (lp (- n 1) (cons (pop!) a))))])
+                     (raise (make-wasm-exception tag-idx vals))))]
+
+                ;; ---- rethrow ----
+                [(= op #x09)
+                 (let* ([r (decode-u32-leb128 code-bv pos)])
+                   (set! pos (+ pos (cdr r)))
+                   ;; Rethrow is only valid inside catch; for now trap
+                   (raise (make-wasm-trap "rethrow: not inside catch handler")))]
+
+                ;; ---- select_t (typed select) ----
+                [(= op #x1C)
+                 (let* ([r (decode-u32-leb128 code-bv pos)]
+                        [count (car r)]
+                        [skip (+ (cdr r) count)])
+                   (set! pos (+ pos skip))
+                   ;; Same semantics as select, just with type annotation
+                   (let* ([c (pop!)] [v2 (pop!)] [v1 (pop!)])
+                     (push! (if (not (= c 0)) v1 v2))
+                     (step)))]
+
+                ;; ---- table.get ----
+                [(= op #x25)
+                 (let* ([r (decode-u32-leb128 code-bv pos)]
+                        [tidx (car r)])
+                   (set! pos (+ pos (cdr r)))
+                   (when (>= tidx (vector-length tables))
+                     (raise (make-wasm-trap "table.get: table index OOB")))
+                   (let* ([idx (pop!)]
+                          [table (vector-ref tables tidx)])
+                     (when (or (< idx 0) (>= idx (vector-length table)))
+                       (raise (make-wasm-trap "table.get: element index OOB")))
+                     (let ([val (vector-ref table idx)])
+                       (push! (or val 0)))
+                     (step)))]
+
+                ;; ---- table.set ----
+                [(= op #x26)
+                 (let* ([r (decode-u32-leb128 code-bv pos)]
+                        [tidx (car r)])
+                   (set! pos (+ pos (cdr r)))
+                   (when (>= tidx (vector-length tables))
+                     (raise (make-wasm-trap "table.set: table index OOB")))
+                   (let* ([val (pop!)]
+                          [idx (pop!)]
+                          [table (vector-ref tables tidx)])
+                     (when (or (< idx 0) (>= idx (vector-length table)))
+                       (raise (make-wasm-trap "table.set: element index OOB")))
+                     (vector-set! table idx val)
+                     (step)))]
+
+                ;; ---- ref.null ----
+                [(= op #xD0)
+                 (let* ([r (decode-u32-leb128 code-bv pos)])
+                   (set! pos (+ pos (cdr r)))
+                   (push! #f)  ; null reference
+                   (step))]
+
+                ;; ---- ref.is_null ----
+                [(= op #xD1)
+                 (let ([v (pop!)])
+                   (push! (if (eq? v #f) 1 0))
+                   (step))]
+
+                ;; ---- ref.func ----
+                [(= op #xD2)
+                 (let* ([r (decode-u32-leb128 code-bv pos)]
+                        [fidx (car r)])
+                   (set! pos (+ pos (cdr r)))
+                   (push! fidx)  ; push function reference as index
+                   (step))]
+
+                ;; ---- 0xFC prefix (saturating conversions + bulk memory + table ops) ----
+                [(= op #xFC)
+                 (let* ([r (decode-u32-leb128 code-bv pos)]
+                        [sub (car r)])
+                   (set! pos (+ pos (cdr r)))
+                   (cond
+                     ;; Saturating float-to-int conversions
+                     [(= sub 0) ; i32.trunc_sat_f32_s
+                      (let ([v (pop!)])
+                        (push! (cond [(nan? v) 0]
+                                     [(>= v 2147483647.0) 2147483647]
+                                     [(<= v -2147483648.0) -2147483648]
+                                     [else (i32 (exact (fltruncate v)))]))
+                        (step))]
+                     [(= sub 1) ; i32.trunc_sat_f32_u
+                      (let ([v (pop!)])
+                        (push! (cond [(or (nan? v) (fl< v 0.0)) 0]
+                                     [(>= v 4294967295.0) 4294967295]
+                                     [else (u32 (exact (fltruncate v)))]))
+                        (step))]
+                     [(= sub 2) ; i32.trunc_sat_f64_s
+                      (let ([v (pop!)])
+                        (push! (cond [(nan? v) 0]
+                                     [(>= v 2147483647.0) 2147483647]
+                                     [(<= v -2147483648.0) -2147483648]
+                                     [else (i32 (exact (fltruncate v)))]))
+                        (step))]
+                     [(= sub 3) ; i32.trunc_sat_f64_u
+                      (let ([v (pop!)])
+                        (push! (cond [(or (nan? v) (fl< v 0.0)) 0]
+                                     [(>= v 4294967295.0) 4294967295]
+                                     [else (u32 (exact (fltruncate v)))]))
+                        (step))]
+                     [(= sub 4) ; i64.trunc_sat_f32_s
+                      (let ([v (pop!)])
+                        (push! (cond [(nan? v) 0]
+                                     [(>= v 9223372036854775807.0) 9223372036854775807]
+                                     [(<= v -9223372036854775808.0) -9223372036854775808]
+                                     [else (i64 (exact (fltruncate v)))]))
+                        (step))]
+                     [(= sub 5) ; i64.trunc_sat_f32_u
+                      (let ([v (pop!)])
+                        (push! (cond [(or (nan? v) (fl< v 0.0)) 0]
+                                     [(>= v 18446744073709551615.0) 18446744073709551615]
+                                     [else (u64 (exact (fltruncate v)))]))
+                        (step))]
+                     [(= sub 6) ; i64.trunc_sat_f64_s
+                      (let ([v (pop!)])
+                        (push! (cond [(nan? v) 0]
+                                     [(>= v 9223372036854775807.0) 9223372036854775807]
+                                     [(<= v -9223372036854775808.0) -9223372036854775808]
+                                     [else (i64 (exact (fltruncate v)))]))
+                        (step))]
+                     [(= sub 7) ; i64.trunc_sat_f64_u
+                      (let ([v (pop!)])
+                        (push! (cond [(or (nan? v) (fl< v 0.0)) 0]
+                                     [(>= v 18446744073709551615.0) 18446744073709551615]
+                                     [else (u64 (exact (fltruncate v)))]))
+                        (step))]
+
+                     ;; ---- Bulk memory operations ----
+                     [(= sub 8) ; memory.init seg-idx 0x00
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)]
+                             [seg-idx (car r2)])
+                        (set! pos (+ pos (cdr r2) 1)) ; +1 for reserved byte
+                        (let* ([n (pop!)] [s (pop!)] [d (pop!)])
+                          (when (>= seg-idx (vector-length data-segs))
+                            (raise (make-wasm-trap "memory.init: segment index OOB")))
+                          (let ([seg (vector-ref data-segs seg-idx)])
+                            (when (not seg)
+                              (raise (make-wasm-trap "memory.init: segment dropped")))
+                            (when (> (+ s n) (bytevector-length seg))
+                              (raise (make-wasm-trap "memory.init: segment bounds exceeded")))
+                            (when (> (+ d n) (bytevector-length memory))
+                              (raise (make-wasm-trap "memory.init: memory bounds exceeded")))
+                            (bytevector-copy! seg s memory d n))
+                          (step)))]
+                     [(= sub 9) ; data.drop seg-idx
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)]
+                             [seg-idx (car r2)])
+                        (set! pos (+ pos (cdr r2)))
+                        (when (>= seg-idx (vector-length data-segs))
+                          (raise (make-wasm-trap "data.drop: segment index OOB")))
+                        (vector-set! data-segs seg-idx #f)
+                        (step))]
+                     [(= sub 10) ; memory.copy 0x00 0x00
+                      (set! pos (+ pos 2)) ; skip 2 reserved bytes
+                      (let* ([n (pop!)] [s (pop!)] [d (pop!)])
+                        (when (> (+ s n) (bytevector-length memory))
+                          (raise (make-wasm-trap "memory.copy: source OOB")))
+                        (when (> (+ d n) (bytevector-length memory))
+                          (raise (make-wasm-trap "memory.copy: dest OOB")))
+                        ;; Use temporary buffer for overlapping copies
+                        (let ([tmp (make-bytevector n)])
+                          (bytevector-copy! memory s tmp 0 n)
+                          (bytevector-copy! tmp 0 memory d n))
+                        (step))]
+                     [(= sub 11) ; memory.fill 0x00
+                      (set! pos (+ pos 1)) ; skip reserved byte
+                      (let* ([n (pop!)] [val (pop!)] [d (pop!)])
+                        (when (> (+ d n) (bytevector-length memory))
+                          (raise (make-wasm-trap "memory.fill: OOB")))
+                        (let ([byte (bitwise-and val #xFF)])
+                          (let lp ([i 0])
+                            (when (< i n)
+                              (bytevector-u8-set! memory (+ d i) byte)
+                              (lp (+ i 1)))))
+                        (step))]
+
+                     ;; ---- Bulk table operations ----
+                     [(= sub 12) ; table.init elem-idx table-idx
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)]
+                             [seg-idx (car r2)]
+                             [r3 (decode-u32-leb128 code-bv (+ pos (cdr r2)))]
+                             [tidx (car r3)])
+                        (set! pos (+ pos (cdr r2) (cdr r3)))
+                        (let* ([n (pop!)] [s (pop!)] [d (pop!)])
+                          (when (>= tidx (vector-length tables))
+                            (raise (make-wasm-trap "table.init: table index OOB")))
+                          (when (>= seg-idx (vector-length elem-segs))
+                            (raise (make-wasm-trap "table.init: segment index OOB")))
+                          (let ([seg (vector-ref elem-segs seg-idx)]
+                                [table (vector-ref tables tidx)])
+                            (when (not seg)
+                              (raise (make-wasm-trap "table.init: segment dropped")))
+                            (when (> (+ s n) (vector-length seg))
+                              (raise (make-wasm-trap "table.init: segment bounds exceeded")))
+                            (when (> (+ d n) (vector-length table))
+                              (raise (make-wasm-trap "table.init: table bounds exceeded")))
+                            (let lp ([i 0])
+                              (when (< i n)
+                                (vector-set! table (+ d i) (vector-ref seg (+ s i)))
+                                (lp (+ i 1)))))
+                          (step)))]
+                     [(= sub 13) ; elem.drop seg-idx
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)]
+                             [seg-idx (car r2)])
+                        (set! pos (+ pos (cdr r2)))
+                        (when (>= seg-idx (vector-length elem-segs))
+                          (raise (make-wasm-trap "elem.drop: segment index OOB")))
+                        (vector-set! elem-segs seg-idx #f)
+                        (step))]
+                     [(= sub 14) ; table.copy dst-table src-table
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)]
+                             [dst-tidx (car r2)]
+                             [r3 (decode-u32-leb128 code-bv (+ pos (cdr r2)))]
+                             [src-tidx (car r3)])
+                        (set! pos (+ pos (cdr r2) (cdr r3)))
+                        (let* ([n (pop!)] [s (pop!)] [d (pop!)])
+                          (when (>= dst-tidx (vector-length tables))
+                            (raise (make-wasm-trap "table.copy: dst table OOB")))
+                          (when (>= src-tidx (vector-length tables))
+                            (raise (make-wasm-trap "table.copy: src table OOB")))
+                          (let ([dst (vector-ref tables dst-tidx)]
+                                [src (vector-ref tables src-tidx)])
+                            (when (> (+ s n) (vector-length src))
+                              (raise (make-wasm-trap "table.copy: source bounds exceeded")))
+                            (when (> (+ d n) (vector-length dst))
+                              (raise (make-wasm-trap "table.copy: dest bounds exceeded")))
+                            (let lp ([i 0])
+                              (when (< i n)
+                                (vector-set! dst (+ d i) (vector-ref src (+ s i)))
+                                (lp (+ i 1)))))
+                          (step)))]
+                     [(= sub 15) ; table.grow table-idx
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)]
+                             [tidx (car r2)])
+                        (set! pos (+ pos (cdr r2)))
+                        (when (>= tidx (vector-length tables))
+                          (raise (make-wasm-trap "table.grow: table index OOB")))
+                        (let* ([n (pop!)] [init-val (pop!)]
+                               [table (vector-ref tables tidx)]
+                               [old-size (vector-length table)]
+                               [new-size (+ old-size n)])
+                          ;; Limit table growth (use same max-pages limit as a heuristic)
+                          (if (> new-size 65536)
+                            (begin (push! -1) (step))
+                            (let ([new-table (make-vector new-size init-val)])
+                              (let lp ([i 0])
+                                (when (< i old-size)
+                                  (vector-set! new-table i (vector-ref table i))
+                                  (lp (+ i 1))))
+                              (vector-set! tables tidx new-table)
+                              (push! old-size)
+                              (step)))))]
+                     [(= sub 16) ; table.size table-idx
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)]
+                             [tidx (car r2)])
+                        (set! pos (+ pos (cdr r2)))
+                        (when (>= tidx (vector-length tables))
+                          (raise (make-wasm-trap "table.size: table index OOB")))
+                        (push! (vector-length (vector-ref tables tidx)))
+                        (step))]
+                     [(= sub 17) ; table.fill table-idx
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)]
+                             [tidx (car r2)])
+                        (set! pos (+ pos (cdr r2)))
+                        (when (>= tidx (vector-length tables))
+                          (raise (make-wasm-trap "table.fill: table index OOB")))
+                        (let* ([n (pop!)] [val (pop!)] [i-start (pop!)]
+                               [table (vector-ref tables tidx)])
+                          (when (> (+ i-start n) (vector-length table))
+                            (raise (make-wasm-trap "table.fill: OOB")))
+                          (let lp ([i 0])
+                            (when (< i n)
+                              (vector-set! table (+ i-start i) val)
+                              (lp (+ i 1))))
+                          (step)))]
+                     [else
+                      (raise (make-wasm-trap
+                        (string-append "unsupported 0xFC sub-opcode: " (number->string sub))))]))]
+
+                ;; ---- 0xFB prefix (GC proposal) ----
+                [(= op #xFB)
+                 (let* ([r (decode-u32-leb128 code-bv pos)]
+                        [sub (car r)])
+                   (set! pos (+ pos (cdr r)))
+                   (cond
+                     ;; struct.new type-idx
+                     [(= sub #x00)
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)]
+                             [type-idx (car r2)])
+                        (set! pos (+ pos (cdr r2)))
+                        ;; Get field count from type section
+                        (let* ([type (list-ref types type-idx)]
+                               [field-count (length (car type))]
+                               [fields (make-vector field-count 0)])
+                          ;; Pop fields in reverse order (last field on top)
+                          (let lp ([i (- field-count 1)])
+                            (when (>= i 0)
+                              (vector-set! fields i (pop!))
+                              (lp (- i 1))))
+                          (push! (make-wasm-struct type-idx fields))
+                          (step)))]
+                     ;; struct.new_default type-idx
+                     [(= sub #x01)
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)]
+                             [type-idx (car r2)])
+                        (set! pos (+ pos (cdr r2)))
+                        (let* ([type (list-ref types type-idx)]
+                               [field-count (length (car type))]
+                               [fields (make-vector field-count 0)])
+                          (push! (make-wasm-struct type-idx fields))
+                          (step)))]
+                     ;; struct.get type-idx field-idx
+                     [(= sub #x02)
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)]
+                             [type-idx (car r2)]
+                             [r3 (decode-u32-leb128 code-bv (+ pos (cdr r2)))]
+                             [field-idx (car r3)])
+                        (set! pos (+ pos (cdr r2) (cdr r3)))
+                        (let ([s (pop!)])
+                          (unless (wasm-struct? s)
+                            (raise (make-wasm-trap "struct.get: not a struct")))
+                          (when (>= field-idx (vector-length (wasm-struct-fields s)))
+                            (raise (make-wasm-trap "struct.get: field index OOB")))
+                          (push! (vector-ref (wasm-struct-fields s) field-idx))
+                          (step)))]
+                     ;; struct.get_s/get_u (same as get for our representation)
+                     [(or (= sub #x03) (= sub #x04))
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)]
+                             [type-idx (car r2)]
+                             [r3 (decode-u32-leb128 code-bv (+ pos (cdr r2)))]
+                             [field-idx (car r3)])
+                        (set! pos (+ pos (cdr r2) (cdr r3)))
+                        (let ([s (pop!)])
+                          (unless (wasm-struct? s)
+                            (raise (make-wasm-trap "struct.get_s/u: not a struct")))
+                          (push! (vector-ref (wasm-struct-fields s) field-idx))
+                          (step)))]
+                     ;; struct.set type-idx field-idx
+                     [(= sub #x05)
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)]
+                             [type-idx (car r2)]
+                             [r3 (decode-u32-leb128 code-bv (+ pos (cdr r2)))]
+                             [field-idx (car r3)])
+                        (set! pos (+ pos (cdr r2) (cdr r3)))
+                        (let* ([val (pop!)] [s (pop!)])
+                          (unless (wasm-struct? s)
+                            (raise (make-wasm-trap "struct.set: not a struct")))
+                          (when (>= field-idx (vector-length (wasm-struct-fields s)))
+                            (raise (make-wasm-trap "struct.set: field index OOB")))
+                          (vector-set! (wasm-struct-fields s) field-idx val)
+                          (step)))]
+                     ;; array.new type-idx
+                     [(= sub #x06)
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)]
+                             [type-idx (car r2)])
+                        (set! pos (+ pos (cdr r2)))
+                        (let* ([n (pop!)] [init (pop!)])
+                          (push! (make-wasm-array type-idx (make-vector n init)))
+                          (step)))]
+                     ;; array.new_default type-idx
+                     [(= sub #x07)
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)]
+                             [type-idx (car r2)])
+                        (set! pos (+ pos (cdr r2)))
+                        (let ([n (pop!)])
+                          (push! (make-wasm-array type-idx (make-vector n 0)))
+                          (step)))]
+                     ;; array.new_fixed type-idx count
+                     [(= sub #x08)
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)]
+                             [type-idx (car r2)]
+                             [r3 (decode-u32-leb128 code-bv (+ pos (cdr r2)))]
+                             [count (car r3)])
+                        (set! pos (+ pos (cdr r2) (cdr r3)))
+                        (let ([data (make-vector count 0)])
+                          (let lp ([i (- count 1)])
+                            (when (>= i 0)
+                              (vector-set! data i (pop!))
+                              (lp (- i 1))))
+                          (push! (make-wasm-array type-idx data))
+                          (step)))]
+                     ;; array.new_data type-idx data-idx
+                     [(= sub #x09)
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)]
+                             [type-idx (car r2)]
+                             [r3 (decode-u32-leb128 code-bv (+ pos (cdr r2)))]
+                             [data-idx (car r3)])
+                        (set! pos (+ pos (cdr r2) (cdr r3)))
+                        (let* ([n (pop!)] [offset (pop!)])
+                          (when (>= data-idx (vector-length data-segs))
+                            (raise (make-wasm-trap "array.new_data: segment OOB")))
+                          (let ([seg (vector-ref data-segs data-idx)])
+                            (when (not seg)
+                              (raise (make-wasm-trap "array.new_data: segment dropped")))
+                            (when (> (+ offset n) (bytevector-length seg))
+                              (raise (make-wasm-trap "array.new_data: segment bounds exceeded")))
+                            (let ([data (make-vector n 0)])
+                              (let lp ([i 0])
+                                (when (< i n)
+                                  (vector-set! data i (bytevector-u8-ref seg (+ offset i)))
+                                  (lp (+ i 1))))
+                              (push! (make-wasm-array type-idx data))
+                              (step)))))]
+                     ;; array.new_elem type-idx elem-idx
+                     [(= sub #x0A)
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)]
+                             [type-idx (car r2)]
+                             [r3 (decode-u32-leb128 code-bv (+ pos (cdr r2)))]
+                             [elem-idx (car r3)])
+                        (set! pos (+ pos (cdr r2) (cdr r3)))
+                        (let* ([n (pop!)] [offset (pop!)])
+                          (when (>= elem-idx (vector-length elem-segs))
+                            (raise (make-wasm-trap "array.new_elem: segment OOB")))
+                          (let ([seg (vector-ref elem-segs elem-idx)])
+                            (when (not seg)
+                              (raise (make-wasm-trap "array.new_elem: segment dropped")))
+                            (when (> (+ offset n) (vector-length seg))
+                              (raise (make-wasm-trap "array.new_elem: bounds exceeded")))
+                            (let ([data (make-vector n 0)])
+                              (let lp ([i 0])
+                                (when (< i n)
+                                  (vector-set! data i (vector-ref seg (+ offset i)))
+                                  (lp (+ i 1))))
+                              (push! (make-wasm-array type-idx data))
+                              (step)))))]
+                     ;; array.get type-idx
+                     [(= sub #x0B)
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)])
+                        (set! pos (+ pos (cdr r2)))
+                        (let* ([idx (pop!)] [arr (pop!)])
+                          (unless (wasm-array? arr)
+                            (raise (make-wasm-trap "array.get: not an array")))
+                          (when (or (< idx 0) (>= idx (vector-length (wasm-array-data arr))))
+                            (raise (make-wasm-trap "array.get: index OOB")))
+                          (push! (vector-ref (wasm-array-data arr) idx))
+                          (step)))]
+                     ;; array.get_s/get_u (same for our representation)
+                     [(or (= sub #x0C) (= sub #x0D))
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)])
+                        (set! pos (+ pos (cdr r2)))
+                        (let* ([idx (pop!)] [arr (pop!)])
+                          (unless (wasm-array? arr)
+                            (raise (make-wasm-trap "array.get_s/u: not an array")))
+                          (when (or (< idx 0) (>= idx (vector-length (wasm-array-data arr))))
+                            (raise (make-wasm-trap "array.get_s/u: index OOB")))
+                          (push! (vector-ref (wasm-array-data arr) idx))
+                          (step)))]
+                     ;; array.set type-idx
+                     [(= sub #x0E)
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)])
+                        (set! pos (+ pos (cdr r2)))
+                        (let* ([val (pop!)] [idx (pop!)] [arr (pop!)])
+                          (unless (wasm-array? arr)
+                            (raise (make-wasm-trap "array.set: not an array")))
+                          (when (or (< idx 0) (>= idx (vector-length (wasm-array-data arr))))
+                            (raise (make-wasm-trap "array.set: index OOB")))
+                          (vector-set! (wasm-array-data arr) idx val)
+                          (step)))]
+                     ;; array.len
+                     [(= sub #x0F)
+                      (let ([arr (pop!)])
+                        (unless (wasm-array? arr)
+                          (raise (make-wasm-trap "array.len: not an array")))
+                        (push! (vector-length (wasm-array-data arr)))
+                        (step))]
+                     ;; array.fill type-idx
+                     [(= sub #x10)
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)])
+                        (set! pos (+ pos (cdr r2)))
+                        (let* ([n (pop!)] [val (pop!)] [offset (pop!)] [arr (pop!)])
+                          (unless (wasm-array? arr)
+                            (raise (make-wasm-trap "array.fill: not an array")))
+                          (let ([data (wasm-array-data arr)])
+                            (when (> (+ offset n) (vector-length data))
+                              (raise (make-wasm-trap "array.fill: OOB")))
+                            (let lp ([i 0])
+                              (when (< i n)
+                                (vector-set! data (+ offset i) val)
+                                (lp (+ i 1)))))
+                          (step)))]
+                     ;; array.copy dst-type src-type
+                     [(= sub #x11)
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)]
+                             [r3 (decode-u32-leb128 code-bv (+ pos (cdr r2)))])
+                        (set! pos (+ pos (cdr r2) (cdr r3)))
+                        (let* ([n (pop!)] [src-off (pop!)] [src-arr (pop!)]
+                               [dst-off (pop!)] [dst-arr (pop!)])
+                          (unless (and (wasm-array? src-arr) (wasm-array? dst-arr))
+                            (raise (make-wasm-trap "array.copy: not arrays")))
+                          (let ([sd (wasm-array-data src-arr)]
+                                [dd (wasm-array-data dst-arr)])
+                            (when (> (+ src-off n) (vector-length sd))
+                              (raise (make-wasm-trap "array.copy: source OOB")))
+                            (when (> (+ dst-off n) (vector-length dd))
+                              (raise (make-wasm-trap "array.copy: dest OOB")))
+                            (let lp ([i 0])
+                              (when (< i n)
+                                (vector-set! dd (+ dst-off i) (vector-ref sd (+ src-off i)))
+                                (lp (+ i 1)))))
+                          (step)))]
+                     ;; ref.i31
+                     [(= sub #x1C)
+                      (let ([v (pop!)])
+                        (push! (make-wasm-i31 (bitwise-and v #x7FFFFFFF)))
+                        (step))]
+                     ;; i31.get_s
+                     [(= sub #x1D)
+                      (let ([v (pop!)])
+                        (unless (wasm-i31? v)
+                          (raise (make-wasm-trap "i31.get_s: not an i31ref")))
+                        (let ([raw (wasm-i31-value v)])
+                          (push! (if (>= raw #x40000000) (- raw #x80000000) raw))
+                          (step)))]
+                     ;; i31.get_u
+                     [(= sub #x1E)
+                      (let ([v (pop!)])
+                        (unless (wasm-i31? v)
+                          (raise (make-wasm-trap "i31.get_u: not an i31ref")))
+                        (push! (wasm-i31-value v))
+                        (step))]
+                     ;; ref.test type-idx
+                     [(= sub #x14)
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)]
+                             [type-idx (car r2)])
+                        (set! pos (+ pos (cdr r2)))
+                        (let ([v (pop!)])
+                          (push! (i32-bool
+                            (cond
+                              [(wasm-struct? v) (= (wasm-struct-type-idx v) type-idx)]
+                              [(wasm-array? v) (= (wasm-array-type-idx v) type-idx)]
+                              [else #f])))
+                          (step)))]
+                     ;; ref.test_null type-idx (like ref.test but also succeeds on null)
+                     [(= sub #x15)
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)]
+                             [type-idx (car r2)])
+                        (set! pos (+ pos (cdr r2)))
+                        (let ([v (pop!)])
+                          (push! (i32-bool
+                            (or (not v)
+                                (and (wasm-struct? v) (= (wasm-struct-type-idx v) type-idx))
+                                (and (wasm-array? v) (= (wasm-array-type-idx v) type-idx)))))
+                          (step)))]
+                     ;; ref.cast type-idx
+                     [(= sub #x16)
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)]
+                             [type-idx (car r2)])
+                        (set! pos (+ pos (cdr r2)))
+                        (let ([v (pop!)])
+                          (unless (cond
+                                    [(wasm-struct? v) (= (wasm-struct-type-idx v) type-idx)]
+                                    [(wasm-array? v) (= (wasm-array-type-idx v) type-idx)]
+                                    [else #f])
+                            (raise (make-wasm-trap "ref.cast: type mismatch")))
+                          (push! v)
+                          (step)))]
+                     ;; ref.cast_null type-idx
+                     [(= sub #x17)
+                      (let* ([r2 (decode-u32-leb128 code-bv pos)]
+                             [type-idx (car r2)])
+                        (set! pos (+ pos (cdr r2)))
+                        (let ([v (pop!)])
+                          (unless (or (not v)
+                                      (and (wasm-struct? v) (= (wasm-struct-type-idx v) type-idx))
+                                      (and (wasm-array? v) (= (wasm-array-type-idx v) type-idx)))
+                            (raise (make-wasm-trap "ref.cast_null: type mismatch")))
+                          (push! v)
+                          (step)))]
+                     ;; extern.internalize (identity for our implementation)
+                     [(= sub #x1A) (step)]
+                     ;; extern.externalize (identity for our implementation)
+                     [(= sub #x1B) (step)]
+                     [else
+                      (raise (make-wasm-trap
+                        (string-append "unsupported 0xFB sub-opcode: 0x"
+                                       (number->string sub 16))))]))]
+
                 ;; ---- unknown ----
                 [else
                  (raise (make-wasm-trap
                    (string-append "unsupported opcode: 0x" (number->string op 16))))]))))))
 
-      ;; Start execution
-      (run-until-end)
+      ;; Start execution with tail-call trampoline
+      (let trampoline ()
+        (guard (exn
+          [(wasm-tail-call? exn)
+           ;; Tail call: restart execution with new function, same depth
+           (let* ([fidx (wasm-tail-call-func-idx exn)]
+                  [tc-args (wasm-tail-call-args exn)]
+                  [local-fidx (- fidx (vector-length imports))]
+                  [fi (vector-ref all-funcs local-fidx)]
+                  [param-count (car fi)]
+                  [tc-code (cadr fi)]
+                  [lc (caddr fi)]
+                  [new-lv (make-vector (+ param-count lc) 0)])
+             (let lp ([i 0] [args tc-args])
+               (unless (null? args)
+                 (vector-set! new-lv i (car args))
+                 (lp (+ i 1) (cdr args))))
+             ;; Reset interpreter state for new function
+             (set! code-bv tc-code)
+             (set! locals-vec new-lv)
+             (set! stack '())
+             (set! stack-depth 0)
+             (set! pos 0)
+             (set! len (bytevector-length tc-code))
+             (set! memory (vector-ref memory-box 0))
+             (trampoline))])
+        (run-until-end)))
 
       ;; Result is top of stack (or 0 if empty)
       (if (null? stack) 0 (car stack))))
@@ -1565,29 +2422,62 @@
             ;; Build memory box (shared mutable reference)
             (let ([memory-box (vector memory)])
 
-              ;; Build exports alist (name -> kind + index only)
-              (let ([exp-alist
-                     (map (lambda (e)
-                            (let ([name (car e)] [kind (cadr e)] [idx (caddr e)])
-                              (cons name (list kind idx))))
-                          exports)])
+              ;; Preserve raw data segments for memory.init/data.drop
+              (let ([raw-data-segs
+                     (if data-sec
+                       (let ([segs (parse-data-section (cdr data-sec))])
+                         (list->vector (map (lambda (seg) (caddr seg)) segs)))
+                       (make-vector 0))])
 
-                (let ([inst (make-wasm-instance exp-alist all-funcs memory-box globals tables imports-vec types)])
+                ;; Preserve raw element segments for table.init/elem.drop
+                (let ([raw-elem-segs
+                       (if elem-sec
+                         (let ([segs (parse-element-section (cdr elem-sec))])
+                           (list->vector (map (lambda (seg) (list->vector (caddr seg))) segs)))
+                         (make-vector 0))])
 
-                  ;; Run start function if present
-                  (when start-sec
-                    (let* ([start-idx (parse-start-section (cdr start-sec))]
-                           [local-idx (- start-idx nimports)]
-                           [default-limits (vector 10000000 1000 10000 256)])
-                      (when (and (>= local-idx 0) (< local-idx nfuncs))
-                        (let* ([fi (vector-ref all-funcs local-idx)]
-                               [code (cadr fi)]
-                               [lc (caddr fi)]
-                               [lv (make-vector lc 0)])
-                          (execute-func code lv all-funcs memory-box globals tables imports-vec
-                                        default-limits 0 types)))))
+                  ;; Parse tag section (section 13) for exception handling
+                  (let* ([tag-sec (assv wasm-section-tag secs)]
+                         [tag-list
+                          (if tag-sec
+                            (let* ([bv (cdr tag-sec)]
+                                   [cr (read-u32 bv 0)]
+                                   [count (car cr)]
+                                   [pos (cdr cr)])
+                              (let loop ([i 0] [p pos] [acc '()])
+                                (if (= i count) (reverse acc)
+                                  (let* ([attr (bytevector-u8-ref bv p)] ; attribute byte (0 = exception)
+                                         [r (read-u32 bv (+ p 1))]
+                                         [tidx (car r)])
+                                    (loop (+ i 1) (+ p 1 (cdr r))
+                                      (cons (make-wasm-tag tidx) acc))))))
+                            '())]
+                         [tags-vec (list->vector tag-list)])
 
-                  inst))))))))
+                    ;; Build exports alist (name -> kind + index only)
+                    (let ([exp-alist
+                           (map (lambda (e)
+                                  (let ([name (car e)] [kind (cadr e)] [idx (caddr e)])
+                                    (cons name (list kind idx))))
+                                exports)])
+
+                      (let ([inst (make-wasm-instance exp-alist all-funcs memory-box globals tables
+                                                       imports-vec types raw-data-segs raw-elem-segs tags-vec)])
+
+                        ;; Run start function if present
+                        (when start-sec
+                          (let* ([start-idx (parse-start-section (cdr start-sec))]
+                                 [local-idx (- start-idx nimports)]
+                                 [default-limits (vector 10000000 1000 10000 256)])
+                            (when (and (>= local-idx 0) (< local-idx nfuncs))
+                              (let* ([fi (vector-ref all-funcs local-idx)]
+                                     [code (cadr fi)]
+                                     [lc (caddr fi)]
+                                     [lv (make-vector lc 0)])
+                                (execute-func code lv all-funcs memory-box globals tables imports-vec
+                                              default-limits 0 types raw-data-segs raw-elem-segs tags-vec)))))
+
+                        inst)))))))))))
 
   ;;; ========== Runtime API ==========
 
@@ -1629,6 +2519,9 @@
                [tables (wasm-instance-tables inst)]
                [imports (wasm-instance-imports inst)]
                [types (wasm-instance-types inst)]
+               [data-segs (wasm-instance-data-segments inst)]
+               [elem-segs (wasm-instance-elem-segments inst)]
+               [tags (wasm-instance-tags inst)]
                ;; Resource limits
                [fuel (or (wasm-runtime-fuel rt) 10000000)]
                [max-depth (or (wasm-runtime-max-depth rt) 1000)]
@@ -1647,7 +2540,8 @@
               (unless (null? args)
                 (vector-set! lv i (car args))
                 (lp (+ i 1) (cdr args))))
-            (execute-func code lv all-funcs memory-box globals tables imports limits 0 types))))))
+            (execute-func code lv all-funcs memory-box globals tables imports limits 0 types
+                          data-segs elem-segs tags))))))
 
   (define (wasm-runtime-memory-ref rt offset)
     (let ([mem (wasm-instance-memory (wasm-runtime-instance rt))])
