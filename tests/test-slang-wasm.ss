@@ -762,17 +762,24 @@
 
 (section "Closure Infrastructure")
 
-;; runtime-closure-forms contains call-closure-N and closure-func-idx
+;; runtime-closure-forms contains call-closure-N
+;; (closure-func-idx and closure-env-count are in value-accessor-forms, not here)
 (check-pred pair? runtime-closure-forms)
 (let ([names (map (lambda (f)
                     (and (pair? f) (eq? (car f) 'define) (pair? (cadr f))
                          (caadr f)))
                   runtime-closure-forms)])
-  (check-pred pair? (memq 'closure-func-idx names))
-  (check-pred pair? (memq 'closure-env-count names))
   (check-pred pair? (memq 'call-closure-1 names))
   (check-pred pair? (memq 'call-closure-2 names))
   (check-pred pair? (memq 'call-closure-3 names)))
+
+;; closure-func-idx and closure-env-count live in value-accessor-forms
+(let ([names (map (lambda (f)
+                    (and (pair? f) (eq? (car f) 'define) (pair? (cadr f))
+                         (caadr f)))
+                  value-accessor-forms)])
+  (check-pred pair? (memq 'closure-func-idx names))
+  (check-pred pair? (memq 'closure-env-count names)))
 
 ;; runtime-closure-type-forms contains exactly 3 define-type forms
 (check (length runtime-closure-type-forms) => 3)

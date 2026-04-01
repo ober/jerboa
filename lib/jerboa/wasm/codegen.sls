@@ -545,9 +545,16 @@
       (compile-expr (car args) ctx)
       (bytevector opcode)))
 
-  ;; Memory load: (type.load addr) or (type.load offset align addr)
-  (define (compile-mem-load args ctx opcode)
-    (let ([align 2] [offset 0] [addr-expr (car args)])
+  ;; Memory load: (type.load addr)
+  ;; align is the log2 alignment hint. Must not exceed natural alignment:
+  ;;   byte ops (load8, store8): align=0  (1-byte natural)
+  ;;   16-bit ops (load16, store16): align=1  (2-byte natural)
+  ;;   32-bit ops (load, store i32/f32): align=2  (4-byte natural)
+  ;;   64-bit ops (load, store i64/f64): align=3  (8-byte natural)
+  (define (compile-mem-load args ctx opcode . align-hint)
+    (let ([align (if (pair? align-hint) (car align-hint) 2)]
+          [offset 0]
+          [addr-expr (car args)])
       (bv-concat
         (compile-expr addr-expr ctx)
         (bytevector opcode)
@@ -555,8 +562,9 @@
         (encode-u32-leb128 offset))))
 
   ;; Memory store: (type.store addr val)
-  (define (compile-mem-store args ctx opcode)
-    (let ([align 2] [offset 0])
+  (define (compile-mem-store args ctx opcode . align-hint)
+    (let ([align (if (pair? align-hint) (car align-hint) 2)]
+          [offset 0])
       (bv-concat
         (compile-expr (car args) ctx)
         (compile-expr (cadr args) ctx)
@@ -638,19 +646,31 @@
             (compile-cond args ctx)]
 
            [(when)
-            (bv-concat
-              (compile-expr (car args) ctx)
-              (bytevector wasm-opcode-if wasm-type-void)
-              (compile-body (cdr args) ctx)
-              (bytevector wasm-opcode-end))]
+            ;; when uses a void block — drop any value left by the last body form
+            (let* ([body-exprs (cdr args)]
+                   [body-bv (compile-body body-exprs ctx)]
+                   [last-expr (and (pair? body-exprs) (car (last-pair body-exprs)))]
+                   [need-drop (and last-expr (not (void-expr? last-expr)))])
+              (bv-concat
+                (compile-expr (car args) ctx)
+                (bytevector wasm-opcode-if wasm-type-void)
+                body-bv
+                (if need-drop (bytevector wasm-opcode-drop) (bytevector))
+                (bytevector wasm-opcode-end)))]
 
            [(unless)
-            (bv-concat
-              (compile-expr (car args) ctx)
-              (bytevector wasm-opcode-i32-eqz)
-              (bytevector wasm-opcode-if wasm-type-void)
-              (compile-body (cdr args) ctx)
-              (bytevector wasm-opcode-end))]
+            ;; unless uses a void block — drop any value left by the last body form
+            (let* ([body-exprs (cdr args)]
+                   [body-bv (compile-body body-exprs ctx)]
+                   [last-expr (and (pair? body-exprs) (car (last-pair body-exprs)))]
+                   [need-drop (and last-expr (not (void-expr? last-expr)))])
+              (bv-concat
+                (compile-expr (car args) ctx)
+                (bytevector wasm-opcode-i32-eqz)
+                (bytevector wasm-opcode-if wasm-type-void)
+                body-bv
+                (if need-drop (bytevector wasm-opcode-drop) (bytevector))
+                (bytevector wasm-opcode-end)))]
 
            [(and)
             (if (null? args)
@@ -733,22 +753,27 @@
            [(while)
             ;; (while test body...) →
             ;; (block (loop (br_if (eqz test) 1) body... (br 0)))
+            ;; while uses a void block — drop any value left by the last body form
             (context-push-block! ctx 'block)
             (context-push-block! ctx 'loop)
-            (let ([test-bv (compile-expr (car args) ctx)]
-                  [body-bv (compile-body (cdr args) ctx)])
+            (let* ([body-exprs (cdr args)]
+                   [body-bv (compile-body body-exprs ctx)]
+                   [last-expr (and (pair? body-exprs) (car (last-pair body-exprs)))]
+                   [need-drop (and last-expr (not (void-expr? last-expr)))])
               (context-pop-block! ctx)
               (context-pop-block! ctx)
               (bv-concat
                 (bytevector wasm-opcode-block wasm-type-void)
                 (bytevector wasm-opcode-loop wasm-type-void)
                 ;; Test: if false, break outer block
-                test-bv
+                (compile-expr (car args) ctx)
                 (bytevector wasm-opcode-i32-eqz)
                 (bytevector wasm-opcode-br-if)
                 (encode-u32-leb128 1)  ; br 1 = exit outer block
                 ;; Body
                 body-bv
+                ;; Drop any value left by the body before looping back
+                (if need-drop (bytevector wasm-opcode-drop) (bytevector))
                 ;; Continue loop
                 (bytevector wasm-opcode-br)
                 (encode-u32-leb128 0)  ; br 0 = continue loop
@@ -933,20 +958,20 @@
            [(i64.trunc_f64_u) (compile-unop args ctx wasm-opcode-i64-trunc-f64-u)]
 
            ;; -- Memory operations --
-           [(i32.load)   (compile-mem-load args ctx wasm-opcode-i32-load)]
-           [(i64.load)   (compile-mem-load args ctx wasm-opcode-i64-load)]
-           [(f32.load)   (compile-mem-load args ctx wasm-opcode-f32-load)]
-           [(f64.load)   (compile-mem-load args ctx wasm-opcode-f64-load)]
-           [(i32.load8_s)  (compile-mem-load args ctx wasm-opcode-i32-load8-s)]
-           [(i32.load8_u)  (compile-mem-load args ctx wasm-opcode-i32-load8-u)]
-           [(i32.load16_s) (compile-mem-load args ctx wasm-opcode-i32-load16-s)]
-           [(i32.load16_u) (compile-mem-load args ctx wasm-opcode-i32-load16-u)]
-           [(i32.store)  (compile-mem-store args ctx wasm-opcode-i32-store)]
-           [(i64.store)  (compile-mem-store args ctx wasm-opcode-i64-store)]
-           [(f32.store)  (compile-mem-store args ctx wasm-opcode-f32-store)]
-           [(f64.store)  (compile-mem-store args ctx wasm-opcode-f64-store)]
-           [(i32.store8)  (compile-mem-store args ctx wasm-opcode-i32-store8)]
-           [(i32.store16) (compile-mem-store args ctx wasm-opcode-i32-store16)]
+           [(i32.load)   (compile-mem-load args ctx wasm-opcode-i32-load 2)]
+           [(i64.load)   (compile-mem-load args ctx wasm-opcode-i64-load 3)]
+           [(f32.load)   (compile-mem-load args ctx wasm-opcode-f32-load 2)]
+           [(f64.load)   (compile-mem-load args ctx wasm-opcode-f64-load 3)]
+           [(i32.load8_s)  (compile-mem-load args ctx wasm-opcode-i32-load8-s 0)]
+           [(i32.load8_u)  (compile-mem-load args ctx wasm-opcode-i32-load8-u 0)]
+           [(i32.load16_s) (compile-mem-load args ctx wasm-opcode-i32-load16-s 1)]
+           [(i32.load16_u) (compile-mem-load args ctx wasm-opcode-i32-load16-u 1)]
+           [(i32.store)  (compile-mem-store args ctx wasm-opcode-i32-store 2)]
+           [(i64.store)  (compile-mem-store args ctx wasm-opcode-i64-store 3)]
+           [(f32.store)  (compile-mem-store args ctx wasm-opcode-f32-store 2)]
+           [(f64.store)  (compile-mem-store args ctx wasm-opcode-f64-store 3)]
+           [(i32.store8)  (compile-mem-store args ctx wasm-opcode-i32-store8 0)]
+           [(i32.store16) (compile-mem-store args ctx wasm-opcode-i32-store16 1)]
 
            [(memory.size)
             (bv-concat (bytevector wasm-opcode-memory-size) (bytevector #x00))]
@@ -1354,9 +1379,23 @@
                        [_ (for-each
                             (lambda (p) (context-add-local! ctx (car p) (cdr p)))
                             params)]
-                       ;; Compile body
+                       ;; Compile body.
+                       ;; If the function returns i32 but the body ends with a void
+                       ;; expression (store, set!, while, etc.), wasmi's strict
+                       ;; validator rejects it: "expected i32 but nothing on stack".
+                       ;; Fix: detect this case and push i32.const 0 as a dummy.
                        [body-bv (compile-body body-forms ctx)]
-                       [full-body (bv-concat body-bv (bytevector wasm-opcode-end))]
+                       [needs-dummy-return
+                        (and (= rtype wasm-type-i32)
+                             (pair? body-forms)
+                             (void-expr? (car (last-pair body-forms))))]
+                       [full-body (bv-concat
+                                    body-bv
+                                    (if needs-dummy-return
+                                      (bv-concat (bytevector wasm-opcode-i32-const)
+                                                 (encode-i32-leb128 0))
+                                      (bytevector))
+                                    (bytevector wasm-opcode-end))]
                        ;; Collect extra locals (beyond params)
                        [all-locals (compile-context-locals ctx)]
                        [let-locals

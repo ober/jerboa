@@ -983,6 +983,13 @@
         gc-all-forms
         (runtime-forms)
 
+        ;; 4b. Closure dispatch runtime (only when closures are present).
+        ;;     call-closure-N uses call_indirect which requires a table — omitting
+        ;;     these for closure-free programs avoids "unknown table 0" errors.
+        (if has-closures
+          (closure-runtime-forms)
+          '())
+
         ;; 5. Function table (for closures via call_indirect)
         (if has-closures
           '((define-table 64 256))
@@ -1101,6 +1108,20 @@
                   (eval '(begin
                            (import (jerboa wasm scheme-runtime))
                            runtime-closure-type-forms)
+                        (environment '(chezscheme) '(jerboa wasm scheme-runtime))))
+              #:handle-all)])
+      (if (pair? rt) rt '())))
+
+  ;; Load closure runtime dispatch forms (call-closure-1/2/3) from scheme-runtime.
+  ;; Only included when closures are present — these forms use call_indirect which
+  ;; requires a function table.
+  (define (closure-runtime-forms)
+    (let ([rt (with-exception-handler
+                (lambda (e) '())
+                (lambda ()
+                  (eval '(begin
+                           (import (jerboa wasm scheme-runtime))
+                           runtime-closure-forms)
                         (environment '(chezscheme) '(jerboa wasm scheme-runtime))))
               #:handle-all)])
       (if (pair? rt) rt '())))

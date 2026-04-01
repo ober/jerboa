@@ -7,6 +7,9 @@
 (import (except (chezscheme) compile-program)
         (jerboa wasm format)
         (jerboa wasm codegen)
+        (jerboa wasm values)
+        (jerboa wasm gc)
+        (jerboa wasm scheme-runtime)
         (std wasm sandbox))
 
 (define pass 0)
@@ -242,6 +245,172 @@
       (wasm-sandbox-free-module mod-h)
       (list r1 r2)))
   '(111 222))
+
+;;; ============================================================
+;;; Section 7: End-to-end Scheme runtime in wasmi (Phase 4)
+;;;
+;;; These tests compile the full tagged-value runtime + user code
+;;; and execute it in wasmi.  This is the critical integration proof:
+;;; Scheme semantics (cons/car/cdr, tagged fixnums, etc.) executed
+;;; inside the Rust sandbox.
+;;; ============================================================
+(printf "~%--- Section 7: End-to-end Scheme runtime in wasmi ---~%")
+
+;; Helper: compile the full runtime + user functions into a WASM binary.
+;; User-forms is a list of (define ...) forms using the runtime API.
+(define (compile-scheme-runtime user-forms)
+  (compile-program
+    (append
+      value-memory-forms
+      value-global-forms
+      value-tag-forms
+      value-predicate-forms
+      value-accessor-forms
+      value-constructor-forms
+      gc-all-forms
+      runtime-all-forms
+      user-forms)))
+
+;; Tagged fixnums: tag-fixnum(5) = 11, untag-fixnum(11) = 5
+(test "tag-fixnum round-trip in wasmi"
+  (let* ([bv (compile-scheme-runtime
+               '((define (roundtrip n)
+                   (untag-fixnum (tag-fixnum n)))))]
+         [mod-h (wasm-sandbox-load bv)]
+         [inst (wasm-sandbox-instantiate mod-h)])
+    (let ([r (wasm-sandbox-call inst "roundtrip" 42)])
+      (wasm-sandbox-free inst)
+      (wasm-sandbox-free-module mod-h)
+      r))
+  42)
+
+;; Scheme cons/car/cdr in wasmi
+(test "cons + car in wasmi"
+  (let* ([bv (compile-scheme-runtime
+               '((define (car-of-cons a b)
+                   (scheme-car (scheme-cons a b)))))]
+         [mod-h (wasm-sandbox-load bv)]
+         [inst (wasm-sandbox-instantiate mod-h)])
+    ;; Pass tagged fixnum 7 = (tag-fixnum 3) = 7
+    ;; Pass tagged fixnum 9 = (tag-fixnum 4) = 9
+    ;; car should return 7
+    (let ([r (wasm-sandbox-call inst "car-of-cons" 7 9)])
+      (wasm-sandbox-free inst)
+      (wasm-sandbox-free-module mod-h)
+      r))
+  7)
+
+(test "cons + cdr in wasmi"
+  (let* ([bv (compile-scheme-runtime
+               '((define (cdr-of-cons a b)
+                   (scheme-cdr (scheme-cons a b)))))]
+         [mod-h (wasm-sandbox-load bv)]
+         [inst (wasm-sandbox-instantiate mod-h)])
+    (let ([r (wasm-sandbox-call inst "cdr-of-cons" 7 9)])
+      (wasm-sandbox-free inst)
+      (wasm-sandbox-free-module mod-h)
+      r))
+  9)
+
+;; is-pair? predicate
+(test "is-pair returns true for cons in wasmi"
+  (let* ([bv (compile-scheme-runtime
+               '((define (test-pair a b)
+                   (is-pair (scheme-cons a b)))))]
+         [mod-h (wasm-sandbox-load bv)]
+         [inst (wasm-sandbox-instantiate mod-h)])
+    (let ([r (wasm-sandbox-call inst "test-pair" 3 5)])
+      (wasm-sandbox-free inst)
+      (wasm-sandbox-free-module mod-h)
+      r))
+  1)  ;; true in WASM = 1
+
+;; Scheme list length
+(test "scheme-length of 3-element list in wasmi"
+  (let* ([bv (compile-scheme-runtime
+               '((define (make-list3 a b c)
+                   (scheme-cons a (scheme-cons b (scheme-cons c 4))))
+                 (define (test-length a b c)
+                   (untag-fixnum (scheme-length (make-list3 a b c))))))]
+         [mod-h (wasm-sandbox-load bv)]
+         [inst (wasm-sandbox-instantiate mod-h)])
+    (let ([r (wasm-sandbox-call inst "test-length" 3 5 7)])
+      (wasm-sandbox-free inst)
+      (wasm-sandbox-free-module mod-h)
+      r))
+  3)
+
+;; Closure allocation and func-idx storage + retrieval
+(test "closure func-idx round-trip in wasmi"
+  (let* ([bv (compile-program
+               (append
+                 runtime-closure-type-forms
+                 value-memory-forms
+                 value-global-forms
+                 value-tag-forms
+                 value-predicate-forms
+                 value-accessor-forms
+                 value-constructor-forms
+                 gc-all-forms
+                 runtime-all-forms
+                 '((define-table 64 256)
+                   ;; Lifted closure: env=clos, arg=y. Returns (env[0] + y)
+                   (define (__lifted_adder env y)
+                     (+ (closure-env-ref env 0) y))
+                   ;; Allocate a closure pointing to table slot 0
+                   (define (make-adder x)
+                     (let ([c (alloc-closure 0 1)])
+                       (closure-env-set! c 0 (tag-fixnum x))
+                       c))
+                   ;; Read back the func-idx from the closure header
+                   (define (adder-func-idx x)
+                     (closure-func-idx (make-adder x)))
+                   (define-element 0 (__lifted_adder)))))]
+         [mod-h (wasm-sandbox-load bv)]
+         [inst (wasm-sandbox-instantiate mod-h)])
+    (let ([r (wasm-sandbox-call inst "adder-func-idx" 10)])
+      (wasm-sandbox-free inst)
+      (wasm-sandbox-free-module mod-h)
+      r))
+  0)  ;; table slot 0
+
+;; call-closure-1: dispatch via function table in wasmi
+(test "call-closure-1 dispatches correctly in wasmi"
+  (let* ([bv (compile-program
+               (append
+                 runtime-closure-type-forms
+                 value-memory-forms
+                 value-global-forms
+                 value-tag-forms
+                 value-predicate-forms
+                 value-accessor-forms
+                 value-constructor-forms
+                 gc-all-forms
+                 runtime-all-forms
+                 runtime-closure-forms  ;; call-closure-N (needs table)
+                 '((define-table 64 256)
+                   ;; Lifted closure: adds env[0] to y (both tagged fixnums)
+                   (define (__lifted_adder env y)
+                     ;; env[0] = tagged fixnum, y = tagged fixnum
+                     ;; fx+ untags, adds, retags
+                     (fx+ (closure-env-ref env 0) y))
+                   (define (make-adder x)
+                     (let ([c (alloc-closure 0 1)])
+                       (closure-env-set! c 0 x)
+                       c))
+                   (define (test-call-closure base delta)
+                     (let ([adder (make-adder base)])
+                       (call-closure-1 adder delta)))
+                   (define-element 0 (__lifted_adder)))))]
+         [mod-h (wasm-sandbox-load bv)]
+         [inst (wasm-sandbox-instantiate mod-h)])
+    ;; Pass tagged fixnums: tag-fixnum(10)=21, tag-fixnum(5)=11
+    ;; Result should be tag-fixnum(15)=31
+    (let ([r (wasm-sandbox-call inst "test-call-closure" 21 11)])
+      (wasm-sandbox-free inst)
+      (wasm-sandbox-free-module mod-h)
+      r))
+  31)  ;; tag-fixnum(15) = 31
 
 ;;; ============================================================
 ;;; Summary

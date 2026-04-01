@@ -603,13 +603,9 @@
 
   (define runtime-closure-forms
     '(
-      ;; Read the func-idx stored in a closure header
-      (define (closure-func-idx clos)
-        (i32.load (+ clos 4)))
-
-      ;; Read the env-count stored in a closure header
-      (define (closure-env-count clos)
-        (i32.load (+ clos 8)))
+      ;; Note: closure-func-idx, closure-env-count, closure-env-ref, and
+      ;; closure-env-set! are already defined in value-accessor-forms and
+      ;; value-constructor-forms (from values.sls).  Do NOT redefine them here.
 
       ;; Call a 1-arg closure: (env + 1 user arg) -> result
       ;; Type index 0: (i32 i32) -> i32
@@ -655,6 +651,14 @@
   ;; Combined: all runtime forms
   ;; ================================================================
 
+  ;; runtime-all-forms: base runtime without closure dispatch.
+  ;; Does NOT include runtime-closure-forms (call-closure-N) or
+  ;; runtime-closure-type-forms because those require a function table
+  ;; (define-table) to be present — simple programs without closures
+  ;; would fail wasmi validation with "unknown table 0".
+  ;;
+  ;; slang->wasm-forms adds runtime-closure-type-forms + runtime-closure-forms
+  ;; automatically when the program uses closures.
   (define runtime-all-forms
     (append runtime-list-forms
             runtime-bytevector-forms
@@ -665,7 +669,6 @@
             runtime-equality-forms
             runtime-conversion-forms
             runtime-io-forms
-            runtime-result-forms
-            runtime-closure-forms))
+            runtime-result-forms))
 
 ) ;; end library
