@@ -542,6 +542,64 @@
   (check-pred bytevector? wasm)
   (check (> (bytevector-length wasm) 100) => #t))
 
+;; ================================================================
+;; Quasiquote / N-ary Append Patterns
+;; ================================================================
+
+(section "Quasiquote Patterns")
+
+;; Quasiquote expansion produces list+cons+append patterns.
+;; Test that n-ary append (the pattern for ,@splicing) compiles correctly.
+
+;; Two-arg append compiles
+(let ([wasm (compile-program
+              (append
+                value-memory-forms
+                value-global-forms
+                value-tag-forms
+                value-predicate-forms
+                value-accessor-forms
+                gc-all-forms
+                value-constructor-forms
+                runtime-all-forms
+                '((define (test-append a b)
+                    (scheme-append a b)))))])
+  (check-pred bytevector? wasm)
+  (check (> (bytevector-length wasm) 50) => #t))
+
+;; Nested append (pattern for 3-arg append from quasiquote) compiles
+(let ([wasm (compile-program
+              (append
+                value-memory-forms
+                value-global-forms
+                value-tag-forms
+                value-predicate-forms
+                value-accessor-forms
+                gc-all-forms
+                value-constructor-forms
+                runtime-all-forms
+                '((define (test-append3 a b c)
+                    (scheme-append a (scheme-append b c))))))])
+  (check-pred bytevector? wasm)
+  (check (> (bytevector-length wasm) 50) => #t))
+
+;; Pattern for `(1 ,b) → (cons 1 (cons b nil)) → cons chain
+(let ([wasm (compile-program
+              (append
+                value-memory-forms
+                value-global-forms
+                value-tag-forms
+                value-predicate-forms
+                value-accessor-forms
+                gc-all-forms
+                value-constructor-forms
+                runtime-all-forms
+                '((define (test-qq b)
+                    (scheme-cons (tag-fixnum 1)
+                      (scheme-cons b 4))))))])  ;; 4 = NIL
+  (check-pred bytevector? wasm)
+  (check (> (bytevector-length wasm) 50) => #t))
+
 ;; Full runtime with UTF-8 string-length compiles to valid WASM
 (let ([wasm (compile-program
               (append

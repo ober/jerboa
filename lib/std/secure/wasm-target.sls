@@ -347,7 +347,15 @@
            [(length)
             `(scheme-length ,(lower-expr (car args)))]
            [(append)
-            `(scheme-append ,(lower-expr (car args)) ,(lower-expr (cadr args)))]
+            (cond
+              [(null? args) IMM-NIL]
+              [(null? (cdr args)) (lower-expr (car args))]
+              [(null? (cddr args))
+               `(scheme-append ,(lower-expr (car args)) ,(lower-expr (cadr args)))]
+              ;; n-ary: (append a b c ...) → (scheme-append a (append b c ...))
+              [else
+               `(scheme-append ,(lower-expr (car args))
+                               ,(lower-expr `(append ,@(cdr args))))])]
            [(reverse)
             `(scheme-reverse ,(lower-expr (car args)))]
            [(list-ref)
@@ -492,6 +500,10 @@
            ;; ---- Quote ----
            [(quote)
             (lower-quoted (car args))]
+
+           ;; ---- Quasiquote ----
+           [(quasiquote)
+            (lower-expr (expand-quasiquote (car args)))]
 
            ;; ---- Default: function call ----
            [else
@@ -658,6 +670,70 @@
       [(string? datum)
        `(string-from-static ,(string->utf8 datum))]
       [else IMM-VOID]))
+
+  ;; Expand quasiquote to ordinary Scheme expressions.
+  ;; `(a ,b ,@c d) → (append (list 'a b) c (list 'd))
+  ;; The result is then lowered by lower-expr as usual.
+  (define (expand-quasiquote form)
+    (cond
+      [(pair? form)
+       (cond
+         ;; ,expr → expr (unquote)
+         [(eq? (car form) 'unquote)
+          (cadr form)]
+         ;; ,@expr inside a list → handled by expand-qq-list
+         [(eq? (car form) 'unquote-splicing)
+          (error 'expand-quasiquote "unquote-splicing outside of list context")]
+         ;; List: process element-by-element, coalescing into append
+         [else
+          (expand-qq-list form)])]
+      ;; Atom: quote it
+      [else `(quote ,form)]))
+
+  ;; Expand a quasiquoted list.  Groups consecutive non-splice elements
+  ;; into (list ...) segments, and splices ,@expr directly into append.
+  (define (expand-qq-list lst)
+    (let loop ([rest lst] [segments '()] [current '()])
+      (cond
+        [(null? rest)
+         ;; End of list: flush current segment and build result
+         (let ([segs (if (null? current)
+                       (reverse segments)
+                       (reverse (cons `(list ,@(reverse current)) segments)))])
+           (cond
+             [(null? segs) '(quote ())]
+             [(null? (cdr segs)) (car segs)]
+             [else `(append ,@segs)]))]
+        [(and (pair? rest) (not (pair? (car rest))))
+         ;; Non-pair element: expand and accumulate
+         (loop (cdr rest) segments
+               (cons (expand-quasiquote (car rest)) current))]
+        [(and (pair? rest) (pair? (car rest))
+              (eq? (caar rest) 'unquote))
+         ;; ,expr: accumulate the unquoted expression
+         (loop (cdr rest) segments
+               (cons (cadar rest) current))]
+        [(and (pair? rest) (pair? (car rest))
+              (eq? (caar rest) 'unquote-splicing))
+         ;; ,@expr: flush current segment, add splice
+         (let ([new-segments (if (null? current)
+                               segments
+                               (cons `(list ,@(reverse current)) segments))])
+           (loop (cdr rest) (cons (cadar rest) new-segments) '()))]
+        [(not (pair? rest))
+         ;; Dotted tail: (a b . c)
+         (let ([new-segments (if (null? current)
+                               segments
+                               (cons `(list ,@(reverse current)) segments))])
+           (let ([segs (reverse (cons (expand-quasiquote rest) new-segments))])
+             (cond
+               [(null? segs) '(quote ())]
+               [(null? (cdr segs)) (car segs)]
+               [else `(append ,@segs)])))]
+        [else
+         ;; Nested list element: recurse
+         (loop (cdr rest) segments
+               (cons (expand-quasiquote (car rest)) current))])))
 
   ;; ================================================================
   ;; Full pipeline: Slang module -> compile-program forms
