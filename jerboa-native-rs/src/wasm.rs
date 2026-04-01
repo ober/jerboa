@@ -28,8 +28,25 @@ struct WasmModule {
     module: Module,
 }
 
+/// Host state available to WASM import functions.
+struct HostState {
+    /// Monotonic clock offset (ms since instance start)
+    start_time: std::time::Instant,
+    /// Log buffer for captured log_message calls
+    log_buffer: Vec<String>,
+}
+
+impl Default for HostState {
+    fn default() -> Self {
+        HostState {
+            start_time: std::time::Instant::now(),
+            log_buffer: Vec::new(),
+        }
+    }
+}
+
 struct WasmInstance {
-    store: Store<()>,
+    store: Store<HostState>,
     instance: Instance,
 }
 
@@ -132,7 +149,11 @@ pub extern "C" fn jerboa_wasm_instance_new(
             }
         };
 
-        let mut store = Store::new(&wmod.engine, ());
+        let host = HostState {
+            start_time: std::time::Instant::now(),
+            ..Default::default()
+        };
+        let mut store = Store::new(&wmod.engine, host);
         let fuel_amount = if fuel == 0 { 10_000_000 } else { fuel };
         let _ = store.set_fuel(fuel_amount);
 
@@ -467,5 +488,280 @@ pub extern "C" fn jerboa_wasm_memory_size(handle: u64) -> i64 {
     }) {
         Ok(s) => s,
         Err(_) => -1,
+    }
+}
+
+// ============================================================
+// Hosted instance: instantiate with WASI + DNS host imports
+// ============================================================
+
+/// Define WASI-compatible and DNS host imports on a linker.
+fn define_host_imports(linker: &mut Linker<HostState>) -> Result<(), Error> {
+    // ---- WASI: fd_write (fd, iovs_ptr, iovs_len, nwritten_ptr) -> errno ----
+    linker.func_wrap(
+        "wasi_snapshot_preview1", "fd_write",
+        |mut caller: Caller<'_, HostState>,
+         fd: i32, iovs_ptr: i32, iovs_len: i32, nwritten_ptr: i32| -> i32 {
+            let memory = match caller.get_export("memory") {
+                Some(Extern::Memory(m)) => m,
+                _ => return 8, // EBADF
+            };
+            if fd != 1 && fd != 2 { return 8; }
+            let mut total = 0u32;
+            for i in 0..iovs_len {
+                let iov_addr = (iovs_ptr + i * 8) as usize;
+                let mem_data = memory.data(&caller);
+                if iov_addr + 8 > mem_data.len() { return 21; }
+                let buf_ptr = u32::from_le_bytes(mem_data[iov_addr..iov_addr+4].try_into().unwrap());
+                let buf_len = u32::from_le_bytes(mem_data[iov_addr+4..iov_addr+8].try_into().unwrap());
+                let start = buf_ptr as usize;
+                let end = start + buf_len as usize;
+                let mem_data2 = memory.data(&caller);
+                if end > mem_data2.len() { return 21; }
+                let bytes = mem_data2[start..end].to_vec();
+                if fd == 1 {
+                    let _ = std::io::Write::write_all(&mut std::io::stdout(), &bytes);
+                } else {
+                    let _ = std::io::Write::write_all(&mut std::io::stderr(), &bytes);
+                }
+                total += buf_len;
+            }
+            let nw_bytes = total.to_le_bytes();
+            let mem_data = memory.data_mut(&mut caller);
+            let nw_addr = nwritten_ptr as usize;
+            if nw_addr + 4 <= mem_data.len() {
+                mem_data[nw_addr..nw_addr+4].copy_from_slice(&nw_bytes);
+            }
+            0
+        }
+    )?;
+
+    // ---- WASI: fd_read (fd, iovs_ptr, iovs_len, nread_ptr) -> errno ----
+    linker.func_wrap(
+        "wasi_snapshot_preview1", "fd_read",
+        |mut caller: Caller<'_, HostState>,
+         fd: i32, iovs_ptr: i32, iovs_len: i32, nread_ptr: i32| -> i32 {
+            let memory = match caller.get_export("memory") {
+                Some(Extern::Memory(m)) => m,
+                _ => return 8,
+            };
+            if fd != 0 { return 8; }
+            let mut total = 0u32;
+            for i in 0..iovs_len {
+                let iov_addr = (iovs_ptr + i * 8) as usize;
+                let mem_data = memory.data(&caller);
+                if iov_addr + 8 > mem_data.len() { return 21; }
+                let buf_ptr = u32::from_le_bytes(mem_data[iov_addr..iov_addr+4].try_into().unwrap());
+                let buf_len = u32::from_le_bytes(mem_data[iov_addr+4..iov_addr+8].try_into().unwrap());
+                let mut buf = vec![0u8; buf_len as usize];
+                let n = match std::io::Read::read(&mut std::io::stdin(), &mut buf) {
+                    Ok(n) => n,
+                    Err(_) => return 5, // EIO
+                };
+                let mem_data_mut = memory.data_mut(&mut caller);
+                let start = buf_ptr as usize;
+                if start + n <= mem_data_mut.len() {
+                    mem_data_mut[start..start + n].copy_from_slice(&buf[..n]);
+                }
+                total += n as u32;
+                if n < buf_len as usize { break; }
+            }
+            let nw_bytes = total.to_le_bytes();
+            let mem_data = memory.data_mut(&mut caller);
+            let nr_addr = nread_ptr as usize;
+            if nr_addr + 4 <= mem_data.len() {
+                mem_data[nr_addr..nr_addr+4].copy_from_slice(&nw_bytes);
+            }
+            0
+        }
+    )?;
+
+    // ---- WASI: clock_time_get (clock_id, precision, time_ptr) -> errno ----
+    linker.func_wrap(
+        "wasi_snapshot_preview1", "clock_time_get",
+        |mut caller: Caller<'_, HostState>,
+         _clock_id: i32, _precision: i64, time_ptr: i32| -> i32 {
+            let memory = match caller.get_export("memory") {
+                Some(Extern::Memory(m)) => m,
+                _ => return 8,
+            };
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            let mem_data = memory.data_mut(&mut caller);
+            let addr = time_ptr as usize;
+            if addr + 8 > mem_data.len() { return 21; }
+            mem_data[addr..addr+8].copy_from_slice(&nanos.to_le_bytes());
+            0
+        }
+    )?;
+
+    // ---- WASI: random_get (buf_ptr, buf_len) -> errno ----
+    linker.func_wrap(
+        "wasi_snapshot_preview1", "random_get",
+        |mut caller: Caller<'_, HostState>,
+         buf_ptr: i32, buf_len: i32| -> i32 {
+            let memory = match caller.get_export("memory") {
+                Some(Extern::Memory(m)) => m,
+                _ => return 8,
+            };
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            let mut state = seed;
+            let mem_data = memory.data_mut(&mut caller);
+            let start = buf_ptr as usize;
+            let end = start + buf_len as usize;
+            if end > mem_data.len() { return 21; }
+            for byte in mem_data[start..end].iter_mut() {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                *byte = state as u8;
+            }
+            0
+        }
+    )?;
+
+    // ---- WASI: proc_exit (code) -> noreturn ----
+    linker.func_wrap(
+        "wasi_snapshot_preview1", "proc_exit",
+        |_caller: Caller<'_, HostState>, _code: i32| {
+            // In a sandboxed context, proc_exit just returns.
+            // The host can check the exit code via other means.
+        }
+    )?;
+
+    // ---- DNS: log_message (level, msg_ptr, msg_len) -> 0 ----
+    linker.func_wrap(
+        "dns", "log_message",
+        |mut caller: Caller<'_, HostState>,
+         level: i32, msg_ptr: i32, msg_len: i32| -> i32 {
+            let memory = match caller.get_export("memory") {
+                Some(Extern::Memory(m)) => m,
+                _ => return -1,
+            };
+            let msg = {
+                let data = memory.data(&caller);
+                let start = msg_ptr as usize;
+                let end = start + msg_len as usize;
+                if end > data.len() { return -1; }
+                String::from_utf8_lossy(&data[start..end]).to_string()
+            };
+            let lvl = match level {
+                0 => "ERROR", 1 => "WARN", 2 => "INFO", _ => "DEBUG",
+            };
+            eprintln!("[wasm-{lvl}] {msg}");
+            caller.data_mut().log_buffer.push(format!("[{lvl}] {msg}"));
+            0
+        }
+    )?;
+
+    // ---- DNS: get_time_ms () -> i32 ----
+    linker.func_wrap(
+        "dns", "get_time_ms",
+        |caller: Caller<'_, HostState>| -> i32 {
+            caller.data().start_time.elapsed().as_millis() as i32
+        }
+    )?;
+
+    // ---- DNS: recv_packet (buf_ptr, buf_max) -> packet_len ----
+    // Stub: returns -1. Real usage requires socket integration.
+    linker.func_wrap(
+        "dns", "recv_packet",
+        |_caller: Caller<'_, HostState>, _buf_ptr: i32, _buf_max: i32| -> i32 { -1 }
+    )?;
+
+    // ---- DNS: send_packet (buf_ptr, buf_len, addr_ptr, addr_len) -> bytes_sent ----
+    linker.func_wrap(
+        "dns", "send_packet",
+        |_caller: Caller<'_, HostState>,
+         _buf_ptr: i32, _buf_len: i32, _addr_ptr: i32, _addr_len: i32| -> i32 { -1 }
+    )?;
+
+    // ---- DNS: cdb_open (path_ptr, path_len) -> handle ----
+    linker.func_wrap(
+        "dns", "cdb_open",
+        |_caller: Caller<'_, HostState>, _path_ptr: i32, _path_len: i32| -> i32 { -1 }
+    )?;
+
+    // ---- DNS: cdb_find (handle, key_ptr, key_len, val_buf, val_max) -> val_len ----
+    linker.func_wrap(
+        "dns", "cdb_find",
+        |_caller: Caller<'_, HostState>,
+         _handle: i32, _key_ptr: i32, _key_len: i32, _val_buf: i32, _val_max: i32| -> i32 { -1 }
+    )?;
+
+    // ---- DNS: cdb_close (handle) -> 0 ----
+    linker.func_wrap(
+        "dns", "cdb_close",
+        |_caller: Caller<'_, HostState>, _handle: i32| -> i32 { 0 }
+    )?;
+
+    Ok(())
+}
+
+/// Instantiate a WASM module with WASI + DNS host imports linked.
+/// `fuel` = max instructions (0 = default 10M).
+/// Returns instance handle (>0) on success, 0 on error.
+#[no_mangle]
+pub extern "C" fn jerboa_wasm_instance_new_hosted(
+    module_handle: u64,
+    fuel: u64,
+) -> u64 {
+    match std::panic::catch_unwind(|| {
+        let modules = wasm_modules().lock().unwrap();
+        let wmod = match modules.get(&module_handle) {
+            Some(m) => m,
+            None => {
+                set_last_error("invalid module handle".to_string());
+                return 0;
+            }
+        };
+
+        let host = HostState {
+            start_time: std::time::Instant::now(),
+            ..Default::default()
+        };
+        let mut store = Store::new(&wmod.engine, host);
+        let fuel_amount = if fuel == 0 { 10_000_000 } else { fuel };
+        let _ = store.set_fuel(fuel_amount);
+
+        let mut linker = Linker::new(&wmod.engine);
+        if let Err(e) = define_host_imports(&mut linker) {
+            set_last_error(format!("failed to define host imports: {e}"));
+            return 0;
+        }
+
+        let pre = match linker.instantiate(&mut store, &wmod.module) {
+            Ok(pre) => pre,
+            Err(e) => {
+                set_last_error(format!("WASM instantiation failed: {e}"));
+                return 0;
+            }
+        };
+
+        let instance = match pre.start(&mut store) {
+            Ok(inst) => inst,
+            Err(e) => {
+                set_last_error(format!("WASM start function failed: {e}"));
+                return 0;
+            }
+        };
+
+        let handle = next_handle();
+        wasm_instances()
+            .lock()
+            .unwrap()
+            .insert(handle, WasmInstance { store, instance });
+        handle
+    }) {
+        Ok(h) => h,
+        Err(_) => {
+            set_last_error("panic in jerboa_wasm_instance_new_hosted".to_string());
+            0
+        }
     }
 }
