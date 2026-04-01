@@ -666,6 +666,33 @@
                          (begin ,@(map lower-expr catch-body)))))
                   try-body)))]
 
+           ;; ---- Output / display forms ----
+
+           ;; (displayln x) → scheme-displayln (one log line per call)
+           ;; (displayln)   → scheme-newline (blank log line)
+           [(displayln)
+            (if (null? args)
+              `(scheme-newline)
+              `(scheme-displayln ,(lower-expr (car args))))]
+
+           ;; (display x) → scheme-display
+           [(display)
+            (if (null? args)
+              `(scheme-newline)
+              `(scheme-display ,(lower-expr (car args))))]
+
+           ;; (newline) → scheme-newline
+           [(newline)
+            `(scheme-newline)]
+
+           ;; (format str) → static string; (format str args...) → ignored for now
+           ;; MVP: if called with a literal string and no interpolation args,
+           ;; return the string; otherwise return first arg unchanged.
+           [(format)
+            (if (and (string? (car args)) (null? (cdr args)))
+              `(string-from-static ,(string->utf8 (car args)))
+              (lower-expr (car args)))]
+
            ;; (assert! expr) or (assert! expr "message")
            [(assert!)
             (let ([test (lower-expr (car args))])
@@ -990,6 +1017,9 @@
           (closure-runtime-forms)
           '())
 
+        ;; 4c. Display runtime (requires log_message from dns imports)
+        (display-runtime-forms)
+
         ;; 5. Function table (for closures via call_indirect)
         (if has-closures
           '((define-table 64 256))
@@ -1122,6 +1152,19 @@
                   (eval '(begin
                            (import (jerboa wasm scheme-runtime))
                            runtime-closure-forms)
+                        (environment '(chezscheme) '(jerboa wasm scheme-runtime))))
+              #:handle-all)])
+      (if (pair? rt) rt '())))
+
+  ;; Load display runtime forms from scheme-runtime.
+  ;; Only included in full Slang pipeline (requires log_message from dns imports).
+  (define (display-runtime-forms)
+    (let ([rt (with-exception-handler
+                (lambda (e) '())
+                (lambda ()
+                  (eval '(begin
+                           (import (jerboa wasm scheme-runtime))
+                           runtime-display-forms)
                         (environment '(chezscheme) '(jerboa wasm scheme-runtime))))
               #:handle-all)])
       (if (pair? rt) rt '())))

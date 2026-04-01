@@ -34,6 +34,14 @@ struct HostState {
     start_time: std::time::Instant,
     /// Log buffer for captured log_message calls
     log_buffer: Vec<String>,
+    /// UDP socket for DNS recv_packet / send_packet
+    udp_socket: Option<std::net::UdpSocket>,
+    /// Last peer address seen in recv_from (used by send_packet)
+    peer_addr: Option<std::net::SocketAddr>,
+    /// Open CDB file handles: handle → raw CDB data
+    cdb_handles: HashMap<i32, Vec<u8>>,
+    /// Counter for allocating CDB handles
+    next_cdb_handle: i32,
 }
 
 impl Default for HostState {
@@ -41,6 +49,10 @@ impl Default for HostState {
         HostState {
             start_time: std::time::Instant::now(),
             log_buffer: Vec::new(),
+            udp_socket: None,
+            peer_addr: None,
+            cdb_handles: HashMap::new(),
+            next_cdb_handle: 0,
         }
     }
 }
@@ -194,6 +206,42 @@ pub extern "C" fn jerboa_wasm_instance_new(
 #[no_mangle]
 pub extern "C" fn jerboa_wasm_instance_free(handle: u64) {
     let _ = wasm_instances().lock().unwrap().remove(&handle);
+}
+
+/// Attach a pre-opened UDP socket fd to a hosted WASM instance.
+///
+/// After this call, recv_packet / send_packet host imports use this socket.
+/// The Scheme side opens the socket via standard OS calls and passes the fd.
+///
+/// SAFETY: `fd` must be a valid, owned UDP socket file descriptor.
+/// Returns 0 on success, -1 on error.
+#[no_mangle]
+pub extern "C" fn jerboa_wasm_set_socket(instance_handle: u64, fd: i32) -> i32 {
+    ffi_wrap(|| {
+        let mut instances = wasm_instances().lock().unwrap();
+        let inst = match instances.get_mut(&instance_handle) {
+            Some(i) => i,
+            None => {
+                set_last_error("invalid instance handle".to_string());
+                return -1;
+            }
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::FromRawFd;
+            // SAFETY: caller must ensure fd is a valid, owned UDP socket fd.
+            let socket = unsafe { std::net::UdpSocket::from_raw_fd(fd) };
+            inst.store.data_mut().udp_socket = Some(socket);
+            inst.store.data_mut().peer_addr = None;
+            0
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = fd;
+            set_last_error("jerboa_wasm_set_socket: not supported on this platform".to_string());
+            -1
+        }
+    })
 }
 
 /// Add fuel to an existing instance.
@@ -495,6 +543,75 @@ pub extern "C" fn jerboa_wasm_memory_size(handle: u64) -> i64 {
 // Hosted instance: instantiate with WASI + DNS host imports
 // ============================================================
 
+// ============================================================
+// CDB (Constant Database) support
+// ============================================================
+
+/// CDB hash function (djb2 variant used by the CDB format).
+fn cdb_hash(key: &[u8]) -> u32 {
+    let mut h: u32 = 5381;
+    for &b in key {
+        h = h.wrapping_shl(5).wrapping_add(h) ^ (b as u32);
+    }
+    h
+}
+
+/// Look up a key in CDB-format data.  Returns the value bytes on hit.
+///
+/// CDB format:
+///   Header (2048 bytes): 256 × (tbl_pos: u32 LE, tbl_len: u32 LE)
+///   Records: key_len(4) val_len(4) key_bytes val_bytes
+///   Hash tables at tbl_pos: tbl_len × (hash: u32 LE, rec_pos: u32 LE)
+///     rec_pos == 0 means empty slot
+fn cdb_lookup(data: &[u8], key: &[u8]) -> Option<Vec<u8>> {
+    if data.len() < 2048 {
+        return None;
+    }
+    let hash = cdb_hash(key);
+    let bucket = (hash & 0xFF) as usize;
+    let header_pos = bucket * 8;
+
+    let tbl_pos = u32::from_le_bytes(data[header_pos..header_pos+4].try_into().ok()?) as usize;
+    let tbl_len = u32::from_le_bytes(data[header_pos+4..header_pos+8].try_into().ok()?) as usize;
+
+    if tbl_len == 0 || tbl_pos == 0 {
+        return None;
+    }
+
+    let start_slot = ((hash >> 8) as usize) % tbl_len;
+
+    for i in 0..tbl_len {
+        let slot = (start_slot + i) % tbl_len;
+        let entry_pos = tbl_pos + slot * 8;
+        if entry_pos + 8 > data.len() {
+            return None;
+        }
+        let entry_hash = u32::from_le_bytes(data[entry_pos..entry_pos+4].try_into().ok()?);
+        let rec_pos    = u32::from_le_bytes(data[entry_pos+4..entry_pos+8].try_into().ok()?) as usize;
+
+        if rec_pos == 0 {
+            return None;   // empty slot — key not found
+        }
+
+        if entry_hash == hash {
+            if rec_pos + 8 > data.len() {
+                return None;
+            }
+            let klen = u32::from_le_bytes(data[rec_pos..rec_pos+4].try_into().ok()?) as usize;
+            let vlen = u32::from_le_bytes(data[rec_pos+4..rec_pos+8].try_into().ok()?) as usize;
+            let k_start = rec_pos + 8;
+            let v_start = k_start + klen;
+            if v_start + vlen > data.len() {
+                return None;
+            }
+            if &data[k_start..k_start + klen] == key {
+                return Some(data[v_start..v_start + vlen].to_vec());
+            }
+        }
+    }
+    None
+}
+
 /// Define WASI-compatible and DNS host imports on a linker.
 fn define_host_imports(linker: &mut Linker<HostState>) -> Result<(), Error> {
     // ---- WASI: fd_write (fd, iovs_ptr, iovs_len, nwritten_ptr) -> errno ----
@@ -606,22 +723,14 @@ fn define_host_imports(linker: &mut Linker<HostState>) -> Result<(), Error> {
                 Some(Extern::Memory(m)) => m,
                 _ => return 8,
             };
-            let seed = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64;
-            let mut state = seed;
             let mem_data = memory.data_mut(&mut caller);
             let start = buf_ptr as usize;
-            let end = start + buf_len as usize;
+            let end = start + buf_len.max(0) as usize;
             if end > mem_data.len() { return 21; }
-            for byte in mem_data[start..end].iter_mut() {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                *byte = state as u8;
+            match getrandom::getrandom(&mut mem_data[start..end]) {
+                Ok(()) => 0,
+                Err(_) => 29,   // ENOSYS — fall back to caller handling
             }
-            0
         }
     )?;
 
@@ -668,36 +777,165 @@ fn define_host_imports(linker: &mut Linker<HostState>) -> Result<(), Error> {
     )?;
 
     // ---- DNS: recv_packet (buf_ptr, buf_max) -> packet_len ----
-    // Stub: returns -1. Real usage requires socket integration.
+    // Blocks until a UDP packet arrives on the pre-opened socket.
+    // Returns the packet length on success, -1 on error.
     linker.func_wrap(
         "dns", "recv_packet",
-        |_caller: Caller<'_, HostState>, _buf_ptr: i32, _buf_max: i32| -> i32 { -1 }
+        |mut caller: Caller<'_, HostState>, buf_ptr: i32, buf_max: i32| -> i32 {
+            let memory = match caller.get_export("memory") {
+                Some(Extern::Memory(m)) => m,
+                _ => return -1,
+            };
+            let max = buf_max.max(0) as usize;
+            let mut tmp = vec![0u8; max];
+            // Clone the socket to release the borrow on caller before writing memory.
+            let cloned = caller.data().udp_socket.as_ref()
+                .and_then(|s| s.try_clone().ok());
+            let sock = match cloned {
+                Some(s) => s,
+                None => return -1,
+            };
+            match sock.recv_from(&mut tmp) {
+                Ok((n, addr)) => {
+                    caller.data_mut().peer_addr = Some(addr);
+                    let mem = memory.data_mut(&mut caller);
+                    let start = buf_ptr as usize;
+                    if start + n > mem.len() { return -1; }
+                    mem[start..start + n].copy_from_slice(&tmp[..n]);
+                    n as i32
+                }
+                Err(_) => -1,
+            }
+        }
     )?;
 
     // ---- DNS: send_packet (buf_ptr, buf_len, addr_ptr, addr_len) -> bytes_sent ----
+    // addr_ptr/addr_len: optional "ip:port" string in WASM memory.
+    // If addr_len == 0, uses the peer address saved by the last recv_packet.
     linker.func_wrap(
         "dns", "send_packet",
-        |_caller: Caller<'_, HostState>,
-         _buf_ptr: i32, _buf_len: i32, _addr_ptr: i32, _addr_len: i32| -> i32 { -1 }
+        |caller: Caller<'_, HostState>,
+         buf_ptr: i32, buf_len: i32, addr_ptr: i32, addr_len: i32| -> i32 {
+            let memory = match caller.get_export("memory") {
+                Some(Extern::Memory(m)) => m,
+                _ => return -1,
+            };
+            // Copy packet bytes out of WASM memory.
+            let packet = {
+                let data = memory.data(&caller);
+                let start = buf_ptr as usize;
+                let end = start + buf_len.max(0) as usize;
+                if end > data.len() { return -1; }
+                data[start..end].to_vec()
+            };
+            // Optionally parse destination address from WASM memory.
+            let dest_addr: Option<std::net::SocketAddr> = if addr_len > 0 {
+                let addr_str = {
+                    let data = memory.data(&caller);
+                    let start = addr_ptr as usize;
+                    let end = start + addr_len as usize;
+                    if end > data.len() { return -1; }
+                    std::str::from_utf8(&data[start..end]).ok().map(str::to_string)
+                };
+                addr_str.and_then(|s| s.parse().ok())
+            } else {
+                None
+            };
+            // Prefer explicit address; fall back to saved peer from last recv.
+            let target = dest_addr.or_else(|| caller.data().peer_addr);
+            let cloned = caller.data().udp_socket.as_ref()
+                .and_then(|s| s.try_clone().ok());
+            match (cloned, target) {
+                (Some(sock), Some(addr)) => {
+                    match sock.send_to(&packet, addr) {
+                        Ok(n) => n as i32,
+                        Err(_) => -1,
+                    }
+                }
+                _ => -1,
+            }
+        }
     )?;
 
     // ---- DNS: cdb_open (path_ptr, path_len) -> handle ----
+    // Reads the entire CDB file into memory and returns a handle (>=0).
+    // Returns -1 on error (file not found, I/O error, etc.).
     linker.func_wrap(
         "dns", "cdb_open",
-        |_caller: Caller<'_, HostState>, _path_ptr: i32, _path_len: i32| -> i32 { -1 }
+        |mut caller: Caller<'_, HostState>, path_ptr: i32, path_len: i32| -> i32 {
+            let memory = match caller.get_export("memory") {
+                Some(Extern::Memory(m)) => m,
+                _ => return -1,
+            };
+            let path = {
+                let data = memory.data(&caller);
+                let start = path_ptr as usize;
+                let end = start + path_len.max(0) as usize;
+                if end > data.len() { return -1; }
+                match std::str::from_utf8(&data[start..end]) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => return -1,
+                }
+            };
+            let cdb_data = match std::fs::read(&path) {
+                Ok(d) => d,
+                Err(_) => return -1,
+            };
+            let state = caller.data_mut();
+            let handle = state.next_cdb_handle;
+            state.next_cdb_handle += 1;
+            state.cdb_handles.insert(handle, cdb_data);
+            handle
+        }
     )?;
 
     // ---- DNS: cdb_find (handle, key_ptr, key_len, val_buf, val_max) -> val_len ----
+    // Looks up key in the CDB; copies value bytes to val_buf (up to val_max).
+    // Returns value length on hit, 0 on miss, -1 on error.
     linker.func_wrap(
         "dns", "cdb_find",
-        |_caller: Caller<'_, HostState>,
-         _handle: i32, _key_ptr: i32, _key_len: i32, _val_buf: i32, _val_max: i32| -> i32 { -1 }
+        |mut caller: Caller<'_, HostState>,
+         handle: i32, key_ptr: i32, key_len: i32, val_buf: i32, val_max: i32| -> i32 {
+            let memory = match caller.get_export("memory") {
+                Some(Extern::Memory(m)) => m,
+                _ => return -1,
+            };
+            let key = {
+                let data = memory.data(&caller);
+                let start = key_ptr as usize;
+                let end = start + key_len.max(0) as usize;
+                if end > data.len() { return -1; }
+                data[start..end].to_vec()
+            };
+            let val = {
+                let state = caller.data();
+                match state.cdb_handles.get(&handle) {
+                    Some(cdb_data) => cdb_lookup(cdb_data, &key),
+                    None => return -1,
+                }
+            };
+            match val {
+                None => 0,   // key not found
+                Some(v) => {
+                    let n = v.len().min(val_max.max(0) as usize);
+                    let mem = memory.data_mut(&mut caller);
+                    let start = val_buf as usize;
+                    if start + n > mem.len() { return -1; }
+                    mem[start..start + n].copy_from_slice(&v[..n]);
+                    n as i32
+                }
+            }
+        }
     )?;
 
     // ---- DNS: cdb_close (handle) -> 0 ----
+    // Releases the CDB data for the given handle.
     linker.func_wrap(
         "dns", "cdb_close",
-        |_caller: Caller<'_, HostState>, _handle: i32| -> i32 { 0 }
+        |mut caller: Caller<'_, HostState>, handle: i32| -> i32 {
+            caller.data_mut().cdb_handles.remove(&handle);
+            0
+        }
     )?;
 
     Ok(())

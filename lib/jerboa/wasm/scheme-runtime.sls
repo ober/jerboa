@@ -29,6 +29,7 @@
     runtime-equality-forms
     runtime-conversion-forms
     runtime-io-forms
+    runtime-display-forms
     runtime-result-forms
     runtime-closure-forms
     runtime-closure-type-forms
@@ -527,6 +528,69 @@
       ;; Uses bulk memory.fill (post-MVP)
       (define (mem-zero dst n)
         (memory.fill dst 0 n))
+      ))
+
+  ;; ================================================================
+  ;; Display output via log_message host import
+  ;; ================================================================
+  ;;
+  ;; These forms use the "dns" module's log_message import (level 2 = INFO).
+  ;; They are only included by slang->wasm-forms when DNS host imports are
+  ;; present — do NOT add to runtime-all-forms.
+  ;;
+  ;; Scratch memory layout (in MEM-IO-BASE = 4096):
+  ;;   4096-4107: digit buffer for number→string (12 bytes; max -2147483648)
+
+  (define runtime-display-forms
+    '(
+      ;; Write len raw bytes starting at ptr to log (level 2 = INFO).
+      (define (scheme-write-bytes ptr len)
+        (log_message 2 ptr len))
+
+      ;; Write the UTF-8 content of a WASM string object to log.
+      ;; String layout: [header(4)] [byte-len(4)] [utf8-bytes...]
+      (define (scheme-write-string s)
+        (scheme-write-bytes (+ s 8) (string-length-bytes s)))
+
+      ;; Write a raw i32 as decimal ASCII digits to log.
+      ;; Uses scratch at 4096-4107 (first 12 bytes of MEM-IO-BASE).
+      (define (scheme-write-fixnum-raw n)
+        (if (= n 0)
+          (begin
+            (i32.store8 4107 48)   ;; '0'
+            (scheme-write-bytes 4107 1))
+          (let ([pos 4107]
+                [abs-n (if (< n 0) (- 0 n) n)]
+                [cnt 0])
+            (let ([rem abs-n])
+              (while (> rem 0)
+                (i32.store8 pos (+ 48 (remainder rem 10)))
+                (set! rem (quotient rem 10))
+                (set! pos (- pos 1))
+                (set! cnt (+ cnt 1))))
+            (when (< n 0)
+              (i32.store8 pos 45)   ;; '-'
+              (set! pos (- pos 1))
+              (set! cnt (+ cnt 1)))
+            (scheme-write-bytes (+ pos 1) cnt))))
+
+      ;; Display a Scheme value to log (no explicit newline;
+      ;; each log_message call becomes one log line on the host side).
+      (define (scheme-display val)
+        (if (is-string val)
+          (scheme-write-string val)
+          (if (is-number val)
+            (scheme-write-fixnum-raw (untag-fixnum val))
+            0)))
+
+      ;; Display a Scheme value (equivalent to scheme-display; each call
+      ;; is its own log line, so the newline is implicit).
+      (define (scheme-displayln val)
+        (scheme-display val))
+
+      ;; Log a blank line (empty message).
+      (define (scheme-newline)
+        (log_message 2 4096 0))
       ))
 
   ;; ================================================================
