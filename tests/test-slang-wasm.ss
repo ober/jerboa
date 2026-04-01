@@ -648,6 +648,34 @@
   (check-pred bytevector? wasm)
   (check (> (bytevector-length wasm) 100) => #t))
 
+;; ================================================================
+;; Variadic Lambda Parameters
+;; ================================================================
+
+(section "Variadic Lambda Parameters")
+
+;; Lambda-params already handles rest args
+(check (lambda-params '(x y)) => '(x y))
+(check (lambda-params '(x . rest)) => '(x rest))
+(check (lambda-params 'args) => '(args))
+(check (lambda-params '((x i32) . rest)) => '(x rest))
+
+;; Free variable analysis handles rest args in lambda
+(let ([fvs (free-variables '(lambda (x . rest) (+ x y rest)) '())])
+  ;; x and rest are bound, y and + are free
+  (check-pred pair? (memq 'y fvs))
+  (check (memq 'x fvs) => #f)
+  (check (memq 'rest fvs) => #f))
+
+;; Lambda lifting of varargs lambda
+(let ([result (lambda-lift
+                '((define (f x)
+                    (let ([g (lambda (y . rest) (+ x y))])
+                      (g 1 2 3)))))])
+  (check-pred pair? result)
+  ;; Should have lifted definitions
+  (check (> (length result) 1) => #t))
+
 ;; Full runtime with UTF-8 string-length compiles to valid WASM
 (let ([wasm (compile-program
               (append

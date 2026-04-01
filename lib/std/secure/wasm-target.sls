@@ -142,19 +142,26 @@
         (symbol->string base) "_"
         (number->string init-counter))))
 
-  ;; Lower parameters: strip type annotations, keep names
+  ;; Lower parameters: strip type annotations, keep names.
+  ;; Handles dotted lists for rest args: (x y . rest) → (x y . rest)
   (define (lower-params params)
-    (map (lambda (p)
-           (cond
-             [(symbol? p) p]
-             ;; (name type) -> name
-             [(and (pair? p) (symbol? (car p))) (car p)]
-             [else p]))
-         ;; Filter out -> return type annotation
-         (let loop ([ps params])
-           (cond [(null? ps) '()]
-                 [(eq? (car ps) '->) '()]
-                 [else (cons (car ps) (loop (cdr ps)))]))))
+    (define (strip-param p)
+      (cond
+        [(symbol? p) p]
+        ;; (name type) -> name
+        [(and (pair? p) (symbol? (car p))) (car p)]
+        [else p]))
+    (let loop ([ps params])
+      (cond
+        [(null? ps) '()]
+        ;; -> return type annotation — stop here
+        [(and (pair? ps) (eq? (car ps) '->)) '()]
+        ;; Dotted tail (rest arg): (x . rest) where rest is a symbol
+        [(symbol? ps) ps]
+        ;; Normal parameter
+        [(pair? ps)
+         (cons (strip-param (car ps)) (loop (cdr ps)))]
+        [else ps])))
 
   ;; ================================================================
   ;; Expression lowering: Slang -> compile-program subset

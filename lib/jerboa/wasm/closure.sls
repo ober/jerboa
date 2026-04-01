@@ -28,6 +28,7 @@
   (export
     lambda-lift           ;; (list of forms) -> (list of forms)
     free-variables        ;; (expr bound-set) -> (list of symbols)
+    lambda-params         ;; formals -> (list of param names)
     )
 
   (import (chezscheme))
