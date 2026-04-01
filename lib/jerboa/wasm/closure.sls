@@ -455,7 +455,19 @@
                             scheme-make-bytevector scheme-bytevector-length
                             scheme-bytevector-u8-ref scheme-bytevector-u8-set!
                             scheme-make-vector scheme-vector-length
-                            scheme-vector-ref scheme-vector-set!)]
+                            scheme-vector-ref scheme-vector-set!
+                            scheme-string-length scheme-string-byte-length
+                            scheme-string-ref
+                            is-truthy is-number is-string is-symbol
+                            is-boolean is-vector is-bytevector is-eof is-nil
+                            wasm-bool->scheme
+                            fx-negate fx-abs fx-bitwise-and fx-bitwise-or
+                            fx-bitwise-xor fx-ash
+                            fx< fx> fx<= fx>= fx= fx-mod
+                            scheme-list-ref scheme-assq scheme-memq
+                            scheme-bytevector-copy
+                            intern-symbol string-from-static
+                            to-bool scheme-bool->wasm)]
            [bound-with-runtime (append runtime-names all-bound)]
            [free-vars (free-variables `(begin ,@body) bound-with-runtime)]
            ;; Generate lifted function name

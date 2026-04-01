@@ -418,6 +418,130 @@
                   runtime-string-forms)])
   (check-pred pair? (memq 'scheme-string-byte-length names)))
 
+;; ================================================================
+;; Higher-Order Function Patterns (map, filter, fold-left, etc.)
+;; ================================================================
+
+(section "Higher-Order Function Patterns")
+
+;; Test that the patterns produced by map/filter/fold lowering
+;; compile to valid WASM.  We construct the lowered forms directly
+;; since wasm-target.sls requires the Jerboa reader.
+
+;; map pattern: while + cons + reverse
+(let ([wasm (compile-program
+              (append
+                value-memory-forms
+                value-global-forms
+                value-tag-forms
+                value-predicate-forms
+                value-accessor-forms
+                gc-all-forms
+                value-constructor-forms
+                runtime-all-forms
+                '((define (double n) (fx+ n n))
+                  (define (double-all lst)
+                    (let ([__map_iter lst]
+                          [__map_result 4])  ;; 4 = IMM-NIL
+                      (while (is-pair __map_iter)
+                        (let ([__map_item (scheme-car __map_iter)])
+                          (set! __map_result
+                            (scheme-cons (double __map_item) __map_result))
+                          (set! __map_iter (scheme-cdr __map_iter))))
+                      (scheme-reverse __map_result))))))])
+  (check-pred bytevector? wasm)
+  (check (> (bytevector-length wasm) 100) => #t))
+
+;; filter pattern: while + conditional cons + reverse
+(let ([wasm (compile-program
+              (append
+                value-memory-forms
+                value-global-forms
+                value-tag-forms
+                value-predicate-forms
+                value-accessor-forms
+                gc-all-forms
+                value-constructor-forms
+                runtime-all-forms
+                '((define (is-pos n) (fx> n 1))  ;; tagged 0 = fixnum 0
+                  (define (keep-positive lst)
+                    (let ([__filt_iter lst]
+                          [__filt_result 4])
+                      (while (is-pair __filt_iter)
+                        (let ([__filt_item (scheme-car __filt_iter)])
+                          (when (is-pos __filt_item)
+                            (set! __filt_result
+                              (scheme-cons __filt_item __filt_result)))
+                          (set! __filt_iter (scheme-cdr __filt_iter))))
+                      (scheme-reverse __filt_result))))))])
+  (check-pred bytevector? wasm)
+  (check (> (bytevector-length wasm) 100) => #t))
+
+;; fold-left pattern: while + accumulator
+(let ([wasm (compile-program
+              (append
+                value-memory-forms
+                value-global-forms
+                value-tag-forms
+                value-predicate-forms
+                value-accessor-forms
+                gc-all-forms
+                value-constructor-forms
+                runtime-all-forms
+                '((define (sum lst)
+                    (let ([__fl_acc 1]      ;; tagged fixnum 0
+                          [__fl_iter lst])
+                      (while (is-pair __fl_iter)
+                        (set! __fl_acc
+                          (fx+ __fl_acc (scheme-car __fl_iter)))
+                        (set! __fl_iter (scheme-cdr __fl_iter)))
+                      __fl_acc)))))])
+  (check-pred bytevector? wasm)
+  (check (> (bytevector-length wasm) 100) => #t))
+
+;; for-each pattern: while + call, return void
+(let ([wasm (compile-program
+              (append
+                value-memory-forms
+                value-global-forms
+                value-tag-forms
+                value-predicate-forms
+                value-accessor-forms
+                gc-all-forms
+                value-constructor-forms
+                runtime-all-forms
+                '((define (noop x) x)
+                  (define (do-each lst)
+                    (let ([__fe_iter lst])
+                      (while (is-pair __fe_iter)
+                        (noop (scheme-car __fe_iter))
+                        (set! __fe_iter (scheme-cdr __fe_iter)))
+                      6)))))])   ;; 6 = IMM-VOID
+  (check-pred bytevector? wasm)
+  (check (> (bytevector-length wasm) 100) => #t))
+
+;; fold-right pattern: reverse then fold-left
+(let ([wasm (compile-program
+              (append
+                value-memory-forms
+                value-global-forms
+                value-tag-forms
+                value-predicate-forms
+                value-accessor-forms
+                gc-all-forms
+                value-constructor-forms
+                runtime-all-forms
+                '((define (my-reverse lst)
+                    (let ([__fr_acc 4]
+                          [__fr_iter (scheme-reverse lst)])
+                      (while (is-pair __fr_iter)
+                        (set! __fr_acc
+                          (scheme-cons (scheme-car __fr_iter) __fr_acc))
+                        (set! __fr_iter (scheme-cdr __fr_iter)))
+                      __fr_acc)))))])
+  (check-pred bytevector? wasm)
+  (check (> (bytevector-length wasm) 100) => #t))
+
 ;; Full runtime with UTF-8 string-length compiles to valid WASM
 (let ([wasm (compile-program
               (append

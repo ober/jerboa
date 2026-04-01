@@ -407,6 +407,71 @@
                                   ,(lower-expr (cadr args))
                                   ,(lower-expr (caddr args)))]
 
+           ;; ---- Higher-order list operations (lowered to while loops) ----
+
+           ;; (map f lst) → build result list by calling f on each element
+           [(map)
+            (let ([f-expr (lower-expr (car args))]
+                  [lst-expr (lower-expr (cadr args))])
+              `(let ([__map_iter ,lst-expr]
+                     [__map_result ,IMM-NIL])
+                 (while (is-pair __map_iter)
+                   (let ([__map_item (scheme-car __map_iter)])
+                     (set! __map_result
+                       (scheme-cons (,f-expr __map_item) __map_result))
+                     (set! __map_iter (scheme-cdr __map_iter))))
+                 (scheme-reverse __map_result)))]
+
+           ;; (filter pred lst) → keep elements where pred returns truthy
+           [(filter)
+            (let ([pred-expr (lower-expr (car args))]
+                  [lst-expr (lower-expr (cadr args))])
+              `(let ([__filt_iter ,lst-expr]
+                     [__filt_result ,IMM-NIL])
+                 (while (is-pair __filt_iter)
+                   (let ([__filt_item (scheme-car __filt_iter)])
+                     (when (is-truthy (,pred-expr __filt_item))
+                       (set! __filt_result
+                         (scheme-cons __filt_item __filt_result)))
+                     (set! __filt_iter (scheme-cdr __filt_iter))))
+                 (scheme-reverse __filt_result)))]
+
+           ;; (for-each f lst) → call f on each element, return void
+           [(for-each)
+            (let ([f-expr (lower-expr (car args))]
+                  [lst-expr (lower-expr (cadr args))])
+              `(let ([__fe_iter ,lst-expr])
+                 (while (is-pair __fe_iter)
+                   (,f-expr (scheme-car __fe_iter))
+                   (set! __fe_iter (scheme-cdr __fe_iter)))
+                 ,IMM-VOID))]
+
+           ;; (fold-left f init lst) → accumulate via (f acc elem)
+           [(fold-left foldl)
+            (let ([f-expr (lower-expr (car args))]
+                  [init-expr (lower-expr (cadr args))]
+                  [lst-expr (lower-expr (caddr args))])
+              `(let ([__fl_acc ,init-expr]
+                     [__fl_iter ,lst-expr])
+                 (while (is-pair __fl_iter)
+                   (set! __fl_acc
+                     (,f-expr __fl_acc (scheme-car __fl_iter)))
+                   (set! __fl_iter (scheme-cdr __fl_iter)))
+                 __fl_acc))]
+
+           ;; (fold-right f init lst) → reverse then fold-left with flipped args
+           [(fold-right foldr)
+            (let ([f-expr (lower-expr (car args))]
+                  [init-expr (lower-expr (cadr args))]
+                  [lst-expr (lower-expr (caddr args))])
+              `(let ([__fr_acc ,init-expr]
+                     [__fr_iter (scheme-reverse ,lst-expr)])
+                 (while (is-pair __fr_iter)
+                   (set! __fr_acc
+                     (,f-expr (scheme-car __fr_iter) __fr_acc))
+                   (set! __fr_iter (scheme-cdr __fr_iter)))
+                 __fr_acc))]
+
            ;; ---- Iteration forms ----
            [(while)
             `(while (is-truthy ,(lower-expr (car args)))
