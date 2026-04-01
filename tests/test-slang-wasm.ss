@@ -600,6 +600,54 @@
   (check-pred bytevector? wasm)
   (check (> (bytevector-length wasm) 50) => #t))
 
+;; ================================================================
+;; Result Type Operations
+;; ================================================================
+
+(section "Result Type Operations")
+
+;; runtime-result-forms should be a non-empty list of define forms
+(check-pred pair? runtime-result-forms)
+(for-each
+  (lambda (form)
+    (check (car form) => 'define))
+  runtime-result-forms)
+
+;; Result runtime contains ok, err, ok?, err?, unwrap, unwrap-or
+(let ([names (map (lambda (f)
+                    (and (pair? f) (eq? (car f) 'define) (pair? (cadr f))
+                         (caadr f)))
+                  runtime-result-forms)])
+  (check-pred pair? (memq 'scheme-ok names))
+  (check-pred pair? (memq 'scheme-err names))
+  (check-pred pair? (memq 'scheme-ok? names))
+  (check-pred pair? (memq 'scheme-err? names))
+  (check-pred pair? (memq 'scheme-unwrap names))
+  (check-pred pair? (memq 'scheme-unwrap-or names))
+  (check-pred pair? (memq 'scheme-result-value names)))
+
+;; Result operations compile to valid WASM
+(let ([wasm (compile-program
+              (append
+                value-memory-forms
+                value-global-forms
+                value-tag-forms
+                value-predicate-forms
+                value-accessor-forms
+                gc-all-forms
+                value-constructor-forms
+                runtime-all-forms
+                '((define (test-ok x)
+                    (scheme-ok (tag-fixnum x)))
+                  (define (test-err x)
+                    (scheme-err (tag-fixnum x)))
+                  (define (test-check r)
+                    (if (scheme-ok? r)
+                      (scheme-unwrap r)
+                      (scheme-unwrap-or r (tag-fixnum 0)))))))])
+  (check-pred bytevector? wasm)
+  (check (> (bytevector-length wasm) 100) => #t))
+
 ;; Full runtime with UTF-8 string-length compiles to valid WASM
 (let ([wasm (compile-program
               (append

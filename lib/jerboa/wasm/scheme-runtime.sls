@@ -29,6 +29,7 @@
     runtime-equality-forms
     runtime-conversion-forms
     runtime-io-forms
+    runtime-result-forms
     runtime-all-forms
     )
 
@@ -518,6 +519,64 @@
       ))
 
   ;; ================================================================
+  ;; Result type operations (ok/err)
+  ;; ================================================================
+
+  ;; Results are represented as pairs:
+  ;;   (ok x)  → pair where car = tagged fixnum 1, cdr = x
+  ;;   (err x) → pair where car = tagged fixnum 0, cdr = x
+  ;; This gives us O(1) construction and access.
+
+  (define RESULT-OK-TAG  (bitwise-ior (bitwise-arithmetic-shift-left 1 2) 1))  ;; tagged fixnum 1 = 5
+  (define RESULT-ERR-TAG (bitwise-ior (bitwise-arithmetic-shift-left 0 2) 1))  ;; tagged fixnum 0 = 1
+
+  (define runtime-result-forms
+    `(
+      ;; Construct an ok result
+      (define (scheme-ok val)
+        (cons-val ,RESULT-OK-TAG val))
+
+      ;; Construct an err result
+      (define (scheme-err val)
+        (cons-val ,RESULT-ERR-TAG val))
+
+      ;; Check if result is ok (car == tagged 1)
+      (define (scheme-ok? r)
+        (if (is-pair r)
+          (if (= (pair-car r) ,RESULT-OK-TAG) 2 0)   ;; 2=#t, 0=#f
+          0))
+
+      ;; Check if result is err (car == tagged 0)
+      (define (scheme-err? r)
+        (if (is-pair r)
+          (if (= (pair-car r) ,RESULT-ERR-TAG) 2 0)
+          0))
+
+      ;; Unwrap an ok result (returns value or traps)
+      (define (scheme-unwrap r)
+        (if (= (pair-car r) ,RESULT-OK-TAG)
+          (pair-cdr r)
+          (unreachable)))
+
+      ;; Unwrap with default: return value if ok, default if err
+      (define (scheme-unwrap-or r default-val)
+        (if (= (pair-car r) ,RESULT-OK-TAG)
+          (pair-cdr r)
+          default-val))
+
+      ;; Map over ok value: (map-ok f result)
+      ;; If ok, apply f to the value; if err, pass through
+      (define (scheme-map-ok f-result r)
+        ;; f-result is the result of applying f — caller must inline the call
+        ;; This version is for the lowered form where the call is already done
+        r)
+
+      ;; Extract ok value (for lowering; callers guard with ok?)
+      (define (scheme-result-value r)
+        (pair-cdr r))
+      ))
+
+  ;; ================================================================
   ;; Combined: all runtime forms
   ;; ================================================================
 
@@ -530,6 +589,7 @@
             runtime-comparison-forms
             runtime-equality-forms
             runtime-conversion-forms
-            runtime-io-forms))
+            runtime-io-forms
+            runtime-result-forms))
 
 ) ;; end library

@@ -467,7 +467,10 @@
                             scheme-list-ref scheme-assq scheme-memq
                             scheme-bytevector-copy
                             intern-symbol string-from-static
-                            to-bool scheme-bool->wasm)]
+                            to-bool scheme-bool->wasm
+                            scheme-ok scheme-err scheme-ok? scheme-err?
+                            scheme-unwrap scheme-unwrap-or
+                            scheme-result-value scheme-map-ok)]
            [bound-with-runtime (append runtime-names all-bound)]
            [free-vars (free-variables `(begin ,@body) bound-with-runtime)]
            ;; Generate lifted function name

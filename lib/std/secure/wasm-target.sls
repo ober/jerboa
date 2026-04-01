@@ -415,6 +415,58 @@
                                   ,(lower-expr (cadr args))
                                   ,(lower-expr (caddr args)))]
 
+           ;; ---- Result type operations ----
+           [(ok)
+            `(scheme-ok ,(lower-expr (car args)))]
+           [(err)
+            `(scheme-err ,(lower-expr (car args)))]
+           [(ok?)
+            `(wasm-bool->scheme (scheme-ok? ,(lower-expr (car args))))]
+           [(err?)
+            `(wasm-bool->scheme (scheme-err? ,(lower-expr (car args))))]
+           [(unwrap)
+            `(scheme-unwrap ,(lower-expr (car args)))]
+           [(unwrap-or)
+            `(scheme-unwrap-or ,(lower-expr (car args))
+                               ,(lower-expr (cadr args)))]
+           [(map-ok)
+            ;; (map-ok f result) → if ok, wrap (f value) in ok; else pass err
+            (let ([f-expr (lower-expr (car args))]
+                  [r-expr (lower-expr (cadr args))])
+              `(let ([__mo_r ,r-expr])
+                 (if (scheme-ok? __mo_r)
+                   (scheme-ok (,f-expr (scheme-result-value __mo_r)))
+                   __mo_r)))]
+           [(map-err)
+            ;; (map-err f result) → if err, wrap (f value) in err; else pass ok
+            (let ([f-expr (lower-expr (car args))]
+                  [r-expr (lower-expr (cadr args))])
+              `(let ([__me_r ,r-expr])
+                 (if (scheme-err? __me_r)
+                   (scheme-err (,f-expr (scheme-result-value __me_r)))
+                   __me_r)))]
+           [(and-then)
+            ;; (and-then result f) → if ok, (f value); else pass err
+            (let ([r-expr (lower-expr (car args))]
+                  [f-expr (lower-expr (cadr args))])
+              `(let ([__at_r ,r-expr])
+                 (if (scheme-ok? __at_r)
+                   (,f-expr (scheme-result-value __at_r))
+                   __at_r)))]
+           [(->?)
+            ;; (->? result (f) (g)) → thread through ok values
+            ;; (->? init f1 f2 ...) where each fi takes one arg and returns result
+            (let loop ([r-expr (lower-expr (car args))]
+                       [fns (cdr args)])
+              (if (null? fns)
+                r-expr
+                (let ([f-expr (lower-expr (car fns))])
+                  (loop `(let ([__pipe_r ,r-expr])
+                           (if (scheme-ok? __pipe_r)
+                             (,f-expr (scheme-result-value __pipe_r))
+                             __pipe_r))
+                        (cdr fns)))))]
+
            ;; ---- Higher-order list operations (lowered to while loops) ----
 
            ;; (map f lst) → build result list by calling f on each element
