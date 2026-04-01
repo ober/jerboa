@@ -1286,6 +1286,14 @@
               [(define-tag)
                ;; (define-tag type-idx)
                (wasm-module-add-tag! mod (cadr form))]
+              [(define-type)
+               ;; (define-type (param-types) (result-types))
+               ;; Pre-registers a type at the next available index.
+               ;; Used to establish known type indices for call-indirect.
+               (let* ([ptypes (map scheme->wasm-type (cadr form))]
+                      [rtypes (map scheme->wasm-type (caddr form))]
+                      [type (make-wasm-type ptypes rtypes)])
+                 (wasm-module-add-type! mod type))]
               [else (void)])))
         forms)
 

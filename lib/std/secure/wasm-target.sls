@@ -950,10 +950,21 @@
            [static-strings (collect-static-strings lifted)]
            [string-data-forms (generate-string-data static-strings)]
            ;; Replace (string-from-static #vu8(...)) with (string-from-static offset)
-           [lifted (replace-static-strings lifted static-strings)])
+           [lifted (replace-static-strings lifted static-strings)]
+           ;; Assign real table indices to alloc-closure placeholders
+           [closure-assignment (assign-closure-indices lifted)]
+           [lifted (car closure-assignment)]
+           [element-forms (cdr closure-assignment)]
+           [has-closures (has-closures? lifted)])
 
       ;; Assemble the complete program
       (append
+        ;; 0. Closure type pre-registration — MUST come before imports so
+        ;;    type indices 0/1/2 are stable for call-indirect in call-closure-N.
+        (if has-closures
+          (closure-type-forms)
+          '())
+
         ;; 1. Memory and globals
         value-memory-forms
         value-global-forms
@@ -973,12 +984,15 @@
         (runtime-forms)
 
         ;; 5. Function table (for closures via call_indirect)
-        (if (has-closures? lifted)
+        (if has-closures
           '((define-table 64 256))
           '())
 
-        ;; 6. User program (lifted + lowered)
-        lifted)))
+        ;; 6. User program (lifted + lowered, with real func-idx in closures)
+        lifted
+
+        ;; 7. Element segment: populate function table with lifted functions
+        element-forms)))
 
   ;; Collect all static string references and assign offsets
   (define (collect-static-strings forms)
@@ -1034,6 +1048,62 @@
            (map replace expr))]
         [else expr]))
     (map replace forms))
+
+  ;; Collect lifted function names (symbols starting with "__lifted_") in order.
+  (define (collect-lifted-names forms)
+    (let loop ([fs forms] [names '()])
+      (if (null? fs)
+        (reverse names)
+        (let ([f (car fs)])
+          (if (and (pair? f)
+                   (eq? (car f) 'define)
+                   (pair? (cadr f))
+                   (let ([name (caadr f)])
+                     (and (symbol? name)
+                          (let ([s (symbol->string name)])
+                            (and (> (string-length s) 9)
+                                 (string=? (substring s 0 9) "__lifted_"))))))
+            (loop (cdr fs) (cons (caadr f) names))
+            (loop (cdr fs) names))))))
+
+  ;; Replace (alloc-closure sym n) with (alloc-closure table-idx n)
+  ;; using a mapping of sym → integer table index.
+  ;; Returns (cons rewritten-forms element-forms).
+  (define (assign-closure-indices forms)
+    (let* ([lifted-names (collect-lifted-names forms)]
+           [name->idx (let loop ([ns lifted-names] [i 0])
+                        (if (null? ns) '()
+                          (cons (cons (car ns) i)
+                                (loop (cdr ns) (+ i 1)))))])
+      (define (rewrite expr)
+        (cond
+          [(pair? expr)
+           (if (and (eq? (car expr) 'alloc-closure)
+                    (symbol? (cadr expr)))
+             ;; Replace symbolic name with table index
+             (let ([entry (assq (cadr expr) name->idx)])
+               (if entry
+                 `(alloc-closure ,(cdr entry) ,(caddr expr))
+                 expr))  ;; unknown name — leave as-is
+             (map rewrite expr))]
+          [else expr]))
+      (let ([rewritten (map rewrite forms)]
+            [element-forms (if (null? lifted-names)
+                             '()
+                             (list `(define-element 0 ,lifted-names)))])
+        (cons rewritten element-forms))))
+
+  ;; Load closure type pre-registration forms from scheme-runtime module.
+  (define (closure-type-forms)
+    (let ([rt (with-exception-handler
+                (lambda (e) '())
+                (lambda ()
+                  (eval '(begin
+                           (import (jerboa wasm scheme-runtime))
+                           runtime-closure-type-forms)
+                        (environment '(chezscheme) '(jerboa wasm scheme-runtime))))
+              #:handle-all)])
+      (if (pair? rt) rt '())))
 
   ;; Check if any form references closures
   (define (has-closures? forms)

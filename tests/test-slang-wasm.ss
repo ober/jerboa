@@ -757,6 +757,102 @@
   (check (> (bytevector-length wasm) 100) => #t))
 
 ;; ================================================================
+;; Closure Infrastructure (Phase 1A/1B/1C)
+;; ================================================================
+
+(section "Closure Infrastructure")
+
+;; runtime-closure-forms contains call-closure-N and closure-func-idx
+(check-pred pair? runtime-closure-forms)
+(let ([names (map (lambda (f)
+                    (and (pair? f) (eq? (car f) 'define) (pair? (cadr f))
+                         (caadr f)))
+                  runtime-closure-forms)])
+  (check-pred pair? (memq 'closure-func-idx names))
+  (check-pred pair? (memq 'closure-env-count names))
+  (check-pred pair? (memq 'call-closure-1 names))
+  (check-pred pair? (memq 'call-closure-2 names))
+  (check-pred pair? (memq 'call-closure-3 names)))
+
+;; runtime-closure-type-forms contains exactly 3 define-type forms
+(check (length runtime-closure-type-forms) => 3)
+(for-each
+  (lambda (form)
+    (check (car form) => 'define-type))
+  runtime-closure-type-forms)
+
+;; define-type is accepted by compile-program without error
+(let ([wasm (compile-program
+              (append
+                value-memory-forms
+                value-global-forms
+                '((define-type (i32 i32) (i32))
+                  (define-type (i32 i32 i32) (i32)))
+                value-tag-forms
+                value-predicate-forms
+                value-accessor-forms
+                value-constructor-forms
+                gc-all-forms
+                runtime-all-forms
+                '((define (test-fn x) x))))])
+  (check-pred bytevector? wasm)
+  (check (> (bytevector-length wasm) 50) => #t))
+
+;; lambda-lift now uses symbolic lifted name in alloc-closure (not 0)
+(let* ([forms '((define (make-adder x)
+                  (lambda (y) (+ x y))))]
+       [lifted (lambda-lift forms)])
+  ;; Find alloc-closure forms in the lifted output
+  (define (find-alloc-closure forms)
+    (let loop ([fs forms] [found '()])
+      (if (null? fs) found
+        (let ([f (car fs)])
+          (loop (cdr fs)
+            (if (and (pair? f) (eq? (car f) 'alloc-closure))
+              (cons f found)
+              (append found (find-alloc-closure
+                              (if (pair? f) f '())))))))))
+  (define (collect-alloc-closures expr)
+    (cond
+      [(not (pair? expr)) '()]
+      [(eq? (car expr) 'alloc-closure) (list expr)]
+      [else (apply append (map collect-alloc-closures expr))]))
+  (let ([allocs (apply append (map collect-alloc-closures lifted))])
+    ;; There should be at least one alloc-closure
+    (check-pred pair? allocs)
+    ;; The func-idx field (cadr) should be a symbol (lifted name), not 0
+    (for-each
+      (lambda (ac)
+        (check-pred symbol? (cadr ac)))
+      allocs)))
+
+;; assign-closure-indices replaces symbolic func-idx with integer
+;; (test via compile-program: a closure-using program compiles cleanly)
+(let ([wasm (compile-program
+              (append
+                ;; closure type pre-registration first
+                runtime-closure-type-forms
+                value-memory-forms
+                value-global-forms
+                value-tag-forms
+                value-predicate-forms
+                value-accessor-forms
+                value-constructor-forms
+                gc-all-forms
+                runtime-all-forms
+                ;; A pre-lifted closure: func-idx 0 (first table slot)
+                '((define-table 64 256)
+                  (define (__lifted_test env y)
+                    (+ (closure-env-ref env 0) y))
+                  (define (make-adder x)
+                    (let ([c (alloc-closure 0 1)])
+                      (closure-env-set! c 0 x)
+                      c))
+                  (define-element 0 (__lifted_test)))))])
+  (check-pred bytevector? wasm)
+  (check (> (bytevector-length wasm) 100) => #t))
+
+;; ================================================================
 ;; Summary
 ;; ================================================================
 

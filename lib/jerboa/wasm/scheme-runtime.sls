@@ -30,6 +30,8 @@
     runtime-conversion-forms
     runtime-io-forms
     runtime-result-forms
+    runtime-closure-forms
+    runtime-closure-type-forms
     runtime-all-forms
     )
 
@@ -586,6 +588,70 @@
       ))
 
   ;; ================================================================
+  ;; Closure call dispatch (call_indirect via function table)
+  ;;
+  ;; These type indices depend on define-type forms being emitted
+  ;; BEFORE imports in the forms list.  slang->wasm-forms emits:
+  ;;   (define-type (i32 i32) (i32))        → type-idx 0  (arity-1 closure)
+  ;;   (define-type (i32 i32 i32) (i32))    → type-idx 1  (arity-2 closure)
+  ;;   (define-type (i32 i32 i32 i32) (i32)) → type-idx 2  (arity-3 closure)
+  ;; Then imports follow (indices 3+), then user functions.
+  ;;
+  ;; call-indirect form: (call-indirect type-idx env arg... table-index-expr)
+  ;; The last arg is the table index (func-idx from the closure header).
+  ;; ================================================================
+
+  (define runtime-closure-forms
+    '(
+      ;; Read the func-idx stored in a closure header
+      (define (closure-func-idx clos)
+        (i32.load (+ clos 4)))
+
+      ;; Read the env-count stored in a closure header
+      (define (closure-env-count clos)
+        (i32.load (+ clos 8)))
+
+      ;; Call a 1-arg closure: (env + 1 user arg) -> result
+      ;; Type index 0: (i32 i32) -> i32
+      (define (call-closure-1 clos arg)
+        (call-indirect 0
+          clos                       ;; env (i32)
+          arg                        ;; user arg (i32)
+          (closure-func-idx clos)))  ;; table index
+
+      ;; Call a 2-arg closure: (env + 2 user args) -> result
+      ;; Type index 1: (i32 i32 i32) -> i32
+      (define (call-closure-2 clos arg1 arg2)
+        (call-indirect 1
+          clos                       ;; env (i32)
+          arg1                       ;; user arg 1 (i32)
+          arg2                       ;; user arg 2 (i32)
+          (closure-func-idx clos)))  ;; table index
+
+      ;; Call a 3-arg closure: (env + 3 user args) -> result
+      ;; Type index 2: (i32 i32 i32 i32) -> i32
+      (define (call-closure-3 clos arg1 arg2 arg3)
+        (call-indirect 2
+          clos                       ;; env (i32)
+          arg1                       ;; user arg 1 (i32)
+          arg2                       ;; user arg 2 (i32)
+          arg3                       ;; user arg 3 (i32)
+          (closure-func-idx clos)))  ;; table index
+      ))
+
+  ;; Pre-type registration forms — must be emitted FIRST in the program,
+  ;; before any define-import forms, to guarantee stable type indices 0-2.
+  (define runtime-closure-type-forms
+    '(
+      ;; Type 0: arity-1 closure (env i32, arg i32) -> i32
+      (define-type (i32 i32) (i32))
+      ;; Type 1: arity-2 closure (env i32, arg1 i32, arg2 i32) -> i32
+      (define-type (i32 i32 i32) (i32))
+      ;; Type 2: arity-3 closure (env i32, arg1 i32, arg2 i32, arg3 i32) -> i32
+      (define-type (i32 i32 i32 i32) (i32))
+      ))
+
+  ;; ================================================================
   ;; Combined: all runtime forms
   ;; ================================================================
 
@@ -599,6 +665,7 @@
             runtime-equality-forms
             runtime-conversion-forms
             runtime-io-forms
-            runtime-result-forms))
+            runtime-result-forms
+            runtime-closure-forms))
 
 ) ;; end library

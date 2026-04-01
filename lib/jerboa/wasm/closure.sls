@@ -471,7 +471,9 @@
                             to-bool scheme-bool->wasm
                             scheme-ok scheme-err scheme-ok? scheme-err?
                             scheme-unwrap scheme-unwrap-or
-                            scheme-result-value scheme-map-ok)]
+                            scheme-result-value scheme-map-ok
+                            closure-func-idx closure-env-count
+                            call-closure-1 call-closure-2 call-closure-3)]
            [bound-with-runtime (append runtime-names all-bound)]
            [free-vars (free-variables `(begin ,@body) bound-with-runtime)]
            ;; Generate lifted function name
@@ -493,12 +495,14 @@
              [lifted-def `(define (,lifted-name ,@new-formals) ,@new-body)]
              ;; The closure allocation expression
              [n-free (length free-vars)]
-             ;; Build the closure allocation + env filling
+             ;; Build the closure allocation + env filling.
+             ;; Use the lifted function name as a symbolic func-idx placeholder.
+             ;; wasm-target.sls replaces these symbols with real table indices.
              [closure-expr
               (if (= n-free 0)
                 ;; No free variables: still create a closure for uniformity
-                `(alloc-closure 0 0)  ;; func-idx filled in later by wasm-target
-                `(let ([__clos (alloc-closure 0 ,n-free)])
+                `(alloc-closure ,lifted-name 0)
+                `(let ([__clos (alloc-closure ,lifted-name ,n-free)])
                    ,@(map (lambda (var)
                             (let ([idx (cdr (assq var env-map))])
                               `(closure-env-set! __clos ,idx ,var)))
