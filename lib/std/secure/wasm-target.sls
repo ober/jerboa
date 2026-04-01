@@ -118,8 +118,10 @@
               [params (cdr sig)]
               [body (cddr form)])
          ;; Lower the body expressions
-         (let ([lowered-body (map lower-expr body)])
-           (list `(define (,name ,@(lower-params params)) ,@lowered-body))))]
+         (let* ([lowered-body (map lower-expr body)]
+                ;; Optimize self-recursive tail calls to return-call
+                [optimized-body (tail-call-optimize name lowered-body)])
+           (list `(define (,name ,@(lower-params params)) ,@optimized-body))))]
 
       ;; Variable definition
       [(and (pair? form) (eq? (car form) 'define) (symbol? (cadr form)))
@@ -162,6 +164,66 @@
         [(pair? ps)
          (cons (strip-param (car ps)) (loop (cdr ps)))]
         [else ps])))
+
+  ;; ================================================================
+  ;; Tail call optimization: self-recursive calls → return-call
+  ;; ================================================================
+
+  ;; Transform the last expression in a body: if it's a self-call, emit return-call.
+  ;; Walks into if/cond/let/begin to find tail positions.
+  (define (tail-call-optimize fname body)
+    (if (null? body)
+      body
+      ;; Only the last expression is in tail position
+      (let ([prefix (reverse (cdr (reverse body)))]
+            [last-expr (car (reverse body))])
+        (append prefix (list (tco-expr fname last-expr))))))
+
+  (define (tco-expr fname expr)
+    (cond
+      [(not (pair? expr)) expr]
+      [else
+       (let ([head (car expr)] [args (cdr expr)])
+         (cond
+           ;; Self-call in tail position → return-call
+           [(eq? head fname)
+            `(return-call ,fname ,@args)]
+
+           ;; if: both branches are tail positions
+           [(eq? head 'if)
+            (if (null? (cddr args))
+              ;; (if test then) — only then branch
+              `(if ,(car args) ,(tco-expr fname (cadr args)))
+              ;; (if test then else)
+              `(if ,(car args)
+                 ,(tco-expr fname (cadr args))
+                 ,(tco-expr fname (caddr args))))]
+
+           ;; when: body is tail position
+           [(eq? head 'when)
+            `(when ,(car args) ,@(tail-call-optimize fname (cdr args)))]
+
+           ;; begin: last expression is tail position
+           [(eq? head 'begin)
+            `(begin ,@(tail-call-optimize fname args))]
+
+           ;; let/let*: body is tail position
+           [(memq head '(let let*))
+            (let ([bindings (car args)]
+                  [body (cdr args)])
+              `(,head ,bindings ,@(tail-call-optimize fname body)))]
+
+           ;; cond: each branch body is tail position
+           [(eq? head 'cond)
+            `(cond ,@(map (lambda (clause)
+                            (if (eq? (car clause) 'else)
+                              `(else ,@(tail-call-optimize fname (cdr clause)))
+                              (cons (car clause)
+                                    (tail-call-optimize fname (cdr clause)))))
+                          args))]
+
+           ;; Default: not a tail position we recognize
+           [else expr]))]))
 
   ;; ================================================================
   ;; Expression lowering: Slang -> compile-program subset

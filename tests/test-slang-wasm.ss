@@ -710,6 +710,36 @@
   (check-pred bytevector? wasm)
   (check (> (bytevector-length wasm) 30) => #t))
 
+;; ================================================================
+;; Tail Call Patterns
+;; ================================================================
+
+(section "Tail Call Patterns")
+
+;; return-call compiles to valid WASM (tail call instruction)
+(let ([wasm (compile-program
+              (append
+                value-memory-forms
+                value-global-forms
+                '((define (factorial n acc)
+                    (if (= n 0)
+                      acc
+                      (return-call factorial (- n 1) (* acc n)))))))])
+  (check-pred bytevector? wasm)
+  (check (> (bytevector-length wasm) 30) => #t))
+
+;; Recursive tail call with branching
+(let ([wasm (compile-program
+              (append
+                value-memory-forms
+                value-global-forms
+                '((define (count-down n)
+                    (if (= n 0)
+                      0
+                      (return-call count-down (- n 1)))))))])
+  (check-pred bytevector? wasm)
+  (check (> (bytevector-length wasm) 30) => #t))
+
 ;; Full runtime with UTF-8 string-length compiles to valid WASM
 (let ([wasm (compile-program
               (append
