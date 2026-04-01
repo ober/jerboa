@@ -948,7 +948,9 @@
            [lifted (lambda-lift lowered)]
            ;; Collect static string data for data segments
            [static-strings (collect-static-strings lifted)]
-           [string-data-forms (generate-string-data static-strings)])
+           [string-data-forms (generate-string-data static-strings)]
+           ;; Replace (string-from-static #vu8(...)) with (string-from-static offset)
+           [lifted (replace-static-strings lifted static-strings)])
 
       ;; Assemble the complete program
       (append
@@ -1012,6 +1014,26 @@
              (bytevector-copy! bv 0 data 4 len)
              `(define-data ,offset ,data)))
          string-table))
+
+  ;; Replace (string-from-static #vu8(...)) with (string-from-static offset)
+  ;; using the offset table produced by collect-static-strings.
+  ;; This converts bytevector literals to raw memory addresses so the
+  ;; generated WASM calls the runtime string-from-static with an i32.
+  (define (replace-static-strings forms string-table)
+    (define (replace expr)
+      (cond
+        [(pair? expr)
+         (if (and (eq? (car expr) 'string-from-static)
+                  (bytevector? (cadr expr)))
+           ;; Replace with the assigned integer offset
+           (let ([entry (assoc (cadr expr) string-table)])
+             (if entry
+               `(string-from-static ,(cdr entry))
+               expr))  ;; shouldn't happen if collect was complete
+           ;; Otherwise recurse into subforms
+           (map replace expr))]
+        [else expr]))
+    (map replace forms))
 
   ;; Check if any form references closures
   (define (has-closures? forms)

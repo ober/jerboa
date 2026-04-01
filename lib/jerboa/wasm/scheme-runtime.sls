@@ -266,6 +266,19 @@
             (string-byte-set! s i (i32.load8_u (+ offset i)))
             (set! i (+ i 1)))
           s))
+
+      ;; Load a string from the static data segment.
+      ;; The data segment stores strings as: [4-byte LE length][UTF-8 bytes].
+      ;; offset is the raw i32 address of the length prefix.
+      (define (string-from-static offset)
+        (let ([len (i32.load offset)])
+          (string-from-memory (+ offset 4) len)))
+
+      ;; Intern a symbol by wrapping a string pointer.
+      ;; Simple MVP: symbol identity is by string equality (not pointer equality).
+      ;; Full symbol table interning can be added later.
+      (define (intern-symbol str-ptr)
+        (alloc-symbol str-ptr))
       ))
 
   ;; ================================================================
