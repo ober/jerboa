@@ -556,6 +556,62 @@
            [(match)
             (lower-match (car args) (cdr args))]
 
+           ;; ---- Exception handling ----
+
+           ;; (guard (e [test => expr] ...) body ...)
+           ;; Lowered to try/catch with tag 0 (general exception tag)
+           [(guard)
+            (let* ([var-clauses (car args)]
+                   [var (car var-clauses)]
+                   [clauses (cdr var-clauses)]
+                   [body (cdr args)])
+              `(try-catch 0
+                 (begin ,@(map lower-expr body))
+                 ,var
+                 ,(lower-guard-clauses var clauses)))]
+
+           ;; (try body (catch (e) handler))
+           ;; (try body (catch (pred? e) handler))
+           [(try)
+            (let* ([body (car args)]
+                   [rest (cdr args)]
+                   [catch-clause (and (pair? rest)
+                                      (pair? (car rest))
+                                      (eq? (caar rest) 'catch)
+                                      (car rest))]
+                   [finally-clause (and (pair? rest)
+                                        (or (and (pair? (car rest))
+                                                 (eq? (caar rest) 'finally)
+                                                 (car rest))
+                                            (and (>= (length rest) 2)
+                                                 (pair? (cadr rest))
+                                                 (eq? (caadr rest) 'finally)
+                                                 (cadr rest))))])
+              (let ([try-body (lower-expr body)])
+                (if catch-clause
+                  (let* ([catch-args (cdr catch-clause)]
+                         [catch-bindings (car catch-args)]
+                         [catch-body (cdr catch-args)]
+                         [e-var (if (pair? catch-bindings) (car catch-bindings) catch-bindings)])
+                    (if finally-clause
+                      `(try-catch 0
+                         ,try-body
+                         ,e-var
+                         (begin ,@(map lower-expr catch-body)))
+                      `(try-catch 0
+                         ,try-body
+                         ,e-var
+                         (begin ,@(map lower-expr catch-body)))))
+                  try-body)))]
+
+           ;; (assert! expr) or (assert! expr "message")
+           [(assert!)
+            (let ([test (lower-expr (car args))])
+              `(when (not (is-truthy ,test))
+                 (throw 0 ,(if (and (pair? (cdr args)) (string? (cadr args)))
+                             (lower-expr (cadr args))
+                             (tagged-fixnum 0)))))]
+
            ;; ---- Quote ----
            [(quote)
             (lower-quoted (car args))]
@@ -569,6 +625,20 @@
             `(,head ,@(map lower-expr args))]))]
 
       [else expr]))
+
+  ;; Lower guard clauses: (guard (e [test body] ...) ...)
+  (define (lower-guard-clauses var clauses)
+    (if (null? clauses)
+      ;; No matching clause: re-throw
+      `(throw 0 ,var)
+      (let* ([clause (car clauses)]
+             [test (car clause)]
+             [body (cdr clause)])
+        (if (eq? test 'else)
+          `(begin ,@(map lower-expr body))
+          `(if (is-truthy ,(lower-expr test))
+             (begin ,@(map lower-expr body))
+             ,(lower-guard-clauses var (cdr clauses)))))))
 
   ;; Lower a cond expression
   (define (lower-cond clauses)

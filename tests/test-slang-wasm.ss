@@ -676,6 +676,40 @@
   ;; Should have lifted definitions
   (check (> (length result) 1) => #t))
 
+;; ================================================================
+;; Exception Handling Patterns
+;; ================================================================
+
+(section "Exception Handling Patterns")
+
+;; throw with tag compiles to valid WASM
+(let ([wasm (compile-program
+              (append
+                value-memory-forms
+                value-global-forms
+                value-tag-forms
+                '((define-tag 0)
+                  (define (check-positive n)
+                    (when (not n)
+                      (throw 0 0))
+                    n))))])
+  (check-pred bytevector? wasm)
+  (check (> (bytevector-length wasm) 30) => #t))
+
+;; assert! pattern: throw on falsy condition
+(let ([wasm (compile-program
+              (append
+                value-memory-forms
+                value-global-forms
+                value-tag-forms
+                '((define-tag 0)
+                  (define (assert-test n)
+                    (when (= n 0)
+                      (throw 0 0))
+                    n))))])
+  (check-pred bytevector? wasm)
+  (check (> (bytevector-length wasm) 30) => #t))
+
 ;; Full runtime with UTF-8 string-length compiles to valid WASM
 (let ([wasm (compile-program
               (append
