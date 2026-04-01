@@ -504,18 +504,14 @@
         (i32.store8 (+ offset 3) (bitwise-and val 255)))
 
       ;; Copy n bytes from src to dst in linear memory
+      ;; Uses bulk memory.copy when available (post-MVP), falls back to loop
       (define (mem-copy dst src n)
-        (let ([i 0])
-          (while (< i n)
-            (i32.store8 (+ dst i) (i32.load8_u (+ src i)))
-            (set! i (+ i 1)))))
+        (memory.copy dst src n))
 
       ;; Zero-fill n bytes starting at dst
+      ;; Uses bulk memory.fill (post-MVP)
       (define (mem-zero dst n)
-        (let ([i 0])
-          (while (< i n)
-            (i32.store8 (+ dst i) 0)
-            (set! i (+ i 1)))))
+        (memory.fill dst 0 n))
       ))
 
   ;; ================================================================
