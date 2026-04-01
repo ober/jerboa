@@ -204,6 +204,7 @@
 (check-pred pair? runtime-equality-forms)
 (check-pred pair? runtime-conversion-forms)
 (check-pred pair? runtime-io-forms)
+(check-pred pair? runtime-display-forms)
 (check-pred pair? runtime-all-forms)
 
 ;; ================================================================
@@ -940,6 +941,56 @@
                   (define-element 0 (__lifted_test)))))])
   (check-pred bytevector? wasm)
   (check (> (bytevector-length wasm) 100) => #t))
+
+;; ================================================================
+;; Display Runtime Forms
+;; ================================================================
+
+(section "Display Runtime Forms")
+
+;; runtime-display-forms contains the expected output functions
+(let ([names (filter values
+                      (map (lambda (f)
+                             (and (pair? f)
+                                  (eq? (car f) 'define)
+                                  (pair? (cadr f))
+                                  (caadr f)))
+                           runtime-display-forms))])
+  (check-pred pair? (memq 'scheme-display names))
+  (check-pred pair? (memq 'scheme-displayln names))
+  (check-pred pair? (memq 'scheme-newline names))
+  (check-pred pair? (memq 'scheme-write-string names))
+  (check-pred pair? (memq 'scheme-write-fixnum-raw names)))
+
+;; Display forms compile successfully when log_message import is present
+(let ([wasm (compile-program
+              (append
+                value-memory-forms
+                value-global-forms
+                value-tag-forms
+                value-predicate-forms
+                value-accessor-forms
+                value-constructor-forms
+                gc-all-forms
+                ;; Provide log_message stub (normally from DNS host imports)
+                '((define-import "dns" log_message (i32 i32 i32) (i32)))
+                runtime-io-forms
+                runtime-arithmetic-forms
+                runtime-string-forms
+                runtime-display-forms
+                '((define (test-display x)
+                    (scheme-displayln x)))))])
+  (check-pred bytevector? wasm)
+  (check (> (bytevector-length wasm) 30) => #t))
+
+;; scheme-write-fixnum-raw references quotient/remainder (compile-program ops)
+(let ([names (map car
+                  (filter (lambda (form)
+                            (and (pair? form) (eq? (car form) 'define)
+                                 (pair? (cadr form))
+                                 (eq? (caadr form) 'scheme-write-fixnum-raw)))
+                          runtime-display-forms))])
+  (check-pred pair? names))
 
 ;; ================================================================
 ;; Summary
