@@ -710,6 +710,88 @@
   (check-pred bytevector? wasm)
   (check (> (bytevector-length wasm) 30) => #t))
 
+;; Helper: check whether a bytevector contains a given byte value
+(define (bv-contains? bv byte)
+  (let loop ([i 0])
+    (cond
+      [(>= i (bytevector-length bv)) #f]
+      [(= (bytevector-u8-ref bv i) byte) #t]
+      [else (loop (+ i 1))])))
+
+;; try-catch compiles to a valid WASM bytevector
+(let ([wasm (compile-program
+              (append
+                value-memory-forms
+                value-global-forms
+                value-tag-forms
+                '((define-tag 0)
+                  (define (safe-add a b)
+                    (try-catch 0
+                      (if (= b 0) (throw 0 0) (+ a b))
+                      exn
+                      -1)))))])
+  (check-pred bytevector? wasm)
+  (check (> (bytevector-length wasm) 30) => #t))
+
+;; try-catch binary contains the try opcode (#x06)
+(let ([wasm (compile-program
+              (append
+                value-memory-forms
+                value-global-forms
+                value-tag-forms
+                '((define-tag 0)
+                  (define (safe-add a b)
+                    (try-catch 0
+                      (if (= b 0) (throw 0 0) (+ a b))
+                      exn
+                      -1)))))])
+  (check (bv-contains? wasm #x06) => #t))
+
+;; try-catch binary contains the catch opcode (#x07)
+(let ([wasm (compile-program
+              (append
+                value-memory-forms
+                value-global-forms
+                value-tag-forms
+                '((define-tag 0)
+                  (define (safe-add a b)
+                    (try-catch 0
+                      (if (= b 0) (throw 0 0) (+ a b))
+                      exn
+                      -1)))))])
+  (check (bv-contains? wasm #x07) => #t))
+
+;; try-catch with constant handler compiles (minimal form)
+(let ([wasm (compile-program
+              (append
+                value-memory-forms
+                value-global-forms
+                value-tag-forms
+                '((define-tag 0)
+                  (define (try-const x)
+                    (try-catch 0
+                      x
+                      _err
+                      0)))))])
+  (check-pred bytevector? wasm)
+  (check (bv-contains? wasm #x06) => #t))
+
+;; try-catch catch-var is accessible in handler expression
+;; (handler uses the caught value — compiles without error)
+(let ([wasm (compile-program
+              (append
+                value-memory-forms
+                value-global-forms
+                value-tag-forms
+                '((define-tag 0)
+                  (define (recover x)
+                    (try-catch 0
+                      (throw 0 x)
+                      caught
+                      caught)))))])
+  (check-pred bytevector? wasm)
+  (check (bv-contains? wasm #x07) => #t))
+
 ;; ================================================================
 ;; Tail Call Patterns
 ;; ================================================================

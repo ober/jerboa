@@ -1113,6 +1113,29 @@
               (bv-concat-list (map (lambda (a) (compile-expr a ctx)) (cdr args)))
               (bytevector wasm-opcode-throw) (encode-u32-leb128 (car args)))]
 
+           ;; (try-catch tag-idx body catch-var handler)
+           ;; Emits legacy exceptions try/catch: evaluates body; if an exception
+           ;; with tag-idx is thrown, binds the first payload value to catch-var
+           ;; and evaluates handler.  Both branches must produce an i32 result.
+           [(try-catch)
+            (let* ([tag-idx  (car args)]
+                   [body     (cadr args)]
+                   [cvar     (caddr args)]
+                   [handler  (cadddr args)]
+                   ;; Allocate a local for the caught value
+                   [cvar-idx (context-add-local! ctx cvar)])
+              (bv-concat
+                ;; try block returning i32
+                (bytevector wasm-opcode-try wasm-type-i32)
+                (compile-expr body ctx)
+                ;; catch: pops the payload (first i32) into local cvar
+                (bytevector wasm-opcode-catch)
+                (encode-u32-leb128 tag-idx)
+                (bytevector wasm-opcode-local-set)
+                (encode-u32-leb128 cvar-idx)
+                (compile-expr handler ctx)
+                (bytevector wasm-opcode-end)))]
+
            ;; -- GC: struct operations --
            ;; (struct.new type-idx field-exprs...)
            [(struct.new)
