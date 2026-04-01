@@ -201,9 +201,22 @@
 
   (define runtime-string-forms
     '(
-      ;; string-length: returns tagged fixnum (byte length for now)
-      ;; TODO: proper UTF-8 codepoint counting
+      ;; string-length: returns tagged fixnum of UTF-8 codepoint count.
+      ;; Counts non-continuation bytes: a byte is a continuation byte
+      ;; if (byte & 0xC0) == 0x80.  Everything else starts a codepoint.
       (define (scheme-string-length s)
+        (let ([len (string-length-bytes s)]
+              [count 0]
+              [i 0])
+          (while (< i len)
+            (when (!= (bitwise-and (string-byte-ref s i) 192) 128)
+              (set! count (+ count 1)))
+            (set! i (+ i 1)))
+          (tag-fixnum count)))
+
+      ;; string-length-bytes-tagged: returns tagged fixnum of byte length
+      ;; (kept for code that needs raw byte counts, e.g. bytevector interop)
+      (define (scheme-string-byte-length s)
         (tag-fixnum (string-length-bytes s)))
 
       ;; string-ref: returns tagged fixnum (byte value)

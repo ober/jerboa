@@ -391,6 +391,50 @@
   (check (> (bytevector-length wasm) 20) => #t))
 
 ;; ================================================================
+;; UTF-8 String Length
+;; ================================================================
+
+(section "UTF-8 String Length")
+
+;; runtime-string-forms should contain scheme-string-length
+(check-pred pair? runtime-string-forms)
+
+;; Verify the scheme-string-length function uses codepoint counting
+;; (not byte counting) by checking it references bitwise-and
+(let ([src (with-output-to-string (lambda () (write runtime-string-forms)))])
+  (check-pred string? src)
+  ;; Should contain bitwise-and (UTF-8 continuation byte check)
+  (check (string? (let loop ([i 0])
+                    (cond
+                      [(> i (- (string-length src) 11)) #f]
+                      [(string=? (substring src i (+ i 11)) "bitwise-and") src]
+                      [else (loop (+ i 1))])))
+         => #t))
+
+;; Verify scheme-string-byte-length is also defined (as a runtime form)
+(let ([names (map (lambda (f)
+                    (and (pair? f) (eq? (car f) 'define) (pair? (cadr f))
+                         (caadr f)))
+                  runtime-string-forms)])
+  (check-pred pair? (memq 'scheme-string-byte-length names)))
+
+;; Full runtime with UTF-8 string-length compiles to valid WASM
+(let ([wasm (compile-program
+              (append
+                value-memory-forms
+                value-global-forms
+                value-tag-forms
+                value-predicate-forms
+                value-accessor-forms
+                gc-all-forms
+                value-constructor-forms
+                runtime-all-forms
+                '((define (test-strlen)
+                    (scheme-string-length (tag-fixnum 0))))))])
+  (check-pred bytevector? wasm)
+  (check (> (bytevector-length wasm) 100) => #t))
+
+;; ================================================================
 ;; Summary
 ;; ================================================================
 
