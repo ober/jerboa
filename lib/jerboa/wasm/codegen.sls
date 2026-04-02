@@ -404,13 +404,14 @@
       (encode-function-section (wasm-module-functions mod))
       (encode-table-section (wasm-module-tables mod))
       (encode-memory-section (wasm-module-memories mod))
+      ;; Tag section (13) goes between memory (5) and global (6) per spec
+      (encode-tag-section (wasm-module-tags mod))
       (encode-global-section (wasm-module-globals mod))
       (encode-export-section (wasm-module-exports mod))
       (encode-start-section (wasm-module-start mod))
       (encode-element-section (wasm-module-elements mod))
       (encode-code-section (wasm-module-functions mod))
-      (encode-data-section (wasm-module-data-segments mod))
-      (encode-tag-section (wasm-module-tags mod))))
+      (encode-data-section (wasm-module-data-segments mod))))
 
   ;;; ========== Type conversion ==========
 
@@ -1114,27 +1115,49 @@
               (bytevector wasm-opcode-throw) (encode-u32-leb128 (car args)))]
 
            ;; (try-catch tag-idx body catch-var handler)
-           ;; Emits legacy exceptions try/catch: evaluates body; if an exception
-           ;; with tag-idx is thrown, binds the first payload value to catch-var
-           ;; and evaluates handler.  Both branches must produce an i32 result.
+           ;; Emits phase-4 exception handling using try_table:
+           ;;
+           ;;   block $handler (result i32)      ;; overall result
+           ;;     block $catch                    ;; catch target (no result; payload on stack)
+           ;;       try_table (result i32) (catch tag $catch)
+           ;;         <body>
+           ;;       end
+           ;;       br $handler                   ;; normal path exits to outer block
+           ;;     end
+           ;;     ;; catch path: exception payload i32 on stack
+           ;;     local.set cvar
+           ;;     <handler>
+           ;;   end
            [(try-catch)
             (let* ([tag-idx  (car args)]
                    [body     (cadr args)]
                    [cvar     (caddr args)]
                    [handler  (cadddr args)]
-                   ;; Allocate a local for the caught value
                    [cvar-idx (context-add-local! ctx cvar)])
               (bv-concat
-                ;; try block returning i32
-                (bytevector wasm-opcode-try wasm-type-i32)
+                ;; block $handler (result i32) — outer block, overall result
+                (bytevector wasm-opcode-block wasm-type-i32)
+                ;; block $catch — catch target (receives i32 payload from tag)
+                (bytevector wasm-opcode-block wasm-type-i32)
+                ;; try_table (result i32) with 1 catch clause
+                (bytevector wasm-opcode-try-table wasm-type-i32)
+                (encode-u32-leb128 1)         ;; 1 catch clause
+                (bytevector wasm-catch-kind)   ;; catch
+                (encode-u32-leb128 tag-idx)    ;; tag index
+                (encode-u32-leb128 1)          ;; label depth 1 = $catch block
+                ;; body (normal path)
                 (compile-expr body ctx)
-                ;; catch: pops the payload (first i32) into local cvar
-                (bytevector wasm-opcode-catch)
-                (encode-u32-leb128 tag-idx)
+                (bytevector wasm-opcode-end)   ;; end try_table
+                ;; Normal path: result on stack, branch to outer block
+                (bytevector wasm-opcode-br)
+                (encode-u32-leb128 1)          ;; br 1 = exit to $handler block
+                (bytevector wasm-opcode-end)   ;; end $catch block
+                ;; Catch path: exception payload (i32) is on stack from catch clause
                 (bytevector wasm-opcode-local-set)
                 (encode-u32-leb128 cvar-idx)
                 (compile-expr handler ctx)
-                (bytevector wasm-opcode-end)))]
+                (bytevector wasm-opcode-end)   ;; end $handler block
+                ))]
 
            ;; -- GC: struct operations --
            ;; (struct.new type-idx field-exprs...)

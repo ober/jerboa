@@ -429,7 +429,8 @@
         value-memory-forms
         value-global-forms
         value-tag-forms
-        '((define-tag 0)
+        '((define-type (i32) ())   ;; type 0: exception payload (i32) -> ()
+          (define-tag 0)            ;; tag 0 references type 0
           (define (safe-div a b)
             (try-catch 0
               (if (= b 0) (throw 0 -1) (quotient a b))
@@ -437,15 +438,17 @@
               exn))))))
   #t)
 
-(test "try-catch wasmi rejects with clear error (exception-handling not supported)"
+(test "try-catch wasmi rejects (exception-handling not supported)"
   (guard (exn [#t (and (message-condition? exn)
-                       (string-contains (condition-message exn) "legacy exceptions") #t)])
+                       (string-contains (condition-message exn) "exception")
+                       #t)])
     (let* ([bv (compile-program
                  (append
                    value-memory-forms
                    value-global-forms
                    value-tag-forms
-                   '((define-tag 0)
+                   '((define-type (i32) ())   ;; type 0: exception payload (i32) -> ()
+                     (define-tag 0)            ;; tag 0 references type 0
                      (define (safe-div a b)
                        (try-catch 0
                          (if (= b 0) (throw 0 -1) (quotient a b))
@@ -681,6 +684,51 @@
         (wasm-sandbox-free-module mod-h)
         r))
     7)
+
+  ;; Exception handling: try-catch in SpiderMonkey
+  (test "try-catch normal path in SpiderMonkey"
+    (let* ([bv (compile-program
+                 (append
+                   value-memory-forms
+                   value-global-forms
+                   value-tag-forms
+                   '((define-type (i32) ())   ;; exception tag type
+                     (define-tag 0)
+                     (define (safe-compute a b)
+                       (try-catch 0
+                         (+ a b)      ;; normal: returns sum
+                         exn
+                         -1)))))]     ;; catch: returns -1
+           [mod-h (wasm-sandbox-load bv)]
+           [inst (wasm-sandbox-instantiate mod-h)])
+      (let ([r (wasm-sandbox-call inst "safe-compute" 10 20)])
+        (wasm-sandbox-free inst)
+        (wasm-sandbox-free-module mod-h)
+        r))
+    30)
+
+  ;; Exception handling: throw + catch in SpiderMonkey
+  (test "throw + catch in SpiderMonkey"
+    (let* ([bv (compile-program
+                 (append
+                   value-memory-forms
+                   value-global-forms
+                   value-tag-forms
+                   '((define-type (i32) ())   ;; exception tag type
+                     (define-tag 0)
+                     (define (throw-test x)
+                       (try-catch 0
+                         (if (= x 0) (throw 0 99) (+ x 1))
+                         exn
+                         exn)))))]   ;; catch returns the exception value
+           [mod-h (wasm-sandbox-load bv)]
+           [inst (wasm-sandbox-instantiate mod-h)])
+      (let* ([normal (wasm-sandbox-call inst "throw-test" 5)]
+             [caught (wasm-sandbox-call inst "throw-test" 0)])
+        (wasm-sandbox-free inst)
+        (wasm-sandbox-free-module mod-h)
+        (list normal caught)))
+    '(6 99))
 
 )
 

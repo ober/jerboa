@@ -1138,7 +1138,10 @@
            [closure-assignment (assign-closure-indices lifted)]
            [lifted (car closure-assignment)]
            [element-forms (cdr closure-assignment)]
-           [has-closures (has-closures? lifted)])
+           [has-closures (has-closures? lifted)]
+           [has-exceptions (has-exceptions? lifted)]
+           ;; Exception tag type index: after closure types (0,1,2 if present)
+           [exc-type-idx (if has-closures 3 0)])
 
       ;; Assemble the complete program
       (append
@@ -1146,6 +1149,14 @@
         ;;    type indices 0/1/2 are stable for call-indirect in call-closure-N.
         (if has-closures
           (closure-type-forms)
+          '())
+
+        ;; 0b. Exception tag type + tag declaration (when try-catch/throw used)
+        ;; Tag type: (i32) -> () — exception payload is a single i32
+        ;; Tag index 0 references this type
+        (if has-exceptions
+          `((define-type (i32) ())
+            (define-tag ,exc-type-idx))
           '())
 
         ;; 1. Memory and globals
@@ -1322,6 +1333,18 @@
       (define (walk expr)
         (when (pair? expr)
           (when (memq (car expr) '(alloc-closure call-closure closure-env-ref))
+            (set! found #t))
+          (unless found
+            (for-each walk expr))))
+      (for-each walk forms)
+      found))
+
+  ;; Check if any form uses exception handling (try-catch or throw)
+  (define (has-exceptions? forms)
+    (let ([found #f])
+      (define (walk expr)
+        (when (pair? expr)
+          (when (memq (car expr) '(try-catch throw))
             (set! found #t))
           (unless found
             (for-each walk expr))))

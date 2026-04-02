@@ -44,6 +44,10 @@ struct CallContext {
     instance_handle: u64,
     /// Whether this is a hosted instance (has DNS/WASI imports)
     hosted: bool,
+    /// Pointer to WASM linear memory (set after instantiation, before call)
+    memory_ptr: *mut u8,
+    /// Current size of WASM linear memory in bytes
+    memory_len: usize,
 }
 
 thread_local! {
@@ -115,6 +119,44 @@ struct SmWasmInstance {
 // Host import native functions (called by SpiderMonkey when WASM invokes imports)
 // ============================================================
 
+/// Read bytes from WASM linear memory via the thread-local CallContext.
+/// Returns None if out of bounds or no memory available.
+fn read_wasm_memory(offset: usize, len: usize) -> Option<Vec<u8>> {
+    CALL_CTX.with(|ctx| {
+        let borrow = ctx.borrow();
+        let call_ctx = borrow.as_ref()?;
+        if call_ctx.memory_ptr.is_null() || offset + len > call_ctx.memory_len {
+            return None;
+        }
+        let mut buf = vec![0u8; len];
+        unsafe {
+            ::std::ptr::copy_nonoverlapping(
+                call_ctx.memory_ptr.add(offset), buf.as_mut_ptr(), len);
+        }
+        Some(buf)
+    })
+}
+
+/// Write bytes to WASM linear memory via the thread-local CallContext.
+/// Returns false if out of bounds or no memory available.
+fn write_wasm_memory(offset: usize, data: &[u8]) -> bool {
+    CALL_CTX.with(|ctx| {
+        let borrow = ctx.borrow();
+        let call_ctx = match borrow.as_ref() {
+            Some(c) => c,
+            None => return false,
+        };
+        if call_ctx.memory_ptr.is_null() || offset + data.len() > call_ctx.memory_len {
+            return false;
+        }
+        unsafe {
+            ::std::ptr::copy_nonoverlapping(
+                data.as_ptr(), call_ctx.memory_ptr.add(offset), data.len());
+        }
+        true
+    })
+}
+
 // ---- log_message(level, msg_ptr, msg_len) -> 0 ----
 unsafe extern "C" fn host_log_message(_cx: *mut JSContext, argc: u32, vp: *mut Value) -> bool {
     let args = CallArgs::from_vp(vp, argc);
@@ -124,10 +166,14 @@ unsafe extern "C" fn host_log_message(_cx: *mut JSContext, argc: u32, vp: *mut V
 
     let lvl = match level { 0 => "ERROR", 1 => "WARN", 2 => "INFO", _ => "DEBUG" };
 
-    // We can't easily read WASM memory from here without the instance object.
-    // Log the raw pointer info for now; full memory access requires refactoring.
-    let msg = format!("[ptr={},len={}]", msg_ptr, msg_len);
-    eprintln!("[wasm-sm-{lvl}] {msg}");
+    let msg = if msg_len > 0 {
+        match read_wasm_memory(msg_ptr as usize, msg_len as usize) {
+            Some(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+            None => format!("[ptr={},len={}]", msg_ptr, msg_len),
+        }
+    } else {
+        String::new()
+    };
 
     CALL_CTX.with(|ctx| {
         if let Some(ref call_ctx) = *ctx.borrow() {
@@ -165,7 +211,24 @@ unsafe extern "C" fn host_get_time_ms(_cx: *mut JSContext, argc: u32, vp: *mut V
 // ---- random_get(buf_ptr, buf_len) -> errno ----
 unsafe extern "C" fn host_random_get(_cx: *mut JSContext, argc: u32, vp: *mut Value) -> bool {
     let args = CallArgs::from_vp(vp, argc);
-    // Can't write to WASM memory without ArrayBuffer access — return success (no-op)
+    let buf_ptr = if argc > 0 && args.get(0).get().is_int32() { args.get(0).get().to_int32() as usize } else { 0 };
+    let buf_len = if argc > 1 && args.get(1).get().is_int32() { args.get(1).get().to_int32() as usize } else { 0 };
+
+    if buf_len > 0 {
+        let mut rand_buf = vec![0u8; buf_len];
+        // Simple PRNG: fill with pseudo-random bytes based on time
+        let seed = ::std::time::SystemTime::now()
+            .duration_since(::std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        let mut state = seed;
+        for byte in rand_buf.iter_mut() {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *byte = (state >> 33) as u8;
+        }
+        write_wasm_memory(buf_ptr, &rand_buf);
+    }
+
     args.rval().set(Int32Value(0));
     true
 }
@@ -173,8 +236,33 @@ unsafe extern "C" fn host_random_get(_cx: *mut JSContext, argc: u32, vp: *mut Va
 // ---- fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr) -> errno ----
 unsafe extern "C" fn host_fd_write(_cx: *mut JSContext, argc: u32, vp: *mut Value) -> bool {
     let args = CallArgs::from_vp(vp, argc);
-    // Stub: return 0 (success) — full implementation requires WASM memory access
-    args.rval().set(Int32Value(0));
+    let _fd = if argc > 0 && args.get(0).get().is_int32() { args.get(0).get().to_int32() } else { 1 };
+    let iovs_ptr = if argc > 1 && args.get(1).get().is_int32() { args.get(1).get().to_int32() as usize } else { 0 };
+    let iovs_len = if argc > 2 && args.get(2).get().is_int32() { args.get(2).get().to_int32() as usize } else { 0 };
+    let nwritten_ptr = if argc > 3 && args.get(3).get().is_int32() { args.get(3).get().to_int32() as usize } else { 0 };
+
+    let mut total_written = 0u32;
+
+    // Read iov entries: each is (ptr: i32, len: i32) = 8 bytes
+    for i in 0..iovs_len {
+        let iov_offset = iovs_ptr + i * 8;
+        if let Some(iov_bytes) = read_wasm_memory(iov_offset, 8) {
+            let data_ptr = u32::from_le_bytes([iov_bytes[0], iov_bytes[1], iov_bytes[2], iov_bytes[3]]) as usize;
+            let data_len = u32::from_le_bytes([iov_bytes[4], iov_bytes[5], iov_bytes[6], iov_bytes[7]]) as usize;
+            if let Some(data) = read_wasm_memory(data_ptr, data_len) {
+                // Write to stderr (fd 1 = stdout, fd 2 = stderr)
+                let _ = ::std::io::Write::write_all(&mut ::std::io::stderr(), &data);
+                total_written += data_len as u32;
+            }
+        }
+    }
+
+    // Write total bytes written
+    if nwritten_ptr > 0 {
+        write_wasm_memory(nwritten_ptr, &total_written.to_le_bytes());
+    }
+
+    args.rval().set(Int32Value(0)); // success
     true
 }
 
@@ -188,6 +276,17 @@ unsafe extern "C" fn host_fd_read(_cx: *mut JSContext, argc: u32, vp: *mut Value
 // ---- clock_time_get(clock_id, precision, time_ptr) -> errno ----
 unsafe extern "C" fn host_clock_time_get(_cx: *mut JSContext, argc: u32, vp: *mut Value) -> bool {
     let args = CallArgs::from_vp(vp, argc);
+    let _clock_id = if argc > 0 && args.get(0).get().is_int32() { args.get(0).get().to_int32() } else { 0 };
+    let time_ptr = if argc > 2 && args.get(2).get().is_int32() { args.get(2).get().to_int32() as usize } else { 0 };
+
+    if time_ptr > 0 {
+        let nanos = ::std::time::SystemTime::now()
+            .duration_since(::std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        write_wasm_memory(time_ptr, &nanos.to_le_bytes());
+    }
+
     args.rval().set(Int32Value(0));
     true
 }
@@ -313,11 +412,39 @@ unsafe fn sm_compile_and_call(
         return Err("WebAssembly.Instance creation failed".into());
     }
 
-    // Get exports.funcName
+    // Get exports object
     rooted!(&in(cx) let mut exports_val = UndefinedValue());
     JS_GetProperty(cx, instance_obj.handle(), c"exports".as_ptr(), exports_val.handle_mut());
     rooted!(&in(cx) let exports_obj = exports_val.to_object());
 
+    // Extract WASM linear memory pointer for host imports
+    {
+        rooted!(&in(cx) let mut mem_val = UndefinedValue());
+        JS_GetProperty(cx, exports_obj.handle(), c"memory".as_ptr(), mem_val.handle_mut());
+        if !mem_val.get().is_undefined() && mem_val.get().is_object() {
+            // memory is a WebAssembly.Memory — get its .buffer (ArrayBuffer)
+            rooted!(&in(cx) let mem_obj = mem_val.to_object());
+            rooted!(&in(cx) let mut buf_val = UndefinedValue());
+            JS_GetProperty(cx, mem_obj.handle(), c"buffer".as_ptr(), buf_val.handle_mut());
+            if !buf_val.get().is_undefined() && buf_val.get().is_object() {
+                let ab = buf_val.to_object();
+                let mut len: usize = 0;
+                let mut is_shared = false;
+                let mut data: *mut u8 = ptr::null_mut();
+                GetArrayBufferLengthAndData(ab, &mut len, &mut is_shared, &mut data);
+                if !data.is_null() {
+                    CALL_CTX.with(|ctx| {
+                        if let Some(ref mut call_ctx) = *ctx.borrow_mut() {
+                            call_ctx.memory_ptr = data;
+                            call_ctx.memory_len = len;
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    // Get exported function
     let c_name = ::std::ffi::CString::new(func_name)
         .map_err(|_| "invalid function name".to_string())?;
     rooted!(&in(cx) let mut func_val = UndefinedValue());
@@ -511,7 +638,12 @@ pub extern "C" fn jerboa_sm_call(
 
         // Set thread-local call context for host imports
         CALL_CTX.with(|ctx| {
-            *ctx.borrow_mut() = Some(CallContext { instance_handle, hosted });
+            *ctx.borrow_mut() = Some(CallContext {
+                instance_handle,
+                hosted,
+                memory_ptr: ptr::null_mut(),
+                memory_len: 0,
+            });
         });
 
         // Create a fresh SpiderMonkey runtime for this call

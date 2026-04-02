@@ -164,6 +164,8 @@
     ;; ---- Post-MVP: Exception handling opcodes ----
     wasm-opcode-try wasm-opcode-catch wasm-opcode-throw
     wasm-opcode-rethrow wasm-opcode-delegate wasm-opcode-catch-all
+    wasm-opcode-try-table wasm-opcode-throw-ref
+    wasm-catch-kind wasm-catch-ref-kind wasm-catch-all-kind wasm-catch-all-ref-kind
 
     ;; ---- Post-MVP: Typed select ----
     wasm-opcode-select-t
@@ -499,12 +501,22 @@
 
   ;;; ========== Post-MVP: Exception handling opcodes ==========
 
+  ;; Legacy exception handling (wasmi-era, deprecated)
   (define wasm-opcode-try        #x06)
   (define wasm-opcode-catch      #x07)
   (define wasm-opcode-throw      #x08)
   (define wasm-opcode-rethrow    #x09)
   (define wasm-opcode-delegate   #x18)
   (define wasm-opcode-catch-all  #x19)
+
+  ;; Phase 4 exception handling (try_table + exnref, supported by browsers)
+  (define wasm-opcode-try-table  #x1F)
+  (define wasm-opcode-throw-ref  #x0A)
+  ;; Catch clause opcodes (inside try_table immediates)
+  (define wasm-catch-kind        #x00)  ;; catch tag label
+  (define wasm-catch-ref-kind    #x01)  ;; catch_ref tag label
+  (define wasm-catch-all-kind    #x02)  ;; catch_all label
+  (define wasm-catch-all-ref-kind #x03) ;; catch_all_ref label
 
   ;;; ========== Post-MVP: Typed select ==========
 
