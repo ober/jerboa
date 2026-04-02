@@ -44,7 +44,10 @@
     wasm-sandbox-available?
 
     ;; Hosted instance (WASI + DNS imports)
-    wasm-sandbox-instantiate-hosted)
+    wasm-sandbox-instantiate-hosted
+
+    ;; Log buffer retrieval (hosted instances)
+    wasm-sandbox-get-log)
 
   (import (chezscheme))
 
@@ -121,6 +124,12 @@
          (guard (e [#t #f])
            (foreign-procedure "jerboa_wasm_instance_new_hosted"
              (unsigned-64 unsigned-64) unsigned-64))))
+
+  (define c-wasm-get-log
+    (and _native-loaded
+         (guard (e [#t #f])
+           (foreign-procedure "jerboa_wasm_get_log"
+             (unsigned-64 u8* size_t) integer-64))))
 
   (define c-last-error
     (and _native-loaded
@@ -267,6 +276,21 @@
         (when (= h 0)
           (error 'wasm-sandbox-instantiate-hosted (last-error)))
         h)))
+
+  ;; --- Log buffer retrieval ---
+
+  (define (wasm-sandbox-get-log handle)
+    ;; Retrieve the log buffer from a hosted WASM instance as a string.
+    ;; Returns "" if log retrieval is not available.
+    (if (not c-wasm-get-log)
+      ""
+      (let ([buf (make-bytevector 65536)])
+        (let ([n (c-wasm-get-log handle buf 65536)])
+          (if (> n 0)
+            (utf8->string (let ([r (make-bytevector (min n 65535))])
+                            (bytevector-copy! buf 0 r 0 (min n 65535))
+                            r))
+            "")))))
 
   ;; --- Helpers ---
 

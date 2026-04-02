@@ -574,23 +574,38 @@
               (set! cnt (+ cnt 1)))
             (scheme-write-bytes (+ pos 1) cnt))))
 
-      ;; Display a Scheme value to log (no explicit newline;
-      ;; each log_message call becomes one log line on the host side).
+      ;; Display a Scheme value to log.
+      ;; Handles: strings, fixnums, booleans (#t/#f), nil (), void.
       (define (scheme-display val)
         (if (is-string val)
           (scheme-write-string val)
           (if (is-number val)
             (scheme-write-fixnum-raw (untag-fixnum val))
-            0)))
+            ;; Immediates: #t=2, #f=0, ()=4, void=6, eof=8
+            (if (= val 2)
+              ;; #t
+              (begin (i32.store8 4096 35) (i32.store8 4097 116)
+                     (scheme-write-bytes 4096 2))
+              (if (= val 0)
+                ;; #f
+                (begin (i32.store8 4096 35) (i32.store8 4097 102)
+                       (scheme-write-bytes 4096 2))
+                (if (= val 4)
+                  ;; ()
+                  (begin (i32.store8 4096 40) (i32.store8 4097 41)
+                         (scheme-write-bytes 4096 2))
+                  ;; void or unknown — no output
+                  0))))))
 
-      ;; Display a Scheme value (equivalent to scheme-display; each call
-      ;; is its own log line, so the newline is implicit).
+      ;; Display a Scheme value followed by a newline.
       (define (scheme-displayln val)
-        (scheme-display val))
+        (scheme-display val)
+        (scheme-newline))
 
-      ;; Log a blank line (empty message).
+      ;; Write a newline character (0x0A) to log.
       (define (scheme-newline)
-        (log_message 2 4096 0))
+        (i32.store8 4108 10)
+        (log_message 2 4108 1))
       ))
 
   ;; ================================================================

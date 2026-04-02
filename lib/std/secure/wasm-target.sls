@@ -282,6 +282,15 @@
                                       bindings)])
               `(let* ,new-bindings ,@(map lower-expr body)))]
 
+           ;; letrec/letrec*: lower to let* with set! (valid for WASM flat scope)
+           [(letrec letrec*)
+            (let* ([bindings (car args)]
+                   [body (cdr args)]
+                   ;; Initialize all vars to void, then set! each
+                   [init-bindings (map (lambda (b) (list (car b) IMM-VOID)) bindings)]
+                   [set-forms (map (lambda (b) `(set! ,(car b) ,(lower-expr (cadr b)))) bindings)])
+              `(let* ,init-bindings ,@set-forms ,@(map lower-expr body)))]
+
            ;; ---- Control flow (pass through) ----
            [(if)
             (let ([test (lower-expr (car args))]
@@ -317,10 +326,11 @@
               [(null? args) IMM-FALSE]
               [(null? (cdr args)) (lower-expr (car args))]
               [else
-               `(let ([__or_tmp ,(lower-expr (car args))])
-                  (if (is-truthy __or_tmp)
-                    __or_tmp
-                    ,(lower-expr `(or ,@(cdr args)))))])]
+               (let ([tmp (gensym-init 'or)])
+                 `(let ([,tmp ,(lower-expr (car args))])
+                    (if (is-truthy ,tmp)
+                      ,tmp
+                      ,(lower-expr `(or ,@(cdr args))))))])]
 
            [(begin)
             `(begin ,@(map lower-expr args))]
@@ -345,16 +355,31 @@
             `(wasm-bool->scheme (scheme-list? ,(lower-expr (car args))))]
 
            ;; Arithmetic — operands are tagged fixnums
+           ;; Multi-arg: (+ a b c) → (fx+ (fx+ a b) c), etc.
            [(+)
-            (if (null? (cdr args))
-              (lower-expr (car args))
-              `(fx+ ,(lower-expr (car args)) ,(lower-expr (cadr args))))]
+            (cond
+              [(null? args) (tagged-fixnum 0)]  ;; (+) → 0
+              [(null? (cdr args)) (lower-expr (car args))]
+              [else (let loop ([rest (cddr args)]
+                               [acc `(fx+ ,(lower-expr (car args)) ,(lower-expr (cadr args)))])
+                      (if (null? rest) acc
+                        (loop (cdr rest) `(fx+ ,acc ,(lower-expr (car rest))))))])]
            [(-)
-            (if (null? (cdr args))
-              `(fx-negate ,(lower-expr (car args)))
-              `(fx- ,(lower-expr (car args)) ,(lower-expr (cadr args))))]
+            (cond
+              [(null? (cdr args))
+               `(fx-negate ,(lower-expr (car args)))]
+              [else (let loop ([rest (cddr args)]
+                               [acc `(fx- ,(lower-expr (car args)) ,(lower-expr (cadr args)))])
+                      (if (null? rest) acc
+                        (loop (cdr rest) `(fx- ,acc ,(lower-expr (car rest))))))])]
            [(*)
-            `(fx* ,(lower-expr (car args)) ,(lower-expr (cadr args)))]
+            (cond
+              [(null? args) (tagged-fixnum 1)]  ;; (*) → 1
+              [(null? (cdr args)) (lower-expr (car args))]
+              [else (let loop ([rest (cddr args)]
+                               [acc `(fx* ,(lower-expr (car args)) ,(lower-expr (cadr args)))])
+                      (if (null? rest) acc
+                        (loop (cdr rest) `(fx* ,acc ,(lower-expr (car rest))))))])]
            [(/)
             `(fx/ ,(lower-expr (car args)) ,(lower-expr (cadr args)))]
            [(modulo remainder)
@@ -395,6 +420,21 @@
             `(fx< ,(lower-expr (car args)) ,(tagged-fixnum 0))]
            [(not)
             `(if (is-truthy ,(lower-expr (car args))) ,IMM-FALSE ,IMM-TRUE)]
+
+           ;; Arithmetic extras
+           [(min)
+            (let ([a (lower-expr (car args))] [b (lower-expr (cadr args))])
+              `(let ([__min_a ,a] [__min_b ,b])
+                 (if (fx< __min_a __min_b) __min_a __min_b)))]
+           [(max)
+            (let ([a (lower-expr (car args))] [b (lower-expr (cadr args))])
+              `(let ([__max_a ,a] [__max_b ,b])
+                 (if (fx> __max_a __max_b) __max_a __max_b)))]
+           [(even?)
+            `(fx= (fx-bitwise-and ,(lower-expr (car args)) ,(tagged-fixnum 1)) ,(tagged-fixnum 0))]
+           [(odd?)
+            `(if (fx= (fx-bitwise-and ,(lower-expr (car args)) ,(tagged-fixnum 1)) ,(tagged-fixnum 0))
+               ,IMM-FALSE ,IMM-TRUE)]
 
            ;; Type predicates
            [(number? integer?)
@@ -468,6 +508,23 @@
             `(scheme-string-ref ,(lower-expr (car args)) ,(lower-expr (cadr args)))]
            [(string=?)
             `(scheme-string=? ,(lower-expr (car args)) ,(lower-expr (cadr args)))]
+           [(string-append)
+            ;; (string-append a b ...) → runtime concatenation via scheme-string-append
+            ;; Fold pairwise: (string-append a b c) → (scheme-string-append (scheme-string-append a b) c)
+            (cond
+              [(null? args) `(string-from-static ,(string->utf8 ""))]
+              [(null? (cdr args)) (lower-expr (car args))]
+              [else (let loop ([rest (cddr args)]
+                               [acc `(scheme-string-append ,(lower-expr (car args))
+                                                            ,(lower-expr (cadr args)))])
+                      (if (null? rest) acc
+                        (loop (cdr rest)
+                              `(scheme-string-append ,acc ,(lower-expr (car rest))))))])]
+           [(number->string)
+            ;; Convert tagged fixnum to string object via write-fixnum-raw + alloc
+            `(scheme-number->string ,(lower-expr (car args)))]
+           [(string->number)
+            `(scheme-string->number ,(lower-expr (car args)))]
 
            ;; Vector operations
            [(make-vector)
@@ -649,49 +706,65 @@
                                                  (pair? (cadr rest))
                                                  (eq? (caadr rest) 'finally)
                                                  (cadr rest))))])
-              (let ([try-body (lower-expr body)])
+              (let* ([try-body (lower-expr body)]
+                     [finally-body (if finally-clause
+                                     (map lower-expr (cdr finally-clause))
+                                     '())])
                 (if catch-clause
                   (let* ([catch-args (cdr catch-clause)]
                          [catch-bindings (car catch-args)]
                          [catch-body (cdr catch-args)]
-                         [e-var (if (pair? catch-bindings) (car catch-bindings) catch-bindings)])
-                    (if finally-clause
-                      `(try-catch 0
-                         ,try-body
-                         ,e-var
-                         (begin ,@(map lower-expr catch-body)))
-                      `(try-catch 0
-                         ,try-body
-                         ,e-var
-                         (begin ,@(map lower-expr catch-body)))))
-                  try-body)))]
+                         [e-var (if (pair? catch-bindings) (car catch-bindings) catch-bindings)]
+                         [core `(try-catch 0
+                                  ,try-body
+                                  ,e-var
+                                  (begin ,@(map lower-expr catch-body)))])
+                    (if (null? finally-body)
+                      core
+                      ;; Wrap: store try-catch result, run finally, return result
+                      `(let ([__try_result ,core])
+                         ,@finally-body
+                         __try_result)))
+                  ;; No catch clause — just body + finally
+                  (if (null? finally-body)
+                    try-body
+                    `(let ([__try_result ,try-body])
+                       ,@finally-body
+                       __try_result)))))]
 
            ;; ---- Output / display forms ----
 
-           ;; (displayln x) → scheme-displayln (one log line per call)
-           ;; (displayln)   → scheme-newline (blank log line)
+           ;; (displayln x ...) → display all args, then newline
+           ;; (displayln)       → just newline
            [(displayln)
             (if (null? args)
               `(scheme-newline)
-              `(scheme-displayln ,(lower-expr (car args))))]
+              `(begin ,@(map (lambda (a) `(scheme-display ,(lower-expr a))) args)
+                      (scheme-newline)))]
 
-           ;; (display x) → scheme-display
+           ;; (display x) → scheme-display (single arg only; zero args is invalid)
            [(display)
-            (if (null? args)
-              `(scheme-newline)
-              `(scheme-display ,(lower-expr (car args))))]
+            (cond
+              [(null? args) IMM-VOID]  ;; (display) with no args → void (no-op)
+              [(null? (cdr args)) `(scheme-display ,(lower-expr (car args)))]
+              [else `(begin ,@(map (lambda (a) `(scheme-display ,(lower-expr a))) args))])]
 
            ;; (newline) → scheme-newline
            [(newline)
             `(scheme-newline)]
 
-           ;; (format str) → static string; (format str args...) → ignored for now
-           ;; MVP: if called with a literal string and no interpolation args,
-           ;; return the string; otherwise return first arg unchanged.
+           ;; (format str args...) → basic ~a substitution
+           ;; For literal format strings: expand ~a directives inline.
+           ;; For non-literal: return first arg (best effort).
            [(format)
             (if (and (string? (car args)) (null? (cdr args)))
+              ;; Literal string with no args → static string
               `(string-from-static ,(string->utf8 (car args)))
-              (lower-expr (car args)))]
+              (if (string? (car args))
+                ;; Literal format string with args → expand ~a
+                (lower-format-string (car args) (cdr args))
+                ;; Dynamic format string → just display it
+                (lower-expr (car args))))]
 
            ;; (assert! expr) or (assert! expr "message")
            [(assert!)
@@ -700,6 +773,27 @@
                  (throw 0 ,(if (and (pair? (cdr args)) (string? (cadr args)))
                              (lower-expr (cadr args))
                              (tagged-fixnum 0)))))]
+
+           ;; (error who msg irritants...) → throw with message string
+           [(error)
+            (if (and (pair? (cdr args)) (string? (cadr args)))
+              `(throw 0 ,(lower-expr (cadr args)))
+              `(throw 0 ,(tagged-fixnum 0)))]
+
+           ;; (void) → void immediate
+           [(void)
+            IMM-VOID]
+
+           ;; (values x) → just x (single-value case; multi-value not supported)
+           [(values)
+            (if (null? (cdr args))
+              (lower-expr (car args))
+              (lower-expr (car args)))]
+
+           ;; (apply f lst) → runtime apply (limited: only for known small arities)
+           [(apply)
+            ;; Fall through to default — apply is a function call to scheme-apply
+            `(scheme-apply ,(lower-expr (car args)) ,(lower-expr (cadr args)))]
 
            ;; ---- Quote ----
            [(quote)
@@ -714,6 +808,68 @@
             `(,head ,@(map lower-expr args))]))]
 
       [else expr]))
+
+  ;; Expand a format string with ~a directives to a begin block of scheme-display calls.
+  ;; "hello ~a, you are ~a" with args (name age) →
+  ;;   (begin (scheme-display "hello ") (scheme-display name) (scheme-display ", you are ")
+  ;;          (scheme-display age))
+  (define (lower-format-string fmt-str fmt-args)
+    (let loop ([i 0] [args fmt-args] [parts '()] [current ""])
+      (cond
+        [(>= i (string-length fmt-str))
+         ;; End of format string — flush current literal and assemble
+         (let ([final-parts (if (> (string-length current) 0)
+                              (cons `(scheme-display (string-from-static ,(string->utf8 current))) parts)
+                              parts)])
+           (if (null? final-parts)
+             IMM-VOID
+             `(begin ,@(reverse final-parts))))]
+        ;; ~a directive: flush current literal, emit arg display
+        [(and (char=? (string-ref fmt-str i) #\~)
+              (< (+ i 1) (string-length fmt-str))
+              (char=? (string-ref fmt-str (+ i 1)) #\a))
+         (let* ([literal-part (if (> (string-length current) 0)
+                                (list `(scheme-display (string-from-static ,(string->utf8 current))))
+                                '())]
+                [arg-part (if (pair? args)
+                            (list `(scheme-display ,(lower-expr (car args))))
+                            '())]
+                [remaining-args (if (pair? args) (cdr args) '())])
+           (loop (+ i 2) remaining-args
+                 (append (reverse arg-part) (reverse literal-part) parts)
+                 ""))]
+        ;; ~~ escape: emit single ~
+        [(and (char=? (string-ref fmt-str i) #\~)
+              (< (+ i 1) (string-length fmt-str))
+              (char=? (string-ref fmt-str (+ i 1)) #\~))
+         (loop (+ i 2) args parts (string-append current "~"))]
+        ;; ~s directive: same as ~a for now (no write-style quoting in WASM)
+        [(and (char=? (string-ref fmt-str i) #\~)
+              (< (+ i 1) (string-length fmt-str))
+              (char=? (string-ref fmt-str (+ i 1)) #\s))
+         (let* ([literal-part (if (> (string-length current) 0)
+                                (list `(scheme-display (string-from-static ,(string->utf8 current))))
+                                '())]
+                [arg-part (if (pair? args)
+                            (list `(scheme-display ,(lower-expr (car args))))
+                            '())]
+                [remaining-args (if (pair? args) (cdr args) '())])
+           (loop (+ i 2) remaining-args
+                 (append (reverse arg-part) (reverse literal-part) parts)
+                 ""))]
+        ;; ~n directive: newline
+        [(and (char=? (string-ref fmt-str i) #\~)
+              (< (+ i 1) (string-length fmt-str))
+              (char=? (string-ref fmt-str (+ i 1)) #\n))
+         (let ([literal-part (if (> (string-length current) 0)
+                               (list `(scheme-display (string-from-static ,(string->utf8 current))))
+                               '())])
+           (loop (+ i 2) args
+                 (cons `(scheme-newline) (append (reverse literal-part) parts))
+                 ""))]
+        ;; Regular character
+        [else
+         (loop (+ i 1) args parts (string-append current (string (string-ref fmt-str i))))])))
 
   ;; Lower guard clauses: (guard (e [test body] ...) ...)
   (define (lower-guard-clauses var clauses)
@@ -1132,41 +1288,32 @@
 
   ;; Load closure type pre-registration forms from scheme-runtime module.
   (define (closure-type-forms)
-    (let ([rt (with-exception-handler
-                (lambda (e) '())
-                (lambda ()
-                  (eval '(begin
-                           (import (jerboa wasm scheme-runtime))
-                           runtime-closure-type-forms)
-                        (environment '(chezscheme) '(jerboa wasm scheme-runtime))))
-              #:handle-all)])
+    (let ([rt (guard (e [#t '()])
+                (eval '(begin
+                         (import (jerboa wasm scheme-runtime))
+                         runtime-closure-type-forms)
+                      (environment '(chezscheme) '(jerboa wasm scheme-runtime))))])
       (if (pair? rt) rt '())))
 
   ;; Load closure runtime dispatch forms (call-closure-1/2/3) from scheme-runtime.
   ;; Only included when closures are present — these forms use call_indirect which
   ;; requires a function table.
   (define (closure-runtime-forms)
-    (let ([rt (with-exception-handler
-                (lambda (e) '())
-                (lambda ()
-                  (eval '(begin
-                           (import (jerboa wasm scheme-runtime))
-                           runtime-closure-forms)
-                        (environment '(chezscheme) '(jerboa wasm scheme-runtime))))
-              #:handle-all)])
+    (let ([rt (guard (e [#t '()])
+                (eval '(begin
+                         (import (jerboa wasm scheme-runtime))
+                         runtime-closure-forms)
+                      (environment '(chezscheme) '(jerboa wasm scheme-runtime))))])
       (if (pair? rt) rt '())))
 
   ;; Load display runtime forms from scheme-runtime.
   ;; Only included in full Slang pipeline (requires log_message from dns imports).
   (define (display-runtime-forms)
-    (let ([rt (with-exception-handler
-                (lambda (e) '())
-                (lambda ()
-                  (eval '(begin
-                           (import (jerboa wasm scheme-runtime))
-                           runtime-display-forms)
-                        (environment '(chezscheme) '(jerboa wasm scheme-runtime))))
-              #:handle-all)])
+    (let ([rt (guard (e [#t '()])
+                (eval '(begin
+                         (import (jerboa wasm scheme-runtime))
+                         runtime-display-forms)
+                      (environment '(chezscheme) '(jerboa wasm scheme-runtime))))])
       (if (pair? rt) rt '())))
 
   ;; Check if any form references closures
@@ -1185,15 +1332,11 @@
   (define (runtime-forms)
     ;; These are loaded at compile time from the scheme-runtime module
     ;; We inline them here to avoid a circular dependency
-    (let ([rt (with-exception-handler
-                (lambda (e) '())
-                (lambda ()
-                  (let ()
-                    (eval '(begin
-                             (import (jerboa wasm scheme-runtime))
-                             runtime-all-forms)
-                          (environment '(chezscheme) '(jerboa wasm scheme-runtime))))
-                #:handle-all)])
+    (let ([rt (guard (e [#t '()])
+                (eval '(begin
+                         (import (jerboa wasm scheme-runtime))
+                         runtime-all-forms)
+                      (environment '(chezscheme) '(jerboa wasm scheme-runtime))))])
       (if (pair? rt) rt
         ;; Fallback: minimal runtime if module not available
         '())))

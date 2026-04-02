@@ -28,6 +28,11 @@ struct WasmModule {
     module: Module,
 }
 
+/// Maximum number of log entries per instance (prevents memory exhaustion)
+const LOG_BUFFER_CAP: usize = 10_000;
+/// Maximum CDB file size (256 MB)
+const CDB_MAX_FILE_SIZE: u64 = 256 * 1024 * 1024;
+
 /// Host state available to WASM import functions.
 struct HostState {
     /// Monotonic clock offset (ms since instance start)
@@ -42,6 +47,8 @@ struct HostState {
     cdb_handles: HashMap<i32, Vec<u8>>,
     /// Counter for allocating CDB handles
     next_cdb_handle: i32,
+    /// Allowed directories for CDB file opens (empty = deny all)
+    allowed_cdb_dirs: Vec<String>,
 }
 
 impl Default for HostState {
@@ -53,6 +60,7 @@ impl Default for HostState {
             peer_addr: None,
             cdb_handles: HashMap::new(),
             next_cdb_handle: 0,
+            allowed_cdb_dirs: Vec::new(),
         }
     }
 }
@@ -241,6 +249,50 @@ pub extern "C" fn jerboa_wasm_set_socket(instance_handle: u64, fd: i32) -> i32 {
             set_last_error("jerboa_wasm_set_socket: not supported on this platform".to_string());
             -1
         }
+    })
+}
+
+/// Add an allowed directory for CDB file opens.
+/// The WASM guest can only open CDB files under these directories.
+/// path_ptr/path_len: UTF-8 directory path.
+/// Returns 0 on success, -1 on error.
+#[no_mangle]
+pub extern "C" fn jerboa_wasm_allow_cdb_dir(
+    instance_handle: u64,
+    path_ptr: *const u8,
+    path_len: usize,
+) -> i32 {
+    ffi_wrap(|| {
+        if path_ptr.is_null() {
+            set_last_error("null path pointer".to_string());
+            return -1;
+        }
+        let path_bytes = unsafe { std::slice::from_raw_parts(path_ptr, path_len) };
+        let path_str = match std::str::from_utf8(path_bytes) {
+            Ok(s) => s,
+            Err(_) => {
+                set_last_error("invalid UTF-8 in path".to_string());
+                return -1;
+            }
+        };
+        // Canonicalize the directory path
+        let canonical = match std::fs::canonicalize(path_str) {
+            Ok(p) => p.to_string_lossy().to_string(),
+            Err(e) => {
+                set_last_error(format!("canonicalize failed: {e}"));
+                return -1;
+            }
+        };
+        let mut instances = wasm_instances().lock().unwrap();
+        let inst = match instances.get_mut(&instance_handle) {
+            Some(i) => i,
+            None => {
+                set_last_error("invalid instance handle".to_string());
+                return -1;
+            }
+        };
+        inst.store.data_mut().allowed_cdb_dirs.push(canonical);
+        0
     })
 }
 
@@ -539,6 +591,37 @@ pub extern "C" fn jerboa_wasm_memory_size(handle: u64) -> i64 {
     }
 }
 
+/// Retrieve the log buffer from a hosted instance as a newline-separated UTF-8 string.
+/// Writes into buf_ptr (up to buf_max bytes). Returns total log length (may exceed buf_max).
+/// Returns -1 on error.
+#[no_mangle]
+pub extern "C" fn jerboa_wasm_get_log(
+    handle: u64,
+    buf_ptr: *mut u8,
+    buf_max: usize,
+) -> i64 {
+    match std::panic::catch_unwind(|| {
+        let instances = wasm_instances().lock().unwrap();
+        let inst = match instances.get(&handle) {
+            Some(i) => i,
+            None => return -1i64,
+        };
+        let log = &inst.store.data().log_buffer;
+        let full = log.join("\n");
+        let bytes = full.as_bytes();
+        if !buf_ptr.is_null() && buf_max > 0 {
+            let copy_len = bytes.len().min(buf_max);
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf_ptr, copy_len);
+            }
+        }
+        bytes.len() as i64
+    }) {
+        Ok(v) => v,
+        Err(_) => -1,
+    }
+}
+
 // ============================================================
 // Hosted instance: instantiate with WASI + DNS host imports
 // ============================================================
@@ -763,7 +846,10 @@ fn define_host_imports(linker: &mut Linker<HostState>) -> Result<(), Error> {
                 0 => "ERROR", 1 => "WARN", 2 => "INFO", _ => "DEBUG",
             };
             eprintln!("[wasm-{lvl}] {msg}");
-            caller.data_mut().log_buffer.push(format!("[{lvl}] {msg}"));
+            let state = caller.data_mut();
+            if state.log_buffer.len() < LOG_BUFFER_CAP {
+                state.log_buffer.push(format!("[{lvl}] {msg}"));
+            }
             0
         }
     )?;
@@ -829,7 +915,7 @@ fn define_host_imports(linker: &mut Linker<HostState>) -> Result<(), Error> {
                 data[start..end].to_vec()
             };
             // Optionally parse destination address from WASM memory.
-            let dest_addr: Option<std::net::SocketAddr> = if addr_len > 0 {
+            let target: Option<std::net::SocketAddr> = if addr_len > 0 {
                 let addr_str = {
                     let data = memory.data(&caller);
                     let start = addr_ptr as usize;
@@ -837,12 +923,19 @@ fn define_host_imports(linker: &mut Linker<HostState>) -> Result<(), Error> {
                     if end > data.len() { return -1; }
                     std::str::from_utf8(&data[start..end]).ok().map(str::to_string)
                 };
-                addr_str.and_then(|s| s.parse().ok())
+                // If explicit address was provided but can't be parsed, fail
+                // (don't silently fall back to peer_addr)
+                match addr_str {
+                    Some(s) => match s.parse() {
+                        Ok(a) => Some(a),
+                        Err(_) => return -1,
+                    },
+                    None => return -1,
+                }
             } else {
-                None
+                // No explicit address: use saved peer from last recv
+                caller.data().peer_addr
             };
-            // Prefer explicit address; fall back to saved peer from last recv.
-            let target = dest_addr.or_else(|| caller.data().peer_addr);
             let cloned = caller.data().udp_socket.as_ref()
                 .and_then(|s| s.try_clone().ok());
             match (cloned, target) {
@@ -859,7 +952,8 @@ fn define_host_imports(linker: &mut Linker<HostState>) -> Result<(), Error> {
 
     // ---- DNS: cdb_open (path_ptr, path_len) -> handle ----
     // Reads the entire CDB file into memory and returns a handle (>=0).
-    // Returns -1 on error (file not found, I/O error, etc.).
+    // Returns -1 on error (file not found, I/O error, path not allowed, etc.).
+    // SECURITY: Only paths under allowed_cdb_dirs are permitted.
     linker.func_wrap(
         "dns", "cdb_open",
         |mut caller: Caller<'_, HostState>, path_ptr: i32, path_len: i32| -> i32 {
@@ -877,7 +971,28 @@ fn define_host_imports(linker: &mut Linker<HostState>) -> Result<(), Error> {
                     Err(_) => return -1,
                 }
             };
-            let cdb_data = match std::fs::read(&path) {
+            // Resolve to canonical path to prevent traversal via ../ or symlinks
+            let canonical = match std::fs::canonicalize(&path) {
+                Ok(p) => p,
+                Err(_) => return -1,
+            };
+            let canonical_str = canonical.to_string_lossy();
+            // Check path is under an allowed directory
+            let allowed = &caller.data().allowed_cdb_dirs;
+            if allowed.is_empty() || !allowed.iter().any(|dir| canonical_str.starts_with(dir)) {
+                eprintln!("[wasm-WARN] cdb_open denied: {canonical_str} not in allowed dirs");
+                return -1;
+            }
+            // Check file size before reading
+            let meta = match std::fs::metadata(&canonical) {
+                Ok(m) => m,
+                Err(_) => return -1,
+            };
+            if meta.len() > CDB_MAX_FILE_SIZE {
+                eprintln!("[wasm-WARN] cdb_open denied: file too large ({} bytes)", meta.len());
+                return -1;
+            }
+            let cdb_data = match std::fs::read(&canonical) {
                 Ok(d) => d,
                 Err(_) => return -1,
             };

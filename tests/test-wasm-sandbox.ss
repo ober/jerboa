@@ -413,6 +413,193 @@
   31)  ;; tag-fixnum(15) = 31
 
 ;;; ============================================================
+;;; Section 8: Try-catch execution in wasmi
+;;; ============================================================
+(printf "~%--- Section 8: Try-catch execution in wasmi ---~%")
+
+;; NOTE: wasmi 0.40 does not support the exception-handling WASM proposal.
+;; try-catch compiles to valid WASM binary (tested in test-slang-wasm.ss)
+;; but cannot execute in wasmi until it adds exception support.
+;; These tests verify the compilation succeeds and document the limitation.
+
+(test "try-catch compiles to valid WASM"
+  (bytevector?
+    (compile-program
+      (append
+        value-memory-forms
+        value-global-forms
+        value-tag-forms
+        '((define-tag 0)
+          (define (safe-div a b)
+            (try-catch 0
+              (if (= b 0) (throw 0 -1) (quotient a b))
+              exn
+              exn))))))
+  #t)
+
+(test "try-catch wasmi rejects with clear error (exception-handling not supported)"
+  (guard (exn [#t (and (message-condition? exn)
+                       (string-contains (condition-message exn) "legacy exceptions") #t)])
+    (let* ([bv (compile-program
+                 (append
+                   value-memory-forms
+                   value-global-forms
+                   value-tag-forms
+                   '((define-tag 0)
+                     (define (safe-div a b)
+                       (try-catch 0
+                         (if (= b 0) (throw 0 -1) (quotient a b))
+                         exn
+                         exn)))))]
+           [mod-h (wasm-sandbox-load bv)]
+           [inst (wasm-sandbox-instantiate mod-h)])
+      (wasm-sandbox-free inst)
+      (wasm-sandbox-free-module mod-h)
+      #f))  ;; Should not reach here
+  #t)
+
+;;; ============================================================
+;;; Section 9: Multi-arg arithmetic in wasmi
+;;; ============================================================
+(printf "~%--- Section 9: Multi-arg arithmetic in wasmi ---~%")
+
+;; Basic multi-arg + at the compile-program level (raw i32)
+(test "multi-arg addition (3 operands) in wasmi"
+  (let* ([bv (compile-program
+               '((define (add3 a b c)
+                   (+ (+ a b) c))))]
+         [mod-h (wasm-sandbox-load bv)]
+         [inst (wasm-sandbox-instantiate mod-h)])
+    (let ([r (wasm-sandbox-call inst "add3" 10 20 30)])
+      (wasm-sandbox-free inst)
+      (wasm-sandbox-free-module mod-h)
+      r))
+  60)
+
+(test "multi-arg multiply (3 operands) in wasmi"
+  (let* ([bv (compile-program
+               '((define (mul3 a b c)
+                   (* (* a b) c))))]
+         [mod-h (wasm-sandbox-load bv)]
+         [inst (wasm-sandbox-instantiate mod-h)])
+    (let ([r (wasm-sandbox-call inst "mul3" 2 3 7)])
+      (wasm-sandbox-free inst)
+      (wasm-sandbox-free-module mod-h)
+      r))
+  42)
+
+;;; ============================================================
+;;; Section 10: Display/log output via hosted instance
+;;; ============================================================
+(printf "~%--- Section 10: Display/log output in wasmi ---~%")
+
+;; Helper: compile full runtime + display forms + user code for hosted execution.
+;; Import signatures MUST match what jerboa_wasm_instance_new_hosted provides.
+(define (compile-scheme-hosted user-forms)
+  (compile-program
+    (append
+      value-memory-forms
+      value-global-forms
+      value-tag-forms
+      value-predicate-forms
+      value-accessor-forms
+      value-constructor-forms
+      gc-all-forms
+      ;; WASI host imports
+      '((define-import "wasi_snapshot_preview1" fd_write (i32 i32 i32 i32) (i32))
+        (define-import "wasi_snapshot_preview1" fd_read (i32 i32 i32 i32) (i32))
+        (define-import "wasi_snapshot_preview1" clock_time_get (i32 i64 i32) (i32))
+        (define-import "wasi_snapshot_preview1" random_get (i32 i32) (i32))
+        (define-import "wasi_snapshot_preview1" proc_exit (i32) ())
+        ;; DNS host imports
+        (define-import "dns" log_message (i32 i32 i32) (i32))
+        (define-import "dns" get_time_ms () (i32))
+        (define-import "dns" recv_packet (i32 i32) (i32))
+        (define-import "dns" send_packet (i32 i32 i32 i32) (i32))
+        (define-import "dns" cdb_open (i32 i32) (i32))
+        (define-import "dns" cdb_find (i32 i32 i32 i32 i32) (i32))
+        (define-import "dns" cdb_close (i32) (i32)))
+      runtime-all-forms
+      runtime-display-forms
+      user-forms)))
+
+;; Display a fixnum: should log the decimal string via log_message
+(test "scheme-display fixnum logs correctly"
+  (let* ([bv (compile-scheme-hosted
+               '((define (test-display-num n)
+                   (scheme-display (tag-fixnum n))
+                   0)))]
+         [mod-h (wasm-sandbox-load bv)]
+         [inst (wasm-sandbox-instantiate-hosted mod-h 'fuel: 10000000)])
+    (wasm-sandbox-call inst "test-display-num" 42)
+    (let ([log (wasm-sandbox-get-log inst)])
+      (wasm-sandbox-free inst)
+      (wasm-sandbox-free-module mod-h)
+      (and (string-contains log "42") #t)))
+  #t)
+
+;; Display #t: should log "#t"
+(test "scheme-display boolean #t logs correctly"
+  (let* ([bv (compile-scheme-hosted
+               '((define (test-display-true)
+                   (scheme-display 2)  ;; IMM-TRUE = 2
+                   0)))]
+         [mod-h (wasm-sandbox-load bv)]
+         [inst (wasm-sandbox-instantiate-hosted mod-h 'fuel: 10000000)])
+    (wasm-sandbox-call inst "test-display-true")
+    (let ([log (wasm-sandbox-get-log inst)])
+      (wasm-sandbox-free inst)
+      (wasm-sandbox-free-module mod-h)
+      (and (string-contains log "#t") #t)))
+  #t)
+
+;; Display #f: should log "#f"
+(test "scheme-display boolean #f logs correctly"
+  (let* ([bv (compile-scheme-hosted
+               '((define (test-display-false)
+                   (scheme-display 0)  ;; IMM-FALSE = 0
+                   0)))]
+         [mod-h (wasm-sandbox-load bv)]
+         [inst (wasm-sandbox-instantiate-hosted mod-h 'fuel: 10000000)])
+    (wasm-sandbox-call inst "test-display-false")
+    (let ([log (wasm-sandbox-get-log inst)])
+      (wasm-sandbox-free inst)
+      (wasm-sandbox-free-module mod-h)
+      (and (string-contains log "#f") #t)))
+  #t)
+
+;; Newline: scheme-newline should log a newline character
+(test "scheme-newline logs newline"
+  (let* ([bv (compile-scheme-hosted
+               '((define (test-newline)
+                   (scheme-newline)
+                   0)))]
+         [mod-h (wasm-sandbox-load bv)]
+         [inst (wasm-sandbox-instantiate-hosted mod-h 'fuel: 10000000)])
+    (wasm-sandbox-call inst "test-newline")
+    (let ([log (wasm-sandbox-get-log inst)])
+      (wasm-sandbox-free inst)
+      (wasm-sandbox-free-module mod-h)
+      ;; The log should contain something (the newline byte)
+      (> (string-length log) 0)))
+  #t)
+
+;; Negative number display
+(test "scheme-display negative fixnum logs correctly"
+  (let* ([bv (compile-scheme-hosted
+               '((define (test-display-neg n)
+                   (scheme-display (tag-fixnum n))
+                   0)))]
+         [mod-h (wasm-sandbox-load bv)]
+         [inst (wasm-sandbox-instantiate-hosted mod-h 'fuel: 10000000)])
+    (wasm-sandbox-call inst "test-display-neg" -7)
+    (let ([log (wasm-sandbox-get-log inst)])
+      (wasm-sandbox-free inst)
+      (wasm-sandbox-free-module mod-h)
+      (and (string-contains log "-7") #t)))
+  #t)
+
+;;; ============================================================
 ;;; Summary
 ;;; ============================================================
 
