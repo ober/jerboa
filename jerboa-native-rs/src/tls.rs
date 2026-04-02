@@ -451,6 +451,112 @@ pub extern "C" fn jerboa_tls_accept(
 // Server: mTLS — require and verify client certificates
 // ============================================================
 
+/// Create an mTLS server context from in-memory PEM data (no filesystem access).
+/// cert_pem/key_pem: server cert+key PEM bytes.
+/// client_ca_pem: CA cert PEM bytes used to verify client certificates.
+/// Clients without a valid cert signed by this CA are rejected at the TLS handshake.
+/// Returns context handle (>0) on success, 0 on error.
+#[no_mangle]
+pub extern "C" fn jerboa_tls_server_new_mtls_pem(
+    cert_pem: *const u8,
+    cert_pem_len: usize,
+    key_pem: *const u8,
+    key_pem_len: usize,
+    client_ca_pem: *const u8,
+    client_ca_pem_len: usize,
+) -> u64 {
+    match std::panic::catch_unwind(|| {
+        if cert_pem.is_null() || key_pem.is_null() || client_ca_pem.is_null() {
+            set_last_error("null cert/key/ca PEM pointer".to_string());
+            return 0;
+        }
+
+        let cert_data = unsafe { std::slice::from_raw_parts(cert_pem, cert_pem_len) };
+        let key_data = unsafe { std::slice::from_raw_parts(key_pem, key_pem_len) };
+        let ca_data = unsafe { std::slice::from_raw_parts(client_ca_pem, client_ca_pem_len) };
+
+        // Parse server cert chain from PEM bytes
+        let mut cert_cursor = std::io::Cursor::new(cert_data);
+        let certs: Vec<CertificateDer<'static>> =
+            rustls_pemfile::certs(&mut cert_cursor)
+                .filter_map(|r| r.ok())
+                .collect();
+        if certs.is_empty() {
+            set_last_error("no certificates found in cert PEM data".to_string());
+            return 0;
+        }
+
+        // Parse private key from PEM bytes
+        let mut key_cursor = std::io::Cursor::new(key_data);
+        let key = match rustls_pemfile::private_key(&mut key_cursor) {
+            Ok(Some(k)) => k,
+            Ok(None) => {
+                set_last_error("no private key found in PEM data".to_string());
+                return 0;
+            }
+            Err(e) => {
+                set_last_error(format!("read key PEM: {}", e));
+                return 0;
+            }
+        };
+
+        // Parse client CA certs from PEM bytes
+        let mut ca_cursor = std::io::Cursor::new(ca_data);
+        let ca_certs: Vec<CertificateDer<'static>> =
+            rustls_pemfile::certs(&mut ca_cursor)
+                .filter_map(|r| r.ok())
+                .collect();
+        if ca_certs.is_empty() {
+            set_last_error("no CA certificates found in client CA PEM data".to_string());
+            return 0;
+        }
+
+        // Build root cert store from client CA
+        let mut client_root_store = rustls::RootCertStore::empty();
+        for cert in ca_certs {
+            if let Err(e) = client_root_store.add(cert) {
+                set_last_error(format!("add CA cert: {}", e));
+                return 0;
+            }
+        }
+
+        // Build client cert verifier
+        let client_verifier = match rustls::server::WebPkiClientVerifier::builder(
+            Arc::new(client_root_store),
+        ).build() {
+            Ok(v) => v,
+            Err(e) => {
+                set_last_error(format!("client verifier: {}", e));
+                return 0;
+            }
+        };
+
+        // Build server config with client auth required
+        let config = match ServerConfig::builder()
+            .with_client_cert_verifier(client_verifier)
+            .with_single_cert(certs, PrivateKeyDer::from(key))
+        {
+            Ok(c) => c,
+            Err(e) => {
+                set_last_error(format!("server config: {}", e));
+                return 0;
+            }
+        };
+
+        let handle = next_handle();
+        server_ctxs().lock().unwrap().insert(handle, TlsServerCtx {
+            config: Arc::new(config),
+        });
+        handle
+    }) {
+        Ok(h) => h,
+        Err(_) => {
+            set_last_error("panic in tls_server_new_mtls_pem".to_string());
+            0
+        }
+    }
+}
+
 /// Create a TLS server context that requires client certificates.
 /// client_ca_path points to a PEM file with the CA cert(s) that
 /// issued the client certificates. Clients without a valid cert
