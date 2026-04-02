@@ -47,7 +47,12 @@
     wasm-sandbox-instantiate-hosted
 
     ;; Log buffer retrieval (hosted instances)
-    wasm-sandbox-get-log)
+    wasm-sandbox-get-log
+
+    ;; Backend selection
+    wasm-sandbox-spidermonkey-available?
+    wasm-sandbox-use-spidermonkey!
+    wasm-sandbox-backend)
 
   (import (chezscheme))
 
@@ -131,6 +136,60 @@
            (foreign-procedure "jerboa_wasm_get_log"
              (unsigned-64 u8* size_t) integer-64))))
 
+  ;; --- SpiderMonkey backend FFI bindings ---
+
+  (define c-sm-module-new
+    (and _native-loaded
+         (guard (e [#t #f])
+           (foreign-procedure "jerboa_sm_module_new"
+             (u8* size_t) unsigned-64))))
+
+  (define c-sm-module-free
+    (and _native-loaded
+         (guard (e [#t #f])
+           (foreign-procedure "jerboa_sm_module_free"
+             (unsigned-64) void))))
+
+  (define c-sm-instance-new
+    (and _native-loaded
+         (guard (e [#t #f])
+           (foreign-procedure "jerboa_sm_instance_new"
+             (unsigned-64 unsigned-64) unsigned-64))))
+
+  (define c-sm-instance-free
+    (and _native-loaded
+         (guard (e [#t #f])
+           (foreign-procedure "jerboa_sm_instance_free"
+             (unsigned-64) void))))
+
+  (define c-sm-call
+    (and _native-loaded
+         (guard (e [#t #f])
+           (foreign-procedure "jerboa_sm_call"
+             (unsigned-64 u8* size_t u8* size_t u8* size_t) int))))
+
+  (define c-sm-instance-new-hosted
+    (and _native-loaded
+         (guard (e [#t #f])
+           (foreign-procedure "jerboa_sm_instance_new_hosted"
+             (unsigned-64 unsigned-64) unsigned-64))))
+
+  (define c-sm-get-log
+    (and _native-loaded
+         (guard (e [#t #f])
+           (foreign-procedure "jerboa_sm_get_log"
+             (unsigned-64 u8* size_t) integer-64))))
+
+  (define c-sm-add-fuel
+    (and _native-loaded
+         (guard (e [#t #f])
+           (foreign-procedure "jerboa_sm_add_fuel"
+             (unsigned-64 unsigned-64) int))))
+
+  ;; --- Backend selection ---
+
+  (define *wasm-backend* 'wasmi)  ;; 'wasmi or 'spidermonkey
+
   (define c-last-error
     (and _native-loaded
          (guard (e [#t #f])
@@ -158,21 +217,21 @@
   ;; --- Module lifecycle ---
 
   (define (wasm-sandbox-load bv)
-    ;; Load a WASM binary (bytevector) into the Rust wasmi runtime.
+    ;; Load a WASM binary (bytevector) into the WASM runtime.
+    ;; Uses the currently selected backend (wasmi or SpiderMonkey).
     ;; Returns an opaque module handle, or raises on error.
     (unless (wasm-sandbox-available?)
-      (error 'wasm-sandbox-load "wasmi not available — libjerboa_native.so not loaded"))
+      (error 'wasm-sandbox-load "WASM runtime not available — libjerboa_native.so not loaded"))
     (unless (bytevector? bv)
       (error 'wasm-sandbox-load "expected bytevector" bv))
-    (let ([h (c-wasm-module-new bv (bytevector-length bv))])
+    (let ([h (dispatch-module-new bv (bytevector-length bv))])
       (when (= h 0)
         (error 'wasm-sandbox-load (last-error)))
       h))
 
   (define (wasm-sandbox-free-module handle)
     ;; Free a loaded module.
-    (when c-wasm-module-free
-      (c-wasm-module-free handle)))
+    (dispatch-module-free handle))
 
   ;; --- Instance lifecycle ---
 
@@ -181,15 +240,14 @@
     ;; Options: fuel: N (default 10M)
     ;; Returns an opaque instance handle.
     (let ([fuel (extract-opt opts 'fuel: 0)])
-      (let ([h (c-wasm-instance-new module-handle fuel)])
+      (let ([h (dispatch-instance-new module-handle fuel)])
         (when (= h 0)
           (error 'wasm-sandbox-instantiate (last-error)))
         h)))
 
   (define (wasm-sandbox-free handle)
     ;; Free an instance.
-    (when c-wasm-instance-free
-      (c-wasm-instance-free handle)))
+    (dispatch-instance-free handle))
 
   ;; --- Execution ---
 
@@ -205,7 +263,7 @@
         (unless (null? a)
           (bytevector-s64-set! args-bv (* i 8) (car a) (endianness little))
           (lp (+ i 1) (cdr a))))
-      (let ([rc (c-wasm-call handle name-bv (bytevector-length name-bv)
+      (let ([rc (dispatch-call handle name-bv (bytevector-length name-bv)
                               args-bv nargs results-bv 1)])
         (when (< rc 0)
           (error 'wasm-sandbox-call (last-error)))
@@ -268,11 +326,8 @@
     ;; and stubbed DNS/CDB functions (recv_packet, send_packet, cdb_*).
     ;; Options: fuel: N (default 10M)
     ;; Returns an opaque instance handle.
-    (unless c-wasm-instance-new-hosted
-      (error 'wasm-sandbox-instantiate-hosted
-             "hosted instances not available — libjerboa_native.so not loaded or too old"))
     (let ([fuel (extract-opt opts 'fuel: 10000000)])
-      (let ([h (c-wasm-instance-new-hosted module-handle fuel)])
+      (let ([h (dispatch-instance-new-hosted module-handle fuel)])
         (when (= h 0)
           (error 'wasm-sandbox-instantiate-hosted (last-error)))
         h)))
@@ -282,15 +337,30 @@
   (define (wasm-sandbox-get-log handle)
     ;; Retrieve the log buffer from a hosted WASM instance as a string.
     ;; Returns "" if log retrieval is not available.
-    (if (not c-wasm-get-log)
-      ""
-      (let ([buf (make-bytevector 65536)])
-        (let ([n (c-wasm-get-log handle buf 65536)])
-          (if (> n 0)
-            (utf8->string (let ([r (make-bytevector (min n 65535))])
-                            (bytevector-copy! buf 0 r 0 (min n 65535))
-                            r))
-            "")))))
+    (let ([buf (make-bytevector 65536)])
+      (let ([n (dispatch-get-log handle buf 65536)])
+        (if (and n (> n 0))
+          (utf8->string (let ([r (make-bytevector (min n 65535))])
+                          (bytevector-copy! buf 0 r 0 (min n 65535))
+                          r))
+          ""))))
+
+  ;; --- Backend selection ---
+
+  (define (wasm-sandbox-spidermonkey-available?)
+    ;; Returns #t if the SpiderMonkey backend is available.
+    (and c-sm-module-new c-sm-call #t))
+
+  (define (wasm-sandbox-use-spidermonkey!)
+    ;; Switch to SpiderMonkey backend. All subsequent calls use SM.
+    (unless (wasm-sandbox-spidermonkey-available?)
+      (error 'wasm-sandbox-use-spidermonkey!
+             "SpiderMonkey not available — rebuild with --features spidermonkey"))
+    (set! *wasm-backend* 'spidermonkey))
+
+  (define (wasm-sandbox-backend)
+    ;; Returns the current backend symbol: 'wasmi or 'spidermonkey
+    *wasm-backend*)
 
   ;; --- Helpers ---
 
@@ -302,5 +372,43 @@
          (cadr opts)]
         [(pair? opts) (lp (cdr opts))]
         [else default])))
+
+  ;; --- Backend dispatch helpers ---
+  ;; When *wasm-backend* is 'spidermonkey, redirect to SM FFI functions.
+
+  (define (dispatch-module-new bv len)
+    (if (eq? *wasm-backend* 'spidermonkey)
+      (c-sm-module-new bv len)
+      (c-wasm-module-new bv len)))
+
+  (define (dispatch-module-free h)
+    (if (eq? *wasm-backend* 'spidermonkey)
+      (when c-sm-module-free (c-sm-module-free h))
+      (when c-wasm-module-free (c-wasm-module-free h))))
+
+  (define (dispatch-instance-new mod-h fuel)
+    (if (eq? *wasm-backend* 'spidermonkey)
+      (c-sm-instance-new mod-h fuel)
+      (c-wasm-instance-new mod-h fuel)))
+
+  (define (dispatch-instance-new-hosted mod-h fuel)
+    (if (eq? *wasm-backend* 'spidermonkey)
+      (c-sm-instance-new-hosted mod-h fuel)
+      (c-wasm-instance-new-hosted mod-h fuel)))
+
+  (define (dispatch-instance-free h)
+    (if (eq? *wasm-backend* 'spidermonkey)
+      (when c-sm-instance-free (c-sm-instance-free h))
+      (when c-wasm-instance-free (c-wasm-instance-free h))))
+
+  (define (dispatch-call h name-bv name-len args-bv nargs results-bv nresults)
+    (if (eq? *wasm-backend* 'spidermonkey)
+      (c-sm-call h name-bv name-len args-bv nargs results-bv nresults)
+      (c-wasm-call h name-bv name-len args-bv nargs results-bv nresults)))
+
+  (define (dispatch-get-log h buf len)
+    (if (eq? *wasm-backend* 'spidermonkey)
+      (and c-sm-get-log (c-sm-get-log h buf len))
+      (and c-wasm-get-log (c-wasm-get-log h buf len))))
 
 ) ;; end library

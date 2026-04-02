@@ -600,6 +600,91 @@
   #t)
 
 ;;; ============================================================
+;;; Section 11: SpiderMonkey backend
+;;; ============================================================
+(printf "~%--- Section 11: SpiderMonkey backend ---~%")
+
+(test "SpiderMonkey backend availability"
+  (wasm-sandbox-spidermonkey-available?)
+  #t)
+
+;; If SM is available, run basic tests with it
+(when (wasm-sandbox-spidermonkey-available?)
+  ;; Switch to SM backend
+  (wasm-sandbox-use-spidermonkey!)
+
+  (test "SM backend selected"
+    (wasm-sandbox-backend)
+    'spidermonkey)
+
+  ;; Basic computation: factorial
+  (test "factorial(10) in SpiderMonkey"
+    (let* ([bv (compile-program
+                 '((define (factorial n)
+                     (if (= n 0) 1 (* n (factorial (- n 1)))))))]
+           [mod-h (wasm-sandbox-load bv)]
+           [inst (wasm-sandbox-instantiate mod-h)])
+      (let ([r (wasm-sandbox-call inst "factorial" 10)])
+        (wasm-sandbox-free inst)
+        (wasm-sandbox-free-module mod-h)
+        r))
+    3628800)
+
+  ;; Fibonacci
+  (test "fibonacci(20) in SpiderMonkey"
+    (let* ([bv (compile-program
+                 '((define (fib n)
+                     (if (<= n 1) n
+                       (+ (fib (- n 1)) (fib (- n 2)))))))]
+           [mod-h (wasm-sandbox-load bv)]
+           [inst (wasm-sandbox-instantiate mod-h)])
+      (let ([r (wasm-sandbox-call inst "fib" 20)])
+        (wasm-sandbox-free inst)
+        (wasm-sandbox-free-module mod-h)
+        r))
+    6765)
+
+  ;; Arithmetic
+  (test "arithmetic in SpiderMonkey"
+    (let* ([bv (compile-program
+                 '((define (compute a b) (+ (* a a) (* b b)))))]
+           [mod-h (wasm-sandbox-load bv)]
+           [inst (wasm-sandbox-instantiate mod-h)])
+      (let ([r (wasm-sandbox-call inst "compute" 3 4)])
+        (wasm-sandbox-free inst)
+        (wasm-sandbox-free-module mod-h)
+        r))
+    25)
+
+  ;; Tagged fixnum round-trip through full Scheme runtime
+  (test "tag-fixnum round-trip in SpiderMonkey"
+    (let* ([bv (compile-scheme-runtime
+                 '((define (roundtrip n)
+                     (untag-fixnum (tag-fixnum n)))))]
+           [mod-h (wasm-sandbox-load bv)]
+           [inst (wasm-sandbox-instantiate mod-h)])
+      (let ([r (wasm-sandbox-call inst "roundtrip" 42)])
+        (wasm-sandbox-free inst)
+        (wasm-sandbox-free-module mod-h)
+        r))
+    42)
+
+  ;; cons + car
+  (test "cons + car in SpiderMonkey"
+    (let* ([bv (compile-scheme-runtime
+                 '((define (car-of-cons a b)
+                     (scheme-car (scheme-cons a b)))))]
+           [mod-h (wasm-sandbox-load bv)]
+           [inst (wasm-sandbox-instantiate mod-h)])
+      (let ([r (wasm-sandbox-call inst "car-of-cons" 7 9)])
+        (wasm-sandbox-free inst)
+        (wasm-sandbox-free-module mod-h)
+        r))
+    7)
+
+)
+
+;;; ============================================================
 ;;; Summary
 ;;; ============================================================
 
