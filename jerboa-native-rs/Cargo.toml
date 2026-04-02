@@ -27,6 +27,12 @@ rustls-pemfile = "2"
 webpki-roots = "0.26"
 wasmi = "0.40"
 getrandom = "0.2"
+mozjs = { git = "https://github.com/servo/mozjs.git", optional = true, default-features = false, features = ["jit", "libz-sys"] }
+mozjs_sys = { git = "https://github.com/servo/mozjs.git", optional = true }
+
+[features]
+default = []
+spidermonkey = ["mozjs", "mozjs_sys"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 inotify = { version = "0.11", default-features = false }

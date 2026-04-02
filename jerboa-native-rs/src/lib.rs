@@ -13,6 +13,8 @@ mod x25519;
 mod ed25519;
 mod process_ctl;
 mod wasm;
+#[cfg(feature = "spidermonkey")]
+mod wasm_sm;
 
 #[cfg(target_os = "linux")]
 mod epoll;
