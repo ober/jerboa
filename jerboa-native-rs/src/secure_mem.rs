@@ -53,8 +53,9 @@ pub extern "C" fn jerboa_secure_free(ptr: *mut u8, size: usize) -> i32 {
     ffi_wrap(|| {
         if ptr.is_null() { return -1; }
 
-        // Wipe — explicit_bzero is guaranteed not to be optimized away
-        unsafe { libc::explicit_bzero(ptr as *mut _, size); }
+        // Wipe — volatile write guaranteed not to be optimized away
+        unsafe { std::ptr::write_bytes(ptr, 0, size); }
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
 
         // Unlock
         unsafe { libc::munlock(ptr as *const _, size); }
@@ -72,7 +73,8 @@ pub extern "C" fn jerboa_secure_free(ptr: *mut u8, size: usize) -> i32 {
 pub extern "C" fn jerboa_secure_wipe(ptr: *mut u8, size: usize) -> i32 {
     ffi_wrap(|| {
         if ptr.is_null() { return -1; }
-        unsafe { libc::explicit_bzero(ptr as *mut _, size); }
+        unsafe { std::ptr::write_bytes(ptr, 0, size); }
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
         0
     })
 }

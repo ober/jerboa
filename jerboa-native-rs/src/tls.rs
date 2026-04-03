@@ -809,7 +809,7 @@ pub extern "C" fn jerboa_tls_connect_mtls(
             Ok(f) => f,
             Err(e) => { set_last_error(format!("open server CA: {}", e)); return 0; }
         };
-        let ca_certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut std::io::BufReader::new(ca_file))
+        let _ca_certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut std::io::BufReader::new(ca_file))
             .filter_map(|r| r.ok())
             .collect();
 
