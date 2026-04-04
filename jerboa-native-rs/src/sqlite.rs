@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
-use std::ffi::CStr;
+use std::ffi::{c_char, CStr};
 
 // We use raw sqlite3 / sqlite3_stmt pointers to avoid lifetime issues.
 // rusqlite is only used for opening (which initializes SQLite properly).
@@ -138,7 +138,7 @@ pub extern "C" fn jerboa_sqlite_prepare(
         let rc = unsafe {
             rusqlite::ffi::sqlite3_prepare_v2(
                 entry.raw,
-                sql as *const i8,
+                sql as *const c_char,
                 sql_len as i32,
                 &mut raw_stmt,
                 std::ptr::null_mut(),
@@ -211,7 +211,7 @@ pub extern "C" fn jerboa_sqlite_bind_text(
         let rc = unsafe {
             rusqlite::ffi::sqlite3_bind_text(
                 entry.raw, index,
-                text as *const i8, text_len as i32,
+                text as *const c_char, text_len as i32,
                 rusqlite::ffi::SQLITE_TRANSIENT(),
             )
         };
