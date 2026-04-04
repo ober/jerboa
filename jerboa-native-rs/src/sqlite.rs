@@ -138,7 +138,7 @@ pub extern "C" fn jerboa_sqlite_prepare(
         let rc = unsafe {
             rusqlite::ffi::sqlite3_prepare_v2(
                 entry.raw,
-                sql as *const u8,
+                sql as *const i8,
                 sql_len as i32,
                 &mut raw_stmt,
                 std::ptr::null_mut(),
@@ -211,7 +211,7 @@ pub extern "C" fn jerboa_sqlite_bind_text(
         let rc = unsafe {
             rusqlite::ffi::sqlite3_bind_text(
                 entry.raw, index,
-                text as *const u8, text_len as i32,
+                text as *const i8, text_len as i32,
                 rusqlite::ffi::SQLITE_TRANSIENT(),
             )
         };
