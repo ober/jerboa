@@ -855,6 +855,90 @@ pub extern "C" fn jerboa_tls_connect_mtls(
     }
 }
 
+/// mTLS connect using in-memory cert/key data (no file paths).
+/// Avoids /proc/self/fd/ which Android SELinux may block.
+/// Returns handle ID (>0) on success, 0 on error.
+#[no_mangle]
+pub extern "C" fn jerboa_tls_connect_mtls_mem(
+    host: *const u8,
+    host_len: usize,
+    port: u16,
+    cert_pem: *const u8,
+    cert_pem_len: usize,
+    key_pem: *const u8,
+    key_pem_len: usize,
+) -> u64 {
+    match std::panic::catch_unwind(|| {
+        if host.is_null() || cert_pem.is_null() || key_pem.is_null() {
+            set_last_error("null argument".to_string());
+            return 0;
+        }
+        let host_str = unsafe {
+            match std::str::from_utf8(std::slice::from_raw_parts(host, host_len)) {
+                Ok(s) => s.to_string(),
+                Err(_) => { set_last_error("invalid UTF-8 hostname".to_string()); return 0; }
+            }
+        };
+        let cert_data = unsafe { std::slice::from_raw_parts(cert_pem, cert_pem_len) };
+        let key_data = unsafe { std::slice::from_raw_parts(key_pem, key_pem_len) };
+
+        // Parse client certs from PEM bytes
+        let client_certs: Vec<CertificateDer<'static>> =
+            rustls_pemfile::certs(&mut std::io::BufReader::new(cert_data))
+                .filter_map(|r| r.ok())
+                .collect();
+        if client_certs.is_empty() {
+            set_last_error("no client certificates found in PEM data".to_string());
+            return 0;
+        }
+
+        // Parse client private key from PEM bytes
+        let client_key = match rustls_pemfile::private_key(&mut std::io::BufReader::new(key_data)) {
+            Ok(Some(k)) => k,
+            Ok(None) => { set_last_error("no client private key found in PEM data".to_string()); return 0; }
+            Err(e) => { set_last_error(format!("read client key PEM: {}", e)); return 0; }
+        };
+
+        let config = match ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(PinVerifier {
+                expected_sha256: None,
+            }))
+            .with_client_auth_cert(client_certs, PrivateKeyDer::from(client_key))
+        {
+            Ok(c) => c,
+            Err(e) => { set_last_error(format!("client config: {}", e)); return 0; }
+        };
+
+        let server_name = match ServerName::try_from(host_str.clone()) {
+            Ok(sn) => sn,
+            Err(e) => { set_last_error(format!("invalid server name: {}", e)); return 0; }
+        };
+
+        let conn = match ClientConnection::new(Arc::new(config), server_name) {
+            Ok(c) => c,
+            Err(e) => { set_last_error(format!("TLS client init: {}", e)); return 0; }
+        };
+
+        let addr = format!("{}:{}", host_str, port);
+        let tcp = match TcpStream::connect(&addr) {
+            Ok(s) => s,
+            Err(e) => { set_last_error(format!("TCP connect {}: {}", addr, e)); return 0; }
+        };
+
+        let stream = StreamOwned::new(conn, tcp);
+        let handle = next_handle();
+        conns().lock().unwrap().insert(handle, TlsConn::Client(stream));
+        handle
+    }) {
+        Ok(h) => h,
+        Err(_) => {
+            set_last_error("panic in tls_connect_mtls_mem".to_string());
+            0
+        }
+    }
+}
+
 // ============================================================
 // Read / Write / Close
 // ============================================================

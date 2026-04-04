@@ -170,11 +170,10 @@
          (reader-next! rs)
          (annotate rs (read-list rs #\) (+ depth 1)) loc))
 
-        ;; Square brackets → (list ...)
+        ;; Square brackets — plain parentheses (same as Gerbil and Chez)
         ((char=? ch #\[)
          (reader-next! rs)
-         (let ((items (read-list rs #\] (+ depth 1))))
-           (annotate rs (cons 'list items) loc)))
+         (annotate rs (read-list rs #\] (+ depth 1)) loc))
 
         ;; Curly braces → (~ obj method args...)
         ((char=? ch #\{)

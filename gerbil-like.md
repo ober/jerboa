@@ -49,20 +49,18 @@ No Gerbil expander. No gambit-compat.sls. No 1790 lines of `##` primitive shims.
 ### Layer 0: The Reader
 
 Handles:
-- `[1 2 3]` → list syntax
+- `[...]` → plain parentheses (interchangeable with `(...)`, same as Gerbil and Chez)
 - `{method obj}` → method dispatch
 - `keyword:` → keyword objects
 - `#!void`, `#!eof` → special values
 
-Instead of emitting `(@list ...)` and `(@method ...)` markers that the compiler interprets later, **expand them directly to Chez forms at read time**:
-
 ```scheme
-[1 2 3]       → (list 1 2 3)
-{method obj}  → (~ obj method)     ; ~ is the dispatch operator
-foo:          → (quote #:foo)      ; or a keyword record
+[x 1]         → (x 1)          ; brackets = parens, use freely in let/match/cond
+{method obj}  → (~ obj method) ; ~ is the dispatch operator
+foo:          → (quote #:foo)  ; or a keyword record
 ```
 
-This eliminates the compiler's need to pattern-match these. They're just Chez expressions by the time macros see them.
+Brackets are **not** list constructors — they are ordinary delimiters, matching Gerbil and stock Chez behavior.
 
 ### Layer 1: Syntax Macros
 

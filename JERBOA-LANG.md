@@ -82,12 +82,15 @@ Key points:
 
 Jerboa extends the Chez Scheme reader with Gerbil-inspired syntax.
 
-### Square Brackets → List Literals
+### Square Brackets — Plain Parentheses
+
+Square brackets are interchangeable with parentheses, exactly like Gerbil and
+stock Chez Scheme. Use them freely in bindings, match clauses, cond, etc.:
 
 ```scheme
-[1 2 3]           ;; → (list 1 2 3)
-[]                ;; → (list)
-[a [b c]]         ;; → (list a (list b c))
+(let ([x 1] [y 2]) (+ x y))
+(for/collect ([i (in-range 5)]) (* i i))
+(cond [(> x 0) "positive"] [else "non-positive"])
 ```
 
 ### Curly Braces → Method Dispatch

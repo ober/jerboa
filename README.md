@@ -34,7 +34,7 @@ scheme --libdirs lib --script your-file.ss
 └──────────────┬───────────────────────────────┘
                │
 ┌──────────────▼───────────────────────────────┐
-│  Reader: [...] → (list ...), {...} → (~ ..)  │
+│  Reader: [...] = (...), {...} → (~ ..)       │
 │  :std/sort → (std sort) module paths         │
 ├──────────────────────────────────────────────┤
 │  Core Macros: def, defstruct, match, try     │
@@ -179,7 +179,7 @@ These modules use external C libraries via chez-* FFI shims. They remain functio
 - Full Gambit-to-Chez type mapping
 
 ### Reader (`(jerboa reader)`)
-- `[1 2 3]` → `(list 1 2 3)`
+- `[...]` = `(...)` — plain parentheses (same as Gerbil and Chez)
 - `{method obj}` → `(~ obj 'method)`
 - `keyword:` → keyword objects
 - `:std/sort` → `(std sort)` module paths
