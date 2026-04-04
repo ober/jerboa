@@ -195,7 +195,18 @@
     begin-ffi c-declare
 
     ;; ---- std/ergo ----
-    using : maybe list-of?)
+    using : maybe list-of?
+
+    ;; ---- AI compatibility aliases ----
+    ;; Common names LLMs hallucinate from Racket/Gerbil/Gambit/CL training data.
+    ;; These are thin aliases so AI-generated code works on the first try.
+    hash-has-key? hash-table-set!        ;; Racket
+    directory-exists?                     ;; Gambit
+    eql?                                 ;; Common Lisp
+    random-integer                       ;; Gambit
+    read-line                            ;; Gambit
+    force-output                         ;; Gambit
+    string-map)                          ;; Racket/R7RS
 
   (import
     (except (chezscheme)
@@ -237,5 +248,21 @@
     (std debug pp)
     (std csv)
     (std ergo))
+
+  ;; ---- AI compatibility aliases ----
+  (define hash-has-key? hash-key?)
+  (define hash-table-set! hash-put!)
+  (define directory-exists? file-directory?)
+  (define eql? eqv?)
+  (define random-integer random)
+  (define (read-line . args)
+    (if (null? args)
+        (get-line (current-input-port))
+        (get-line (car args))))
+  (define (force-output . args)
+    (flush-output-port
+      (if (null? args) (current-output-port) (car args))))
+  (define (string-map f s)
+    (list->string (map f (string->list s))))
 
   ) ;; end library
