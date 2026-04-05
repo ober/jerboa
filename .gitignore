@@ -1,4 +1,5 @@
 *.so
+*.dylib
 *.wpo
 *.boot
 *.sls
