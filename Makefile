@@ -266,7 +266,15 @@ test-security:
 
 # Rust native library
 RUST_NATIVE_DIR = jerboa-native-rs
-RUST_NATIVE_LIB = $(RUST_NATIVE_DIR)/target/release/libjerboa_native.so
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+  NATIVE_LIB_EXT = dylib
+  NATIVE_LD_VAR = DYLD_LIBRARY_PATH
+else
+  NATIVE_LIB_EXT = so
+  NATIVE_LD_VAR = LD_LIBRARY_PATH
+endif
+RUST_NATIVE_LIB = $(RUST_NATIVE_DIR)/target/release/libjerboa_native.$(NATIVE_LIB_EXT)
 
 $(RUST_NATIVE_LIB): $(RUST_NATIVE_DIR)/src/*.rs $(RUST_NATIVE_DIR)/Cargo.toml
 	cd $(RUST_NATIVE_DIR) && cargo build --release
@@ -276,13 +284,13 @@ native: $(RUST_NATIVE_LIB)
 
 clean-native:
 	cd $(RUST_NATIVE_DIR) && cargo clean
-	rm -f lib/libjerboa_native.so
+	rm -f lib/libjerboa_native.$(NATIVE_LIB_EXT)
 
 test-native: native
 	@echo "--- Rust native library tests (weeks 1-4) ---"
-	@LD_LIBRARY_PATH=lib $(SCHEME) --libdirs $(LIBDIRS) --script tests/test-native-rust.ss
+	@$(NATIVE_LD_VAR)=lib $(SCHEME) --libdirs $(LIBDIRS) --script tests/test-native-rust.ss
 	@echo "--- Rust native library tests (weeks 5-6) ---"
-	@LD_LIBRARY_PATH=lib $(SCHEME) --libdirs $(LIBDIRS) --script tests/test-native-rust-week5-6.ss
+	@$(NATIVE_LD_VAR)=lib $(SCHEME) --libdirs $(LIBDIRS) --script tests/test-native-rust-week5-6.ss
 
 audit-native:
 	cd $(RUST_NATIVE_DIR) && cargo audit
