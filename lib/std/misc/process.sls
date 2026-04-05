@@ -258,7 +258,9 @@
           #f
           (or (guard (e [#t #f]) (load-shared-object "libc.so.7"))
               (guard (e [#t #f]) (load-shared-object "libc.so.6"))
-              (load-shared-object "libc.so")))))
+              (guard (e [#t #f]) (load-shared-object "libc.so"))
+              (guard (e [#t #f]) (load-shared-object #f))  ;; macOS: resolve from current process
+              #f))))
 
   (define c-kill (foreign-procedure "kill" (int int) int))
   (define c-isatty (foreign-procedure "isatty" (int) int))

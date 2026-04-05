@@ -98,9 +98,17 @@
   ;; errno is thread-local via __errno_location on Linux / __error on FreeBSD
   (define c-errno-location
     (guard (e [#t #f])
-      (if (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb))
-        (foreign-procedure "__error" () void*)
-        (foreign-procedure "__errno_location" () void*))))
+      (let ((mt (symbol->string (machine-type))))
+
+        (if (or (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb))
+
+                (and (>= (string-length mt) 3)
+
+                     (string=? (substring mt (- (string-length mt) 3) (string-length mt)) "osx")))
+
+          (foreign-procedure "__error" () void*)
+
+          (foreign-procedure "__errno_location" () void*)))))
 
   (define (posix-errno)
     (if c-errno-location

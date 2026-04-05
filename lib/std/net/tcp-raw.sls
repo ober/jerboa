@@ -37,9 +37,17 @@
 
   ;; errno
   (define c-errno-location
-    (if (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb))
-      (foreign-procedure "__error" () void*)
-      (foreign-procedure "__errno_location" () void*)))
+    (let ((mt (symbol->string (machine-type))))
+
+      (if (or (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb))
+
+              (and (>= (string-length mt) 3)
+
+                   (string=? (substring mt (- (string-length mt) 3) (string-length mt)) "osx")))
+
+        (foreign-procedure "__error" () void*)
+
+        (foreign-procedure "__errno_location" () void*))))
   (define (get-errno) (foreign-ref 'int (c-errno-location) 0))
   (define EINTR 4)
 
