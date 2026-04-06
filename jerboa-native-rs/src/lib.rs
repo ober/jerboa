@@ -15,6 +15,7 @@ mod process_ctl;
 mod wasm;
 #[cfg(feature = "spidermonkey")]
 mod wasm_sm;
+mod socks5_server;
 
 #[cfg(target_os = "linux")]
 mod epoll;
