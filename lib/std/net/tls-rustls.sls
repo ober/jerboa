@@ -48,7 +48,9 @@
   ;; Load the Rust native library (dynamic builds).
   ;; In static builds, symbols are pre-registered via Sforeign_symbol.
   (define _native-loaded
-    (or (guard (e [#t #f]) (load-shared-object "libjerboa_native.so") #t)
+    (or (guard (e [#t #f]) (load-shared-object "libjerboa_native.dylib") #t)
+        (guard (e [#t #f]) (load-shared-object "libjerboa_native.so") #t)
+        (guard (e [#t #f]) (load-shared-object "lib/libjerboa_native.dylib") #t)
         (guard (e [#t #f]) (load-shared-object "lib/libjerboa_native.so") #t)
         #t))
 
