@@ -123,12 +123,16 @@
     (guard (exn [#t '()])
       (let ([entries (directory-list dir)])
         (filter (lambda (f) (glob-match? pattern f))
-                (map symbol->string entries)))))
+                (map (lambda (e) (if (symbol? e) (symbol->string e) e)) entries)))))
 
   (define (glob-expand-path parts prefix)
-    ;; Recursively match path components
+    ;; Recursively match path components.
+    ;; Handle absolute paths: if first component is "" (from leading /),
+    ;; recur with prefix "/" to anchor at filesystem root.
     (cond
       [(null? parts) (list prefix)]
+      [(and (string=? (car parts) "") (string=? prefix ""))
+       (glob-expand-path (cdr parts) "/")]
       [(string=? (car parts) "**")
        ;; Recursive descent
        (let ([rest (cdr parts)])
@@ -179,8 +183,8 @@
         (if (null? dirs) files
           (let* ([d (car dirs)]
                  [entries (map (lambda (e)
-                                (let ([path (string-append d "/" (symbol->string e))])
-                                  path))
+                                (let ([name (if (symbol? e) (symbol->string e) e)])
+                                  (string-append d "/" name)))
                               (directory-list d))]
                  [subdirs (filter file-directory? entries)])
             (loop (append (cdr dirs) subdirs)
