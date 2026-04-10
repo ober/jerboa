@@ -1,8 +1,10 @@
 # Unified Regex System for Jerboa — Implementation Plan
 
-**Branch:** `regex`  
-**Status:** Planning  
+**Branch:** `regex` (merged to master)  
+**Status:** Implemented — all three tiers complete, 236 tests passing  
 **Goal:** Make regex in Jerboa the best in any Scheme — zero escape hell, composable patterns, smart backend selection, LLM-friendly API.
+
+> **See [regex.md](regex.md) for the user-facing API reference.**
 
 ---
 

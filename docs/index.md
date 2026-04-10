@@ -22,6 +22,7 @@ Updated 2026-03-22.
 
 ## Standard Library Reference
 
+- [regex.md](regex.md) — Unified regex API, composable `rx`/`define-rx` patterns, PEG grammar system, raw string syntax
 - [data-structures.md](data-structures.md) — Persistent maps, lazy sequences, weak collections, collection protocol, relations, diff, equiv
 - [concurrency-extended.md](concurrency-extended.md) — Events, custodians, pools, delimited continuations, continuation marks, amb
 - [metaprogramming.md](metaprogramming.md) — Typeclasses, CK-macros, format compilation, chaperones, advice, binary types
