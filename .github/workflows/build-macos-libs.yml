@@ -1,0 +1,71 @@
+name: Build macOS Rust Libraries
+
+on:
+  workflow_dispatch:  # manual trigger from GitHub UI or gh CLI
+  push:
+    paths:
+      - 'jerboa-native-rs/**'
+      - '.github/workflows/build-macos-libs.yml'
+
+env:
+  RELEASE_TAG: macos-libs-v1
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-14        # Apple Silicon (M1+)
+            arch: arm64
+          - runner: macos-13        # Intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build libjerboa_native.a
+        run: |
+          cd jerboa-native-rs
+          cargo build --release
+          ls -lh target/release/libjerboa_native.a
+
+      - name: Clone jerboa-shell (for rust-coreutils)
+        run: git clone --depth 1 https://github.com/ober/jerboa-shell.git /tmp/jerboa-shell
+
+      - name: Build libjsh_coreutils.a
+        run: |
+          cd /tmp/jerboa-shell/rust-coreutils
+          cargo build --release
+          ls -lh target/release/libjsh_coreutils.a
+
+      - name: Stage artifacts with arch suffix
+        run: |
+          cp jerboa-native-rs/target/release/libjerboa_native.a \
+            libjerboa_native-macos-${{ matrix.arch }}.a
+          cp /tmp/jerboa-shell/rust-coreutils/target/release/libjsh_coreutils.a \
+            libjsh_coreutils-macos-${{ matrix.arch }}.a
+          ls -lh *.a
+
+      - name: Upload to GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Create the release if it doesn't exist yet
+          gh release view "$RELEASE_TAG" --repo ${{ github.repository }} >/dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" \
+              --repo ${{ github.repository }} \
+              --title "macOS Pre-built Rust Libraries" \
+              --notes "Pre-built static Rust libraries for macOS jsh builds (no Rust toolchain required).
+
+          Assets:
+          - libjerboa_native — crypto, regex, compression
+          - libjsh_coreutils — Rust coreutils
+
+          Built automatically by CI for arm64 (Apple Silicon) and x86_64 (Intel)."
+          gh release upload "$RELEASE_TAG" \
+            libjerboa_native-macos-${{ matrix.arch }}.a \
+            libjsh_coreutils-macos-${{ matrix.arch }}.a \
+            --repo ${{ github.repository }} --clobber
