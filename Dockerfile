@@ -8,6 +8,8 @@
 #   - Rust toolchain with x86_64-unknown-linux-musl target
 #   - All common dependency repos cloned under /build/mine/
 #   - musl-gcc, build-essential, and all linking deps pre-installed
+#   - TUI deps: libvterm, libpcre2, pre-built Scintilla/Lexilla/Termbox archives
+#   - chez-scintilla, chez-pcre2, jerboa-shell repos
 #
 # Downstream projects use this as their FROM image to skip the expensive
 # Chez double-build, Rust toolchain install, and repo cloning.
@@ -120,7 +122,39 @@ RUN git clone --depth 1 https://github.com/ober/gherkin.git && \
     git clone --depth 1 https://github.com/ober/jerboa-awk.git && \
     git clone --depth 1 https://github.com/ober/jerboa-sed.git && \
     git clone --depth 1 https://github.com/ober/jerboa-aws.git && \
-    git clone --depth 1 https://github.com/ober/chez-fuse.git
+    git clone --depth 1 https://github.com/ober/chez-fuse.git && \
+    git clone --depth 1 https://github.com/ober/chez-scintilla.git && \
+    git clone --depth 1 https://github.com/ober/chez-pcre2.git && \
+    git clone --depth 1 https://github.com/ober/jerboa-shell.git
+
+# ── TUI dependencies: libvterm, libpcre2, ncurses (static) ─────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libvterm-dev \
+    libpcre2-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Build Scintilla + Lexilla + Termbox static archives from source ────────
+# These are needed by jerboa-emacs TUI for the embedded terminal editor.
+# Layout: sci-vendor/scintilla/ (stock Scintilla + termbox backend inside)
+#         sci-vendor/lexilla/   (Lexilla from scintilla.org)
+# 1. Download stock Scintilla + Lexilla tarballs
+# 2. Clone scintilla-termbox backend into scintilla/termbox/
+# 3. Clone termbox_next into scintilla/termbox/termbox_next/
+# 4. Build all three static archives
+RUN mkdir -p /build/sci-vendor && cd /build/sci-vendor && \
+    SCINTILLA_VER=558 && LEXILLA_VER=544 && \
+    curl -sLO https://scintilla.org/scintilla${SCINTILLA_VER}.tgz && \
+    tar xf scintilla${SCINTILLA_VER}.tgz && rm scintilla${SCINTILLA_VER}.tgz && \
+    curl -sLO https://scintilla.org/lexilla${LEXILLA_VER}.tgz && \
+    tar xf lexilla${LEXILLA_VER}.tgz && rm lexilla${LEXILLA_VER}.tgz && \
+    git clone --depth 1 https://github.com/masahino/scintilla-termbox.git \
+      /build/sci-vendor/scintilla/termbox && \
+    cd /build/sci-vendor/scintilla/termbox && \
+    git clone --depth 1 https://github.com/masahino/termbox_next.git && \
+    cd /build/sci-vendor/scintilla/termbox/termbox_next && make -j$(nproc) && \
+    cd /build/sci-vendor/scintilla/termbox && make -j$(nproc) && \
+    cd /build/sci-vendor/lexilla/src && make -j$(nproc) && \
+    echo "Scintilla/Lexilla/Termbox static archives built"
 
 # ── Set default environment for downstream builds ───────────────────────────
 ENV JERBOA_MUSL_CHEZ_PREFIX=/build/chez-musl
@@ -131,6 +165,10 @@ ENV AWK_DIR=/build/mine/jerboa-awk/lib
 ENV SED_DIR=/build/mine/jerboa-sed/lib
 ENV AWS_DIR=/build/mine/jerboa-aws/lib
 ENV CHEZ_FUSE_DIR=/build/mine/chez-fuse/lib
+ENV CHEZ_SCINTILLA_DIR=/build/mine/chez-scintilla/src
+ENV CHEZ_PCRE2_DIR=/build/mine/chez-pcre2
+ENV SCI_VENDOR_DIR=/build/sci-vendor
+ENV JSH_DIR=/build/mine/jerboa-shell/src
 
 # ── Smoke test ───────────────────────────────────────────────────────────────
 RUN scheme --version && \
@@ -138,7 +176,10 @@ RUN scheme --version && \
     cargo --version && \
     test -d /build/chez-musl && \
     test -f /build/mine/jerboa/jerboa-native-rs/target/x86_64-unknown-linux-musl/release/libjerboa_native.a && \
-    echo "jerboa21/jerboa base image ready"
+    test -f /build/sci-vendor/scintilla/bin/scintilla.a && \
+    test -f /build/sci-vendor/lexilla/bin/liblexilla.a && \
+    test -f /build/sci-vendor/scintilla/termbox/termbox_next/bin/termbox.a && \
+    echo "jerboa21/jerboa base image ready (with TUI deps)"
 
 WORKDIR /build
 CMD ["/bin/bash"]
