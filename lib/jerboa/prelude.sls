@@ -67,6 +67,18 @@
     path-extension path-strip-extension
     path-join path-absolute?
 
+    ;; ---- std/regex ----
+    re re?
+    re-match? re-search
+    re-find-all re-groups
+    re-replace re-replace-all
+    re-split re-fold
+    re-match-full re-match-group re-match-groups
+    re-match-start re-match-end re-match-named
+
+    ;; ---- std/rx ----
+    rx define-rx
+
     ;; ---- std/misc/string ----
     string-split string-join string-trim
     string-prefix? string-suffix?
@@ -206,7 +218,9 @@
     random-integer                       ;; Gambit
     read-line                            ;; Gambit
     force-output                         ;; Gambit
-    string-map)                          ;; Racket/R7RS
+    string-map                           ;; Racket/R7RS
+    ;; Regex aliases (common generic names from Python, Ruby, JS training data)
+    regex-match regex-search regex-replace regex-replace-all)
 
   (import
     (except (chezscheme)
@@ -237,6 +251,8 @@
     (except (std sugar) try catch finally)
     (std text json)
     (std os path)
+    (std regex)
+    (std rx)
     (std misc string)
     (std misc list)
     (std misc alist)
@@ -264,5 +280,12 @@
       (if (null? args) (current-output-port) (car args))))
   (define (string-map f s)
     (list->string (map f (string->list s))))
+
+  ;; ---- Regex AI compatibility aliases ----
+  ;; LLMs trained on Python/Ruby/JavaScript commonly use these generic names.
+  (define (regex-match pat str)       (re-search pat str))
+  (define (regex-search pat str)      (re-search pat str))
+  (define (regex-replace pat str rep) (re-replace pat str rep))
+  (define (regex-replace-all pat str rep) (re-replace-all pat str rep))
 
   ) ;; end library

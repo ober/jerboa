@@ -15,7 +15,13 @@
     (jerboa runtime)
     (jerboa ffi)
     (jerboa modules)
-    (jerboa build)))
+    (jerboa build)
+    ;; Regex / rx / peg tier — compiled independently so errors are isolated
+    (std srfi srfi-115)
+    (std regex)
+    (std rx)
+    (std rx patterns)
+    (std peg)))
 
 (define compiled 0)
 (define skipped 0)

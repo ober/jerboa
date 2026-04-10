@@ -4,7 +4,7 @@ Last updated: 2026-03-22.
 
 ## Current State
 
-500 modules, ~123K lines, 2,900+ tests, 13 fuzz harnesses. Full Gerbil API surface on stock Chez Scheme. Rust native backend (`libjerboa_native.so`) for crypto, compression, regex, databases, and OS integration. Legacy chez-* C FFI shims still available as fallbacks. A complete editor (jerboa-emacs) with TUI + Qt, Org-mode, LSP, Git.
+500+ modules, ~126K lines, 3,100+ tests, 13 fuzz harnesses. Full Gerbil API surface on stock Chez Scheme. Rust native backend (`libjerboa_native.so`) for crypto, compression, regex, databases, and OS integration. Legacy chez-* C FFI shims still available as fallbacks. A complete editor (jerboa-emacs) with TUI + Qt, Org-mode, LSP, Git.
 
 ---
 

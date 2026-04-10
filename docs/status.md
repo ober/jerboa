@@ -89,6 +89,17 @@ contracts, structured concurrency, timeouts, and kernel sandboxing out of the bo
 | `(build reproducible)` | SHA-256 content hashing (FNV-1a fallback), safe `mkdir-p`, content-addressed artifact store |
 | `(build sbom)` | Cargo.lock + Cargo.toml parsers for Rust dep detection. `detect-all-deps` aggregates Scheme + C + Rust into SBOM |
 
+### Text Processing — Regex, Patterns, PEG
+
+| Module | Description |
+|--------|-------------|
+| `(std regex)` | Unified regex facade: `re`, `re-match?`, `re-search`, `re-find-all`, `re-replace`, `re-split`, `re-fold`, named captures via SRE `(=> name ...)`. Auto-selects Rust native or pregexp backend |
+| `(std rx)` | Composable pattern macros: `rx` compiles SRE inline, `define-rx` creates named patterns that can be spliced into later definitions. SRE keyword shadowing prevented |
+| `(std rx patterns)` | 30+ pre-built patterns: IPv4, email, UUID, semver, ISO 8601 date/time, identifiers, hex colors, numbers, quoted strings, URLs, JWT, MAC addresses |
+| `(std peg)` | PEG grammar system with packrat memoization: `define-grammar` macro, named captures, `drop`, `sep-by`, complement, mutual recursion. O(n) per rule |
+| `(std srfi srfi-115)` | SRFI-115 SRE compiler extended with `(embed ...)` for pattern splicing, `sre->named-groups` for capture tracking, char-class union via `(or ...)` inside `(~ ...)` |
+| `#r"..."` raw strings | Jerboa reader syntax: backslashes are literal, no escape processing. Eliminates regex escape hell |
+
 ### Linting
 
 | Module | Description |
