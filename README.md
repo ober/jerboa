@@ -341,7 +341,6 @@ Most user-level Gerbil code works unchanged:
 
 ## What Won't Work
 
-
 1. **Gerbil expander API** (`:gerbil/expander`) — not applicable
 2. **Gambit `##` primitives** — provide needed ones case-by-case
 3. **`(export #t)`** — re-export-everything needs explicit exports
