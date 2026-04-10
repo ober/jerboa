@@ -49,10 +49,23 @@
   ;; (embed "str") is handled by srfi-115's sre->pregexp: it embeds the
   ;; string as a raw pregexp fragment inside (?:...).
 
+  ;; SRE keywords that must never be replaced by registry entries.
+  ;; These are operators or named character classes in the SRE language.
+  (define sre-reserved-symbols
+    '(: seq or * + ? = >= ** => submatch submatch-named
+      not-submatch look-ahead neg-look-ahead look-behind neg-look-behind
+      w/nocase / char-range ~ complement - difference & intersection embed
+      ;; Named character classes
+      any alpha alphabetic digit numeric num alnum alphanumeric
+      space whitespace white upper upper-case lower lower-case
+      word ascii hex-digit xdigit epsilon eof))
+
   (define (splice-re-refs sre)
     (cond
       ;; Symbol with a registered re-object → (embed raw-pattern)
+      ;; But never replace SRE reserved keywords.
       [(and (symbol? sre)
+            (not (memq sre sre-reserved-symbols))
             (hashtable-ref rx-registry sre #f))
        => (lambda (r)
             (list 'embed (re-object-pat-string r)))]

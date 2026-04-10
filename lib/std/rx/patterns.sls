@@ -73,8 +73,8 @@
   (define-rx rx:domain (: rx:hostname "." rx:tld))
 
   ;; Email
-  ;; local part: printable ASCII excluding whitespace and @
-  (define-rx rx:email-local (+ (or alnum (/ #\! #\~))))
+  ;; local part: common email characters (RFC 5321 subset)
+  (define-rx rx:email-local (+ (or alnum "." "_" "+" "-")))
   (define-rx rx:email-domain rx:domain)
   (define-rx rx:email (: rx:email-local "@" rx:email-domain))
 

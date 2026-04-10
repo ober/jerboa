@@ -149,9 +149,11 @@
          [(ascii) "\\x00-\\x7f"]
          [(hex-digit xdigit) "0-9a-fA-F"]
          [else (error 'regexp "unknown char class" sre)])]
+      [(char? sre)
+       (char-class-quote-char sre)]
       [(string? sre)
        ;; Single string inside a char class — escape each character for use in [...]
-       (apply string-append (map pregexp-quote-char (string->list sre)))]
+       (apply string-append (map char-class-quote-char (string->list sre)))]
       [(pair? sre)
        (case (car sre)
          [(/ char-range)
@@ -179,6 +181,12 @@
 
   (define (pregexp-quote-char c)
     (if (memv c '(#\. #\* #\+ #\? #\( #\) #\[ #\] #\{ #\} #\\ #\^ #\$ #\|))
+      (string #\\ c)
+      (string c)))
+
+  ;; Inside a character class [...], only ], \, ^, and - are special.
+  (define (char-class-quote-char c)
+    (if (memv c '(#\] #\\ #\^ #\-))
       (string #\\ c)
       (string c)))
 

@@ -62,8 +62,6 @@
   ;; These are ONLY CALLED when native-available? is #t.
   (define c-native-compile
     (foreign-procedure "jerboa_regex_compile" (u8* size_t u8*) int))
-  (define c-native-is-match
-    (foreign-procedure "jerboa_regex_is_match" (unsigned-64 u8* size_t) int))
   (define c-native-find
     (foreign-procedure "jerboa_regex_find" (unsigned-64 u8* size_t u8* u8*) int))
   (define c-native-free
@@ -76,8 +74,7 @@
       (immutable pattern)       ;; original: string or SRE datum
       (immutable pat-string)    ;; normalized pregexp-compatible string
       (immutable named-groups)  ;; alist: (symbol . 1-based-group-index)
-      (immutable native-handle) ;; u64 integer handle, or #f
-      (immutable pregexp-obj))  ;; compiled pregexp object or #f
+      (immutable native-handle)) ;; u64 integer handle, or #f
     (sealed #t))
 
   (define-record-type re-match-object
@@ -164,8 +161,7 @@
                        (pattern->named-groups pat-str)
                        (car named-override))]
            [handle (try-native-compile! pat-str)]
-           [pxobj  (guard (exn [#t #f]) (pregexp pat-str))]
-           [obj    (make-re-object original pat-str named handle pxobj)])
+           [obj    (make-re-object original pat-str named handle)])
       (when handle (re-guardian obj))  ;; guard the object, not just the handle
       obj))
 
