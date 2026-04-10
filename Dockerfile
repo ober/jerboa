@@ -94,6 +94,7 @@ RUN git clone https://github.com/ober/ChezScheme.git chez-musl-src && \
 
 # ── Copy Jerboa library + native Rust source ──────────────────────────────────
 WORKDIR /build/mine
+COPY jerbuild.ss /build/mine/jerboa/jerbuild.ss
 COPY lib /build/mine/jerboa/lib
 COPY jerboa-native-rs /build/mine/jerboa/jerboa-native-rs
 
