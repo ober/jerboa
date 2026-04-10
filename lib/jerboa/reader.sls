@@ -508,8 +508,37 @@
                           (lloop (cons c chars)))))))))
              (error 'jerboa-read "invalid # dispatch" ch))))
 
+        ;; #r"..." raw string — backslashes are literal, no escape processing.
+        ;; Only \" is handled so you can embed a double-quote inside.
+        ((char=? ch #\r)
+         (reader-next! rs)
+         (let ((ch2 (reader-peek rs)))
+           (unless (and (char? ch2) (char=? ch2 #\"))
+             (error 'jerboa-read "expected \" after #r"))
+           (reader-next! rs)  ;; consume opening "
+           (annotate rs (read-raw-string rs) loc)))
+
         (else
          (error 'jerboa-read "invalid # dispatch" ch)))))
+
+  ;; read-raw-string: read until closing ", passing all chars through verbatim.
+  ;; \" is the only escape recognised — it produces a literal double-quote.
+  (define (read-raw-string rs)
+    (let loop ((chars '()))
+      (let ((ch (reader-next! rs)))
+        (cond
+          ((eof-object? ch)
+           (error 'jerboa-read "unterminated raw string"))
+          ((char=? ch #\")
+           (list->string (reverse chars)))
+          ((and (char=? ch #\\)
+                (let ((next (reader-peek rs)))
+                  (and (char? next) (char=? next #\"))))
+           ;; \" inside raw string → literal quote char
+           (reader-next! rs)
+           (loop (cons #\" chars)))
+          (else
+           (loop (cons ch chars)))))))
 
   ;; Read chars that could be part of a number literal
   (define (read-number-chars rs)

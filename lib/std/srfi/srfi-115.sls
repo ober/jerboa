@@ -7,7 +7,10 @@
     regexp regexp? regexp-matches regexp-matches?
     regexp-search regexp-replace regexp-replace-all
     regexp-fold regexp-extract regexp-split
-    regexp-match? regexp-match-submatch regexp-match-count)
+    regexp-match? regexp-match-submatch regexp-match-count
+    ;; Extensions: convert SRE to pregexp pattern string and named-groups alist
+    sre->pattern-string
+    sre->named-groups)
 
   (import (chezscheme)
           (std pregexp))
@@ -87,6 +90,17 @@
             (sre->pregexp (car args))]  ;; approximation
            [(& intersection)
             (sre->pregexp (car args))]  ;; approximation
+           [(=>)
+            ;; (=> name sre ...) — named capture group
+            ;; Compiles to a plain numbered group (...).
+            ;; The name→index mapping is tracked separately via sre->named-groups.
+            (string-append "(" (apply string-append (map sre->pregexp (cdr args))) ")")]
+           [(embed)
+            ;; (embed "raw-pattern-string") — embed a pre-compiled pregexp
+            ;; pattern string directly, without any quoting. Used by (std rx)
+            ;; to splice compiled re-object patterns into larger SRE forms.
+            ;; Wrapped in a non-capturing group for safety.
+            (string-append "(?:" (car args) ")")]
            [else
             (error 'regexp "unsupported SRE form" head)]))]
       [else (error 'regexp "unsupported SRE" sre)]))
@@ -135,6 +149,9 @@
          [(ascii) "\\x00-\\x7f"]
          [(hex-digit xdigit) "0-9a-fA-F"]
          [else (error 'regexp "unknown char class" sre)])]
+      [(string? sre)
+       ;; Single string inside a char class — escape each character for use in [...]
+       (apply string-append (map pregexp-quote-char (string->list sre)))]
       [(pair? sre)
        (case (car sre)
          [(/ char-range)
@@ -144,6 +161,9 @@
                     (string-append acc
                       (char->pregexp-class (car rest)) "-"
                       (char->pregexp-class (cadr rest))))))]
+         [(or)
+          ;; (or cls1 cls2 ...) inside a char class → union (concatenate class bodies)
+          (apply string-append (map sre-char-class-body (cdr sre)))]
          [else (error 'regexp "unsupported char class form" sre)])]
       [else (error 'regexp "unsupported char class" sre)]))
 
@@ -281,5 +301,36 @@
                      [before (substring str pos match-start)]
                      [next-pos (max (+ match-start 1) match-end)])
                 (loop next-pos (cons before acc)))))))))
+
+  ;; Public bridge: convert an SRE s-expression to a pregexp pattern string.
+  ;; Used by (std regex) so it can feed SRE patterns into any backend without
+  ;; duplicating the SRE compiler.
+  (define (sre->pattern-string sre)
+    (sre->pregexp sre))
+
+  ;; sre->named-groups: walk SRE tree, return alist of (name . 1-based-group-index).
+  ;; Groups are numbered by counting all capturing forms (=>, submatch, submatch-named)
+  ;; in left-to-right depth-first order (i.e. order of opening parenthesis).
+  (define (sre->named-groups sre)
+    (define idx 0)
+    (define acc '())
+    (define (scan! sre)
+      (when (pair? sre)
+        (let ([head (car sre)] [rest (cdr sre)])
+          (cond
+            [(eq? head '=>)
+             ;; (=> name body ...) — this is a named capturing group
+             (set! idx (+ idx 1))
+             (set! acc (cons (cons (car rest) idx) acc))
+             (for-each scan! (cdr rest))]
+            [(memq head '(submatch submatch-named))
+             ;; anonymous or differently-named capturing group — count it
+             (set! idx (+ idx 1))
+             (for-each scan! rest)]
+            [else
+             ;; Non-capturing form — recurse into all sub-SREs
+             (for-each scan! rest)]))))
+    (scan! sre)
+    (reverse acc))
 
 ) ;; end library
