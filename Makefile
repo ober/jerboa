@@ -7,7 +7,7 @@ CHEZ_EXT_LIBDIRS = $(CHEZ_EXT_DIR)/chez-https/src:$(CHEZ_EXT_DIR)/chez-ssl/src:$
 # Shared object paths for legacy FFI-based chez-* libraries
 CHEZ_EXT_LDPATH = $(CHEZ_EXT_DIR)/chez-ssl:$(CHEZ_EXT_DIR)/chez-zlib:$(CHEZ_EXT_DIR)/chez-pcre2:$(CHEZ_EXT_DIR)/chez-leveldb:$(CHEZ_EXT_DIR)/chez-epoll:$(CHEZ_EXT_DIR)/chez-inotify:$(CHEZ_EXT_DIR)/chez-crypto:$(CHEZ_EXT_DIR)/chez-sqlite:$(CHEZ_EXT_DIR)/chez-postgresql
 
-.PHONY: build test test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded test-features test-wrappers test-phase4a test-phase4b test-phase4c test-phase4d test-phase4e test-phase4f test-phase5 test-phase5e test-phase6 test-phase7 test-phase8 test-functional test-repl test-security test-native test-gaps native clean-native audit-native clean fuzz fuzz-smoke fuzz-deep fuzz-reader-fuzz fuzz-json-fuzz fuzz-http2-fuzz fuzz-websocket-fuzz fuzz-dns-fuzz fuzz-pregexp-fuzz fuzz-csv-fuzz fuzz-base64-fuzz fuzz-hex-fuzz fuzz-uri-fuzz fuzz-format-fuzz fuzz-router-fuzz fuzz-sandbox-fuzz test-rawstring test-regex test-rx test-peg test-regex-all
+.PHONY: build test test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded test-features test-wrappers test-phase4a test-phase4b test-phase4c test-phase4d test-phase4e test-phase4f test-phase5 test-phase5e test-phase6 test-phase7 test-phase8 test-functional test-repl test-security test-native test-gaps native clean-native audit-native clean fuzz fuzz-smoke fuzz-deep fuzz-reader-fuzz fuzz-json-fuzz fuzz-http2-fuzz fuzz-websocket-fuzz fuzz-dns-fuzz fuzz-pregexp-fuzz fuzz-csv-fuzz fuzz-base64-fuzz fuzz-hex-fuzz fuzz-uri-fuzz fuzz-format-fuzz fuzz-router-fuzz fuzz-sandbox-fuzz test-rawstring test-regex test-rx test-peg test-regex-all docker-build docker-push
 
 build:
 	$(SCHEME) --libdirs $(LIBDIRS) --script support/build.ss
@@ -376,3 +376,19 @@ fuzz-sandbox-fuzz:
 clean:
 	find lib -name "*.so" -delete 2>/dev/null || true
 	find lib -name "*.wpo" -delete 2>/dev/null || true
+
+# ── Docker base image (jerboa21/jerboa) ──────────────────────────────────────
+# Base image for building static musl binaries of Jerboa projects.
+# Includes: stock Chez, musl Chez, jerboa lib, musl-gcc, build deps.
+DOCKER_IMAGE = jerboa21/jerboa
+
+docker-build:
+	@echo "=== Building $(DOCKER_IMAGE) base image ==="
+	docker build --platform linux/amd64 -t $(DOCKER_IMAGE) .
+	@echo ""
+	@docker images $(DOCKER_IMAGE) --format "Image: {{.Repository}}:{{.Tag}}  Size: {{.Size}}"
+
+docker-push: docker-build
+	@echo "=== Pushing $(DOCKER_IMAGE) to Docker Hub ==="
+	docker push $(DOCKER_IMAGE)
+	@echo "Pushed $(DOCKER_IMAGE)"
