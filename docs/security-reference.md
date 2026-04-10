@@ -349,7 +349,7 @@ Reads directly from `/dev/urandom`. Never uses Chez's `(random N)` for security 
 
 ### Digests -- `(std crypto digest)` and `(std crypto native)`
 
-Via OpenSSL libcrypto FFI (legacy) or Rust ring (recommended): MD5, SHA-1, SHA-256, SHA-384, SHA-512.
+Via Rust ring (`(std crypto native)`): MD5, SHA-1, SHA-256, SHA-384, SHA-512. No OpenSSL dependency.
 
 ### HMAC -- `(std crypto hmac)` and `(std crypto native)`
 

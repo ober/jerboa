@@ -46,8 +46,8 @@ Replacing them with a single Rust shared library (`libjerboa_native.so`) provide
 
 | Library                    | Module(s)                                                     | Purpose                                                                                      |
 |----------------------------|---------------------------------------------------------------|----------------------------------------------------------------------------------------------|
-| **libcrypto.so** (OpenSSL) | `std/crypto/native`, `std/crypto/aead`, `std/crypto/password` | Digests (MD5, SHA-*), HMAC, AES-GCM, PBKDF2, CSPRNG (`RAND_bytes`), constant-time comparison |
-| **libssl.so** (OpenSSL)    | `std/net/tls`                                                 | TLS 1.2/1.3 protocol                                                                         |
+| ~~**libcrypto.so** (OpenSSL)~~ | ~~`std/crypto/native`~~  | **Eliminated** — Digests, HMAC, AES-GCM, PBKDF2, CSPRNG now via ring in `libjerboa_native` |
+| ~~**libssl.so** (OpenSSL)~~    | ~~`std/net/tls`~~        | **Eliminated** — TLS 1.2/1.3 now via rustls in `libjerboa_native`                           |
 
 ### Optional Wrappers (chez-* repos)
 

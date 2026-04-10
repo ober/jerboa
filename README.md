@@ -105,7 +105,7 @@ scheme --libdirs lib --script your-file.ss
 | `(std os temporaries)` | Temporary file creation |
 | `(std os signal)` | POSIX signal constants + handlers |
 | `(std os fdio)` | File descriptor I/O |
-| `(std crypto digest)` | MD5/SHA hashing via openssl |
+| `(std crypto digest)` | MD5/SHA hashing via ring (Rust) |
 | `(std srfi srfi-13)` | SRFI-13 string operations |
 | `(std srfi srfi-19)` | Date/time handling |
 
