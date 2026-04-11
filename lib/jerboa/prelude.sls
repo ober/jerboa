@@ -209,6 +209,16 @@
     ;; ---- std/ergo ----
     using : maybe list-of?
 
+    ;; ---- std/misc/atom (Gerbil atom + Clojure aliases) ----
+    ;; Gerbil-style:
+    atom atom? atom-deref atom-reset! atom-swap! atom-update!
+    ;; Clojure-style aliases (familiar to clojure users)
+    deref reset! swap! compare-and-set!
+
+    ;; ---- std/misc/shared (atomic cell with CAS) ----
+    make-shared shared? shared-ref shared-set!
+    shared-update! shared-cas! shared-swap!
+
     ;; ---- AI compatibility aliases ----
     ;; Common names LLMs hallucinate from Racket/Gerbil/Gambit/CL training data.
     ;; These are thin aliases so AI-generated code works on the first try.
@@ -231,7 +241,8 @@
             with-input-from-string with-output-to-string
             iota 1+ 1-
             partition
-            make-date make-time)
+            make-date make-time
+            atom?)
     (only (jerboa core)
       def def* defrule defrules
       defstruct defclass defmethod
@@ -263,7 +274,9 @@
     (std datetime)
     (std debug pp)
     (std csv)
-    (std ergo))
+    (std ergo)
+    (std misc atom)
+    (std misc shared))
 
   ;; ---- AI compatibility aliases ----
   (define hash-has-key? hash-key?)

@@ -4,6 +4,9 @@
 ;;; A shared cell wraps a value with a mutex for thread-safe access.
 ;;; Similar to atom but with compare-and-swap semantics.
 ;;;
+;;; For Clojure-style atom/deref/swap!/reset!/compare-and-set! aliases,
+;;; see (std misc atom) — that module exposes the clojure-familiar names.
+;;;
 ;;; Usage:
 ;;;   (import (std misc shared))
 ;;;   (define s (make-shared 0))
