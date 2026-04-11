@@ -1292,6 +1292,66 @@ tests. Half a day for the basic version; another half-day for hierarchies.
 
 ### 4.6 Protocols (`defprotocol` / `extend-protocol` / `extend-type`)
 
+**[landed]** Phase E.3 shipped `(std protocol)`. The module exports
+`defprotocol`, `extend-type`, `extend-protocol`, `satisfies?`,
+`protocol?`, `protocol-name`, and `protocol-methods`.
+
+```scheme
+(import (jerboa prelude) (std protocol))
+
+(defprotocol Shape
+  (area      (self))
+  (perimeter (self)))
+
+(defstruct circle (r))
+(extend-type circle::t Shape
+  (area      (c) (* 314/100 (circle-r c) (circle-r c)))
+  (perimeter (c) (* 2 314/100 (circle-r c))))
+
+(extend-protocol Shape
+  ('string (area (s) (string-length s))
+           (perimeter (s) (* 4 (string-length s))))
+  ('pair   (area (p) (length p))
+           (perimeter (p) (* 2 (length p)))))
+
+(area (make-circle 10))   ;; => 314
+(area "hello")            ;; => 5
+(satisfies? Shape "foo")  ;; => #t
+```
+
+Type keys are either record type descriptors (rtds) for records or
+symbols for built-ins (`'string`, `'vector`, `'pair`, `'null`,
+`'number`, `'symbol`, `'boolean`, `'char`, `'procedure`, `'hashtable`,
+`'bytevector`, `'eof`). The sentinel `'any` acts as a universal
+fallback. `defstruct` users pass `name::t`; `define-record-type` users
+pass `(record-type-descriptor name)`.
+
+Rather than layering over `(std clos)` as the design doc originally
+sketched, the implementation uses a direct two-level eq?-hashtable
+(`type-key → method-sym → procedure`) guarded by a single mutex. This
+keeps dispatch overhead to one hashtable lookup per call and avoids
+the CLOS method-resolution machinery entirely — protocols don't need
+class hierarchies, they need open-world type dispatch, and the table
+lookup gives us that with minimal moving parts. Method bodies run
+outside the dispatch lock so a method can recursively invoke other
+protocol methods without deadlocking.
+
+`satisfies?` checks for a type-specific implementation — an `'any`
+fallback does NOT count, matching Clojure's semantics where
+`Object`-level methods are separate from protocol participation.
+
+Tests: `tests/test-protocol.ss` — 32 tests covering basic dispatch
+(string / pair / record), `extend-protocol` bulk form, `satisfies?`
+(positive / negative / partial / non-protocol), `'any` fallback
+interaction with type-specific methods, method redefinition replaces,
+multi-argument dispatch on first arg, and introspection.
+
+Deferred features: `isa?` hierarchies (Clojure's multimethod hierarchy
+system), `prefer-method`, and classifier-style dispatch. These can
+layer on top of the current implementation without breaking changes.
+
+---
+
 **The gap.** Clojure protocols are open-world method sets. You define
 the set of methods a protocol requires, then any number of types can
 opt in by providing implementations:
@@ -1863,7 +1923,7 @@ in this doc. **[deferred]** items are non-goals.
 | Sorted-set | [current] `(std sorted-set)` | §4.3 landed |
 | Metadata (`with-meta`/`meta`) | [gap] | §4.4 |
 | `defmulti`/`defmethod` value-dispatch | [landed] `(std multi)` | §4.5 landed |
-| `defprotocol`/`extend-type` | [gap] | §4.6 |
+| `defprotocol`/`extend-type` | [landed] `(std protocol)` | §4.6 landed |
 | Atom watches | [current] `(std misc atom)` | §4.7 landed |
 | Volatiles | [current] `(std misc atom)` | §4.7 landed |
 | Agents | [gap] | §4.8 |
