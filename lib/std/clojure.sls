@@ -86,7 +86,16 @@
     persistent-queue pqueue-empty pqueue?
     pqueue-conj pqueue-peek pqueue-pop
     pqueue-count pqueue->list
-    pqueue-empty? list->pqueue)
+    pqueue-empty? list->pqueue
+
+    ;; ---- Re-exports from (std sorted-set) ----
+    sorted-set sorted-set-by sorted-set?
+    sorted-set-empty
+    sorted-set-add sorted-set-remove
+    sorted-set-contains? sorted-set-size
+    sorted-set-min sorted-set-max
+    sorted-set-range sorted-set->list
+    sorted-set-fold)
 
   (import (except (chezscheme)
                   make-hash-table hash-table?
@@ -109,7 +118,8 @@
           (std concur hash)
           (std misc atom)
           (std misc nested)
-          (std pqueue))
+          (std pqueue)
+          (std sorted-set))
 
   ;; =========================================================================
   ;; Numerics
@@ -136,6 +146,7 @@
       [(pair? coll) #f]
       [(persistent-map? coll) (zero? (persistent-map-size coll))]
       [(persistent-set? coll) (zero? (persistent-set-size coll))]
+      [(sorted-set? coll) (zero? (sorted-set-size coll))]
       [(concurrent-hash? coll) (zero? (concurrent-hash-size coll))]
       [(hash-table? coll) (zero? (hash-length coll))]
       [(vector? coll) (zero? (vector-length coll))]
@@ -152,6 +163,7 @@
       [(pair? coll) (length coll)]
       [(persistent-map? coll) (persistent-map-size coll)]
       [(persistent-set? coll) (persistent-set-size coll)]
+      [(sorted-set? coll) (sorted-set-size coll)]
       [(concurrent-hash? coll) (concurrent-hash-size coll)]
       [(hash-table? coll) (hash-length coll)]
       [(vector? coll) (vector-length coll)]
@@ -170,12 +182,15 @@
          ;; Sets: membership check — return `key` if present
          [(persistent-set? coll)
           (if (persistent-set-contains? coll key) key default)]
+         [(sorted-set? coll)
+          (if (sorted-set-contains? coll key) key default)]
          [else (nested-get coll key default)])]))
 
   (define (contains? coll key)
     (cond
       [(persistent-map? coll) (persistent-map-has? coll key)]
       [(persistent-set? coll) (persistent-set-contains? coll key)]
+      [(sorted-set? coll) (sorted-set-contains? coll key)]
       [(concurrent-hash? coll) (concurrent-hash-key? coll key)]
       [(hash-table? coll) (hash-key? coll key)]
       [(vector? coll)
@@ -337,6 +352,7 @@
     (cond
       [(null? coll) #f]
       [(pair? coll) (car coll)]
+      [(sorted-set? coll) (sorted-set-min coll)]
       [(vector? coll)
        (if (zero? (vector-length coll)) #f (vector-ref coll 0))]
       [(string? coll)
@@ -373,6 +389,7 @@
       [(pair? coll)
        (let loop ([c coll])
          (if (null? (cdr c)) (car c) (loop (cdr c))))]
+      [(sorted-set? coll) (sorted-set-max coll)]
       [(vector? coll)
        (let ([n (vector-length coll)])
          (if (zero? n) #f (vector-ref coll (- n 1))))]
@@ -425,6 +442,10 @@
        (let loop ([s coll] [rest xs])
          (if (null? rest) s
              (loop (persistent-set-add s (car rest)) (cdr rest))))]
+      [(sorted-set? coll)
+       (let loop ([s coll] [rest xs])
+         (if (null? rest) s
+             (loop (sorted-set-add s (car rest)) (cdr rest))))]
       [else (error 'conj "unsupported collection type" coll)]))
 
   ;; =========================================================================
@@ -566,6 +587,8 @@
        (if (zero? (persistent-map-size coll)) #f (persistent-map->list coll))]
       [(persistent-set? coll)
        (if (zero? (persistent-set-size coll)) #f (persistent-set->list coll))]
+      [(sorted-set? coll)
+       (if (zero? (sorted-set-size coll)) #f (sorted-set->list coll))]
       [(concurrent-hash? coll)
        (if (zero? (concurrent-hash-size coll))
            #f
@@ -782,13 +805,31 @@
        (let loop ([cur s] [rest items])
          (if (null? rest) cur
              (loop (persistent-set-remove cur (car rest)) (cdr rest))))]
-      [else (error 'disj "expected a persistent set" s)]))
+      [(sorted-set? s)
+       (let loop ([cur s] [rest items])
+         (if (null? rest) cur
+             (loop (sorted-set-remove cur (car rest)) (cdr rest))))]
+      [else (error 'disj "expected a set" s)]))
 
   ;; Clojure's clojure.set/ operations
+  ;;
+  ;; Both `persistent-set` (HAMT) and `sorted-set` (red-black tree) are
+  ;; valid set-types. When the first operand is a sorted-set we dispatch
+  ;; to a sorted-set-preserving implementation that folds elements from
+  ;; the other operands — otherwise we use the HAMT-optimized primitives
+  ;; from (std pset).
+
   (define (union . sets)
     (cond
       [(null? sets) pset-empty]
       [(null? (cdr sets)) (car sets)]
+      [(sorted-set? (car sets))
+       (let loop ([acc (car sets)] [rest (cdr sets)])
+         (if (null? rest) acc
+             (loop (sorted-set-fold (car rest)
+                     (lambda (x a) (sorted-set-add a x))
+                     acc)
+                   (cdr rest))))]
       [else
        (let loop ([acc (car sets)] [rest (cdr sets)])
          (if (null? rest) acc
@@ -798,6 +839,15 @@
     (cond
       [(null? sets) pset-empty]
       [(null? (cdr sets)) (car sets)]
+      [(sorted-set? (car sets))
+       (let loop ([acc (car sets)] [rest (cdr sets)])
+         (if (null? rest) acc
+             (let ([other (car rest)])
+               (loop (sorted-set-fold acc
+                       (lambda (x a)
+                         (if (contains? other x) a (sorted-set-remove a x)))
+                       acc)
+                     (cdr rest)))))]
       [else
        (let loop ([acc (car sets)] [rest (cdr sets)])
          (if (null? rest) acc
@@ -807,12 +857,26 @@
     (cond
       [(null? sets) pset-empty]
       [(null? (cdr sets)) (car sets)]
+      [(sorted-set? (car sets))
+       (let loop ([acc (car sets)] [rest (cdr sets)])
+         (if (null? rest) acc
+             (loop (sorted-set-fold (car rest)
+                     (lambda (x a) (sorted-set-remove a x))
+                     acc)
+                   (cdr rest))))]
       [else
        (let loop ([acc (car sets)] [rest (cdr sets)])
          (if (null? rest) acc
              (loop (persistent-set-difference acc (car rest)) (cdr rest))))]))
 
-  (define (subset? s1 s2) (persistent-set-subset? s1 s2))
-  (define (superset? s1 s2) (persistent-set-subset? s2 s1))
+  (define (subset? s1 s2)
+    (cond
+      [(sorted-set? s1)
+       (sorted-set-fold s1
+         (lambda (x acc) (and acc (contains? s2 x)))
+         #t)]
+      [else (persistent-set-subset? s1 s2)]))
+
+  (define (superset? s1 s2) (subset? s2 s1))
 
 ) ;; end library

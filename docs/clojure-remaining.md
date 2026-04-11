@@ -913,8 +913,15 @@ persistent-queue pqueue-empty peek pop
 
 ### 4.3 Persistent sorted-set
 
-**Status.** `(std ds sorted-map)` provides a persistent sorted map (AVL
-or red-black — needs verification). There is no sorted set.
+**Status.** [landed] `(std sorted-set)` now wraps `(std ds sorted-map)`
+(red-black tree) and exposes Clojure's `sorted-set` surface. The module
+is re-exported from `(std clojure)` with polymorphic `conj` / `disj` /
+`contains?` / `count` / `first` / `last` / `seq` dispatch plus the
+`clojure.set` algebra (`union` / `intersection` / `difference` /
+`subset?` / `superset?`) that now preserves sorted-set identity when
+the first operand is a sorted set. See
+`tests/test-sorted-set.ss` for coverage of the primitives and the
+polymorphic surface.
 
 **Design.**
 
@@ -1706,7 +1713,7 @@ in this doc. **[deferred]** items are non-goals.
 | Atoms + deref/swap!/reset!/CAS | [current] | — |
 | Transducer ↔ pmap/pset bridge | [current] `(std transducer)` | §4.1 landed |
 | PersistentQueue | [current] `(std pqueue)` | §4.2 landed |
-| Sorted-set | [gap] | §4.3 |
+| Sorted-set | [current] `(std sorted-set)` | §4.3 landed |
 | Metadata (`with-meta`/`meta`) | [gap] | §4.4 |
 | `defmulti`/`defmethod` value-dispatch | [gap] | §4.5 |
 | `defprotocol`/`extend-type` | [gap] | §4.6 |
