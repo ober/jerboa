@@ -50,13 +50,25 @@
   (define c-fcntl     (foreign-procedure "fcntl" (int int int) int))
 
   ;; errno access for EINTR retry
+  ;; Symbol naming varies by libc:
+  ;;   glibc / musl (Linux)  → __errno_location
+  ;;   FreeBSD / macOS       → __error
+  ;;   bionic (Android)      → __errno
+  ;; We can't rely on machine-type alone (tarm64le covers both Linux and
+  ;; Android), so probe with foreign-entry? at load time.
   (define c-errno-location
     (let ((mt (symbol->string (machine-type))))
-      (if (or (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb))
-              (and (>= (string-length mt) 3)
-                   (string=? (substring mt (- (string-length mt) 3) (string-length mt)) "osx")))
-        (foreign-procedure "__error" () void*)
-        (foreign-procedure "__errno_location" () void*))))
+      (cond
+        ((or (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb))
+             (and (>= (string-length mt) 3)
+                  (string=? (substring mt (- (string-length mt) 3) (string-length mt)) "osx")))
+         (foreign-procedure "__error" () void*))
+        ((foreign-entry? "__errno_location")
+         (foreign-procedure "__errno_location" () void*))
+        ((foreign-entry? "__errno")
+         (foreign-procedure "__errno" () void*))
+        (else
+         (foreign-procedure "__errno_location" () void*)))))
   (define (get-errno) (foreign-ref 'int (c-errno-location) 0))
   (define EINTR 4)
   (define *freebsd?* (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb)))
