@@ -2,50 +2,60 @@
 
 A comprehensive inventory of what Clojure offers that Jerboa/Chez Scheme doesn't (or has in weaker form), with detailed explanations of what each feature does and why Clojure developers consider it a game-changer.
 
-Organized from most foundational to most specialized. In-progress Jerboa work noted where relevant.
+Organized from most foundational to most specialized. Status markers:
+
+- **[landed]** — shipped in Jerboa; see the section for the module name
+- **[partial]** — some of the feature exists, some parts still missing
+- **[open]** — real gap, still worth implementing
+- **[deferred]** — real gap, intentionally deferred (see section for reasoning)
+- **[non-goal]** — deliberately not pursued (see section)
+
+Last updated: 2026-04-11 after Phase E of the Clojure-compat campaign (metadata, multimethods, protocols, atom watches, agents, record-as-map). See [`clojure-remaining.md`](./clojure-remaining.md) for the campaign's own design doc.
 
 ---
 
 ## Table of Contents
 
 1. [The Philosophical Foundation](#1-the-philosophical-foundation)
-2. [Persistent Immutable Data Structures](#2-persistent-immutable-data-structures) (in progress)
-3. [Transients](#3-transients)
-4. [The Unified Sequence Abstraction](#4-the-unified-sequence-abstraction)
-5. [Lazy Sequences](#5-lazy-sequences)
-6. [Transducers](#6-transducers)
-7. [Reducers](#7-reducers)
-8. [The Four Reference Types](#8-the-four-reference-types)
-9. [Software Transactional Memory (STM)](#9-software-transactional-memory-stm)
-10. [core.async (CSP Channels)](#10-coreasync-csp-channels) (in progress)
-11. [Protocols](#11-protocols)
-12. [Multimethods](#12-multimethods)
-13. [Records and Types](#13-records-and-types)
-14. [Destructuring Everywhere](#14-destructuring-everywhere)
-15. [Metadata](#15-metadata)
-16. [Dynamic Vars and Thread-Local Binding](#16-dynamic-vars-and-thread-local-binding)
-17. [Clojure Spec](#17-clojure-spec)
-18. [Namespaces](#18-namespaces)
-19. [EDN and Tagged Literals](#19-edn-and-tagged-literals)
-20. [Reader Conditionals](#20-reader-conditionals)
-21. [Rich Number Tower](#21-rich-number-tower)
-22. [Keyword/Symbol Semantics](#22-keywordsymbol-semantics)
-23. [`loop`/`recur` and Tail Calls](#23-looprecur-and-tail-calls)
-24. [`for` Comprehensions](#24-for-comprehensions)
-25. [Delays, Futures, and Promises](#25-delays-futures-and-promises)
-26. [Memoize, Trampoline, and Friends](#26-memoize-trampoline-and-friends)
-27. [Exception Design: ex-info](#27-exception-design-ex-info)
-28. [core.match](#28-corematch)
-29. [core.logic (miniKanren)](#29-corelogic-minikanren)
-30. [Zippers](#30-zippers)
-31. [Specter](#31-specter)
-32. [Datafy / Nav](#32-datafy--nav)
-33. [clojure.walk](#33-clojurewalk)
-34. [Set Operations](#34-set-operations)
-35. [Property-Based Testing (test.check)](#35-property-based-testing-testcheck)
-36. [Component Lifecycle Libraries](#36-component-lifecycle-libraries)
-37. [REPL-Driven Development Culture](#37-repl-driven-development-culture)
-38. [Miscellaneous Small Things That Add Up](#38-miscellaneous-small-things-that-add-up)
+2. [Persistent Immutable Data Structures](#2-persistent-immutable-data-structures) **[landed]**
+3. [Transients](#3-transients) **[landed]**
+4. [The Unified Sequence Abstraction](#4-the-unified-sequence-abstraction) **[partial]**
+5. [Lazy Sequences](#5-lazy-sequences) **[open]**
+6. [Transducers](#6-transducers) **[landed]**
+7. [Reducers](#7-reducers) **[open]**
+8. [The Four Reference Types](#8-the-four-reference-types) **[partial]** — atoms, agents, volatiles landed; refs (STM) open
+9. [Software Transactional Memory (STM)](#9-software-transactional-memory-stm) **[open]**
+10. [core.async (CSP Channels)](#10-coreasync-csp-channels) **[landed]** — minus parked-go CPS
+11. [Protocols](#11-protocols) **[landed]**
+12. [Multimethods](#12-multimethods) **[landed]**
+13. [Records and Types](#13-records-and-types) **[landed]**
+14. [Destructuring Everywhere](#14-destructuring-everywhere) **[partial]**
+15. [Metadata](#15-metadata) **[landed]**
+16. [Dynamic Vars and Thread-Local Binding](#16-dynamic-vars-and-thread-local-binding) **[partial]**
+17. [Clojure Spec](#17-clojure-spec) **[non-goal]**
+18. [Namespaces](#18-namespaces) **[partial]**
+19. [EDN and Tagged Literals](#19-edn-and-tagged-literals) **[open]**
+20. [Reader Conditionals](#20-reader-conditionals) **[deferred]**
+21. [Rich Number Tower](#21-rich-number-tower) **[landed]** (via Chez)
+22. [Keyword/Symbol Semantics](#22-keywordsymbol-semantics) **[partial]**
+23. [`loop`/`recur` and Tail Calls](#23-looprecur-and-tail-calls) **[landed]** (proper TCO via Chez)
+24. [`for` Comprehensions](#24-for-comprehensions) **[partial]**
+25. [Delays, Futures, and Promises](#25-delays-futures-and-promises) **[partial]**
+26. [Memoize, Trampoline, and Friends](#26-memoize-trampoline-and-friends) **[partial]**
+27. [Exception Design: ex-info](#27-exception-design-ex-info) **[open]**
+28. [core.match](#28-corematch) **[landed]**
+29. [core.logic (miniKanren)](#29-corelogic-minikanren) **[open]**
+30. [Zippers](#30-zippers) **[open]**
+31. [Specter](#31-specter) **[open]**
+32. [Datafy / Nav](#32-datafy--nav) **[open]**
+33. [clojure.walk](#33-clojurewalk) **[open]**
+34. [Set Operations](#34-set-operations) **[landed]**
+35. [Property-Based Testing (test.check)](#35-property-based-testing-testcheck) **[open]**
+36. [Component Lifecycle Libraries](#36-component-lifecycle-libraries) **[open]**
+37. [REPL-Driven Development Culture](#37-repl-driven-development-culture) **[partial]**
+38. [Miscellaneous Small Things That Add Up](#38-miscellaneous-small-things-that-add-up) **[partial]**
+
+**See also:** [Where to focus next](#still-worth-implementing-as-of-2026-04-11) — a condensed roadmap of the remaining open items ranked by value/effort.
 
 ---
 
@@ -81,7 +91,7 @@ Jerboa has `[...]` aliased to `(...)` and has strings/numbers, but no literal ma
 
 ## 2. Persistent Immutable Data Structures
 
-**Status in Jerboa**: In progress.
+**Status in Jerboa**: **[landed]** — `(std pmap)` / `(std pvec)` / `(std pset)` / `(std pqueue)` / `(std sorted-set)`. All HAMT-based where applicable, structural equality and hashing, polymorphic iteration via `(std iter)`.
 
 Clojure's defining technical achievement. Four core persistent collections, all implemented via **Hash Array Mapped Tries (HAMT)** or variants, giving effectively-O(1) (really O(log32 N)) updates with **structural sharing**.
 
@@ -132,8 +142,16 @@ Lists are the classic singly-linked list but immutable. Queues are O(1) persiste
 4. **Compositional updates**: `assoc-in`, `update-in`, `merge-with`, `get-in`.
 5. **Equality by value**: Two maps are `=` iff they contain the same entries. Same for nested structures. Hashes are structural.
 
-### Jerboa Gap
-Chez's built-in hashtables are mutable, and `eq?`/`equal?` comparison of them works but there's no structural sharing. Lists are persistent-ish (cons cells), but conjugate, assoc, update-in style operations don't exist. No persistent vector, map, set, or queue with HAMT characteristics. You're building this — it's the foundation for almost everything else.
+### Jerboa Status
+
+Jerboa now has the full family:
+
+- `(std pmap)` — HAMT persistent map with O(log32 N) assoc/dissoc/lookup, structural equality, structural hashing. Also exported as `imap` via `(std immutable)`. Records participate polymorphically: `(get point 'x)`, `(keys point)`, etc.
+- `(std pvec)` — 32-way persistent vector, O(log32 N) assoc/conj/pop/nth, structural equality.
+- `(std pset)` — HAMT persistent set, structural equality, union/intersection/difference.
+- `(std pqueue)` — O(1) amortized persistent FIFO queue.
+- `(std sorted-set)` — ordered persistent set with range queries.
+- Update-in-style operations (`get-in`, `assoc-in`, `update-in`) live in `(std misc nested)` and dispatch polymorphically over all of the above plus records, concurrent-hash, hash-table, and vector.
 
 ---
 
@@ -153,7 +171,13 @@ A sidekick to persistent data: **transients** are a mutable "building mode" for 
 
 The genius: transients give you mutability's performance without losing immutability's semantics, as long as you don't leak the transient across threads.
 
-**Jerboa gap**: No persistent structures yet, so no transients. When you build them, transients should be part of the design from day one — they're how Clojure avoids the "but immutable is slow!" critique.
+**Jerboa status**: **[landed]**. Each of the persistent types has a transient sidekick:
+
+- `imap-transient` / `tmap-set!` / `tmap-delete!` / `persistent-map!` for pmap.
+- `pvec-transient` / `transient-set!` / `transient-append!` / `pvec-persistent!` for pvec.
+- `pset` has `pset-persistent!` for bulk building.
+
+`(std clojure)` exposes the Clojure-style surface: `transient`, `persistent!`, `assoc!`, `dissoc!`, `conj!`. The typical "build a big collection in a loop" pattern gets the Clojure perf story without losing the immutable API on the outside.
 
 ---
 
@@ -173,7 +197,12 @@ Every higher-order operation — `map`, `filter`, `reduce`, `take`, `drop`, `tak
 
 Because of this uniformity, once you learn 40 sequence functions, they work on *everything*.
 
-**Jerboa has**: `for/collect`, `for/fold`, `map`, `filter`, `flatten`, `unique`, `take`, `drop`, `every`, `any`, `filter-map`, `group-by`, `zip`, `frequencies`, `partition`, `interleave`, `mapcat`, `distinct`, `keep`, `split-at`, `append-map`, `snoc`. Good coverage but not a single unified abstraction — lists, vectors, hash tables, and strings each have their own APIs. Iteration via `in-list`/`in-vector`/`in-hash-keys` in `for` is closest to the seq idea but is a macro-time thing, not a runtime polymorphic protocol.
+**Jerboa status**: **[partial]**. Very good functional coverage: `for/collect`, `for/fold`, `map`, `filter`, `flatten`, `unique`, `take`, `drop`, `every`, `any`, `filter-map`, `group-by`, `zip`, `frequencies`, `partition`, `interleave`, `mapcat`, `distinct`, `keep`, `split-at`, `append-map`, `snoc`. Two runtime-polymorphic layers have landed since the original writeup:
+
+- `(std iter)` — a polymorphic iteration protocol that `for` can consume, bridging pmap/pset/pvec/list/vector/string uniformly.
+- `(std clojure)` — `first`/`rest`/`next`/`last`/`seq`/`reduce`/`into` dispatch polymorphically over all the persistent types, plus records-as-maps.
+
+What's still not there is a **lazy** unified seq — Clojure's `seq` abstraction is lazy by default, and Jerboa's polymorphic iteration is eager. That's §5 territory.
 
 ---
 
@@ -204,7 +233,7 @@ Laziness composes naturally with `take`, `take-while`, `drop-while`. You can wri
 
 **Gotchas Clojure exposes**: chunking (realizes 32 at a time for efficiency), head retention (holding the head of a lazy seq prevents GC of realized elements), and `doall`/`dorun` for forcing.
 
-**Jerboa has**: Chez's lazy library exists but isn't in the prelude. `in-producer` gives some of this via `for`. No culture of lazy-by-default; you build with eager collections and decide to go lazy. A lazy-seq macro integrated into the prelude would close much of the gap.
+**Jerboa status**: **[open]**. Chez's lazy library exists but isn't in the prelude. `in-producer` gives some of this via `for`. No culture of lazy-by-default; you build with eager collections and decide to go lazy. A `lazy-seq` macro integrated into the prelude plus `cycle`/`repeat`/infinite `iterate`/`take-while`/`drop-while` would close most of the gap. Tier 2 in the roadmap below.
 
 ---
 
@@ -264,14 +293,9 @@ The same pipeline works over eager collections, lazy seqs, channels, and reducib
 
 Most people never write raw transducers — they compose `map`, `filter`, `mapcat`, `take`, `drop`, `dedupe`, `distinct`, `partition-by`, `partition-all`, `map-indexed`, `keep`, `keep-indexed`, `cat` (catenating transducer), `halt-when`, `interpose`, `random-sample`.
 
-### Jerboa gap
+### Jerboa status
 
-Jerboa has `for/fold` and `for/collect` which are macro-level fused loops — conceptually similar in that they avoid intermediate lists, but not composable values you can pass around. Building a transducer library in Jerboa would require:
-1. Agreeing on the reducing-function protocol.
-2. Providing arity-overloaded `map`/`filter`/etc. that return transducers when called without a collection.
-3. Providing `into`/`transduce`/`sequence`/`eduction` entry points.
-
-Huge payoff. Probably the single feature most worth porting after persistent data.
+**[landed]** — `(std transducer)` ships a full transducer library with the standard cast: `tmap`, `tfilter`, `tmapcat`, `ttake`, `tdrop`, `tdistinct`, `tdedupe`, `tpartition-by`, `tpartition-all`, `tkeep`, `ttake-while`, `tdrop-while`, `tinterpose`, `thalt-when`, etc. Composed with `comp`, applied with `transduce` or `into`, and wired into CSP channels via `(chan n xform)` so transducers transform values as they flow through `(std csp)` pipelines. `(into [] xform data)` works uniformly over lists, vectors, pmaps, psets, pvecs. Zero intermediate allocation.
 
 ---
 
@@ -290,7 +314,7 @@ An earlier (2012) attempt at the same composition problem that lives on alongsid
 
 The `fold` bit is the key — Clojure automatically parallelizes the reduction for persistent vectors/maps using a divide-and-conquer `combine-fn`.
 
-**Jerboa gap**: No parallel fold. `pmap` exists (you mentioned fixing it recently), but no reducer-level parallelism that automatically splits collections. Chez has threads; the primitives are there.
+**Jerboa status**: **[open]**. No parallel fold. `pmap` exists but no reducer-level parallelism that automatically splits collections via a divide-and-conquer combine function. Chez has threads; the primitives are there. This would need a split protocol on pvec and pmap that returns two halves, plus a fork/join driver. Tier 2.
 
 ---
 
@@ -307,7 +331,7 @@ Plus `var` for thread-local dynamic binding.
 
 ### Atom
 
-**Status in Jerboa**: Recently aliased in `(std misc atom)` and re-exported from the prelude.
+**Status in Jerboa**: **[landed]** — `(std misc atom)` and re-exported from the prelude. Includes `add-watch!` / `remove-watch!`, `set-validator!`, and `volatile!` / `vreset!` / `vswap!` / `vderef` for single-thread-fast volatiles.
 
 ```clojure
 (def counter (atom 0))
@@ -350,7 +374,12 @@ Key properties:
 
 See section [16](#16-dynamic-vars-and-thread-local-binding).
 
-**Jerboa gap**: Atoms just arrived. Agents and refs are the big missing pieces. Building agents on top of Chez threads + a work queue is straightforward. STM is harder.
+**Jerboa status**: **[partial]**. Atoms, volatiles, and agents have landed; STM refs are still open.
+
+- **Atoms** — `(std misc atom)`, with watches and validators.
+- **Volatiles** — `(std misc atom)`, for cases where you want a mutable cell without CAS.
+- **Agents** — `(std agent)`. A dedicated worker thread per agent, backed by a CSP channel queue. `send` / `send-off` / `await` / `agent-error` / `agent-value` / `restart-agent` / `shutdown-agent!` / `clear-agent-errors` all present. Matches Clojure's `:fail` error-mode semantics: if an action throws, the agent enters an error state and further sends raise until `restart-agent` is called.
+- **Refs (STM)** — still open. See §9.
 
 ---
 
@@ -390,19 +419,20 @@ Lock-based concurrency is notoriously error-prone: deadlocks, lock ordering, for
 
 **Cost**: transactions can't do IO (or must be idempotent), and contention leads to retry churn. But for "update these five refs consistently" problems, nothing is as ergonomic.
 
-**Jerboa gap**: None of this. Chez has mutexes and condition variables. Building STM requires:
+**Jerboa status**: **[open]**. None of STM exists yet. Chez has mutexes and condition variables; building STM requires:
+
 1. Version counters on refs.
 2. Transaction-local read/write sets.
 3. A commit protocol with conflict detection.
 4. Retry semantics.
 
-It's a significant engineering project, but the abstraction is well-specified.
+It's a significant engineering project, but the abstraction is well-specified. Atoms + agents cover ~80% of the "I need concurrent state" use cases; STM matters most when you need to coordinate updates across multiple refs atomically (transfer-money problems). A scaled-down STM that coordinates 2–8 refs per transaction is dramatically simpler than a fully general one and covers most practical uses.
 
 ---
 
 ## 10. core.async (CSP Channels)
 
-**Status in Jerboa**: In progress.
+**Status in Jerboa**: **[landed]** — `(std csp)`. Channels, `go`, `alts!`, transducer-backed channels via `(chan n xform)`, buffers (fixed, dropping, sliding), `timeout`, `pipe`, `pipeline`, `mult`/`tap`, `pub`/`sub`, `mix`/`admix!`/`unmix!`/`toggle!`, `put!`/`take!` with callbacks, `split`, `onto-chan!`, `async/reduce`. Timer wheel for `timeout` behind `JERBOA_CSP_TIMER_WHEEL`. The one non-landed piece is **parked-go via CPS transformation** — Jerboa's `go` runs on an OS thread rather than a state-machine-transformed continuation, so you can't have a million parked go-blocks on a small thread pool. See [§3.8 in `clojure-remaining.md`](./clojure-remaining.md#38-fully-parked-go-cps-transformed) — it's a research project, indefinitely deferred.
 
 Clojure's CSP-style concurrency library. Not in core but ships with Clojure projects almost universally.
 
@@ -468,10 +498,7 @@ A channel can apply a transducer to values as they flow. The pipeline steps exec
 - Composes beautifully with transducers.
 - Solves the "what if I want millions of workers" problem on a JVM with thousands of OS threads.
 
-**Jerboa gap**: In progress per user note. Chez has threads and mutexes; the hard part is the `go` macro's state machine transformation (CPS transform). Possible approaches:
-1. OS-thread-per-channel-worker (simpler, doesn't scale to millions).
-2. Delimited continuations (Chez has them via `call/1cc`).
-3. A full CPS transformation macro like Clojure's.
+**Remaining gap**: Parked `go`. Jerboa's current `go` forks an OS thread; each one costs real stack and scheduling overhead. Clojure's trick is a compile-time CPS transform on the `go` body that turns channel ops into state transitions, so the block's "pending state" is a tiny closure in a scheduler's run queue. That's a research-scale macro project (pattern-match over every Scheme special form, rewrite into CPS, keep source locations). Deferred.
 
 ---
 
@@ -514,7 +541,7 @@ Also: `extend-type`, `reify` (anonymous implementation of a protocol), `satisfie
 
 Protocol dispatch is extremely fast — compiles to a type-keyed cache that becomes direct dispatch after warmup. Near-virtual-call speed.
 
-**Jerboa has**: `defmethod` on structs via `(defmethod (area (self circle)) ...)`. This is single-inheritance method dispatch tied to a struct. Clojure protocols are independent of type hierarchy and can be retrofitted onto any existing type. Jerboa's method system is closer to Gerbil/CLOS without the extensibility story.
+**Jerboa status**: **[landed]** — `(std protocol)`. Exports `defprotocol`, `extend-type`, `extend-protocol`, `reify`, `satisfies?`. Method dispatch uses a type-keyed cache that becomes near-direct after warmup. Protocols can be extended to any type — records, built-ins, custom types — from outside their definition site, solving the expression problem. Jerboa's older struct-bound `defmethod` is still there for single-dispatch on first-arg type; protocols are the preferred path for new code.
 
 ---
 
@@ -554,7 +581,7 @@ True multiple dispatch (CLOS-style).
 
 Separates "how do I choose which code runs" from "what code runs". Can model taxonomies that cross-cut your type system. Overkill for many things (hence protocols are preferred for type-based dispatch) but invaluable when you need real multi-argument dispatch or value-based dispatch.
 
-**Jerboa gap**: No equivalent. `defmethod` is protocol-style (first-arg struct type). Building multimethods = a dispatch table keyed by the result of a user function, plus an `isa?` relation.
+**Jerboa status**: **[landed]** — `(std multi)`. Exports `defmulti`, `defmethod` (multimethod arity), `remove-method`, `prefer-method`, `methods`, `get-method`, `derive`, `underive`, `isa?`, `parents`, `ancestors`, `descendants`, `make-hierarchy`. Full taxonomy support via user-defined hierarchies, `:default` fallback, and prefer-method for ambiguity resolution. Vector dispatch works for true multi-argument dispatch: `(defmulti collide (fn [a b] [(:type a) (:type b)]))`.
 
 ---
 
@@ -596,7 +623,12 @@ Anonymous implementation:
 
 Creates an unnamed instance implementing those protocols/interfaces. Like an ad-hoc object.
 
-**Jerboa has**: `defrecord` which gives pretty-print and `->alist`. Good, but not protocol-implementing and not the same "record is a map" semantics. Jerboa `defstruct` is more primitive.
+**Jerboa status**: **[landed]**. Two pieces came together:
+
+- **Protocol-implementing records** via `(std protocol)` + `extend-type` or `extend-protocol`. Any `defstruct` or `defrecord` type can satisfy protocols from outside.
+- **Record-as-map** via `(std clojure)`. `defstruct` and `define-record-type` instances now answer to the full polymorphic collection API: `get`, `contains?`, `count`, `empty?`, `keys`, `vals`. Keys coerce symbol/string/keyword. Inherited fields are included in declaration order. `get-in` walks into records nested inside pmaps and vice versa.
+
+The one intentional non-match: `assoc` / `dissoc` on a record **escapes to a persistent-map** instead of returning a new record of the same type. Chez's sealed-record model doesn't expose a generic rebuild path, and the pmap escape is uniform. Users who need to preserve the record type on update should use the record's own field setter or allocate a fresh record via the constructor. `reify` is provided by `(std protocol)` for ad-hoc anonymous implementations. See [`clojure-records-as-maps` in the cookbook](../README.md) for the full pattern.
 
 ---
 
@@ -641,9 +673,14 @@ Possibly the feature Clojure programmers miss most in other languages. Destructu
 
 Keyword-argument style falls out of rest + map destructuring.
 
-**Jerboa has**: `match` provides strong pattern matching, and `using` gives dot-access to struct fields. But you can't just write `(def (f [x y z]) ...)` and have it destructure a list argument in the parameter position across the language. Destructuring in `let` uses `let-values`/manual `car`/`cdr`. No map destructuring with `:keys` style. Jerboa has `let-alist` which is close.
+**Jerboa status**: **[partial]**. `match` provides strong pattern matching, and `using` gives dot-access to struct fields. `let-alist` handles alist-key destructuring. What's missing:
 
-A destructuring `def`/`let` macro in the prelude would be very high-value.
+- `(def (f [x y z]) ...)` — destructure a list argument in the parameter position
+- `(def (f {:keys [name age]}) ...)` — map destructuring with `:keys` style in function params or `let`
+- `:as` for "bind the whole plus the pieces"
+- `:or` for defaults on missing keys
+
+This is probably the **single biggest daily-ergonomics gap** for Clojure migrants. A destructuring `def`/`let` macro that desugars to the existing `match` machinery would cover most of it. Tier 1 in the "still worth implementing" list.
 
 ---
 
@@ -679,7 +716,9 @@ Every Clojure value of a "reference type" (symbols, vars, collections, functions
 
 Uses metadata heavily: `(doc f)`, `(source f)`, `(dir ns)` — all pulled from var metadata.
 
-**Jerboa gap**: Chez doesn't have a unified metadata concept. You can wrap things but it's not systematic. Big value for introspection, documentation, and macro systems.
+**Jerboa status**: **[landed]** — `(std misc meta)`. Exports `with-meta`, `meta`, `vary-meta`, `meta-wrapped?`, `strip-meta`. Uses a wrapper-record approach (rather than modifying every record type to add a metadata slot), so only values you actually call `with-meta` on pay any allocation. `with-meta` replaces rather than nests — `strip-meta` is single-step. `=?` in `(std clojure)` strips meta on both sides, so metadata doesn't affect equality, matching Clojure's contract.
+
+Remaining gap: the shorthand reader syntax `^:private x` / `^String x` / `^{:doc "..."} x` has no equivalent — you write `(with-meta x '((private . #t)))` in long form. Deferred along with the rest of §4.9 reader work; see [`docs/clojure-reader.md`](./clojure-reader.md).
 
 ---
 
@@ -712,7 +751,13 @@ Also thread-aware: `bound-fn`, `bound-fn*` capture current dynamic bindings so y
 
 Inside a binding thread, dynamic vars can be `set!` to a new value for the rest of the thread's execution. Lets you update state that started as a dynamic default.
 
-**Jerboa gap**: Chez has `fluid-let` and parameters (`make-parameter`, `parameterize`) which are similar. Jerboa's prelude doesn't surface these clearly. A `(def ^:dynamic *foo* ...)` + `(binding ...)` sugar would be natural.
+**Jerboa status**: **[partial]**. Chez has `fluid-let`, `make-parameter`, and `parameterize` — the underlying mechanism exists and is powerful. What's missing is the Clojure-friendly syntactic layer:
+
+- `(def-dynamic *foo* default)` — sugar over `(define *foo* (make-parameter default))`
+- `(binding [*foo* new-val *bar* other] body)` — sugar over `(parameterize ([*foo* new-val] [*bar* other]) body)`
+- A convention that `*earmuffed*` names are dynamic and fair game to `binding`
+
+These are three small macros. Tier 1 in the roadmap below.
 
 ---
 
@@ -780,9 +825,9 @@ Every predicate in a spec can have a generator. With `s/fdef`, `clojure.spec.tes
 - **Documentation** — specs are the truth about what shape data takes.
 - **Generative testing** without writing generators.
 
-**Jerboa has**: `list-of?`, `maybe`, `:` for checked cast, `assert!`, but no composable spec system, no function contracts, no generator integration.
+**Jerboa status**: **[non-goal]** for full spec; **[open]** for a scaled-down schema library. Today Jerboa has `list-of?`, `maybe`, `:` for checked cast, `assert!`, but no composable spec system, no function contracts, no generator integration.
 
-This is a large feature. A scaled-down "malli" style (data-driven schema) is the common alternative in Clojure-land today; simpler to port.
+Full `clojure.spec` is a large feature and tied to assumptions about the Clojure runtime. A scaled-down **malli**-style data-driven schema system is the pragmatic alternative in Clojure-land today and far simpler to port — schemas are just nested data structures with a validation/conform/explain API. Recommended if anyone needs it; not on the current roadmap.
 
 ---
 
@@ -824,7 +869,7 @@ Clojure namespaces are first-class runtime objects, not just compile-time file o
 
 Reloads a namespace's file and re-interns its vars. Combined with REPL-driven development, this is the core of the Clojure workflow.
 
-**Jerboa has**: Chez-style module imports with `(import (std ...))`. Less introspection, no hot reload primitives in user code as far as I've seen. `:reload` style dev loop is missing.
+**Jerboa status**: **[partial]**. Chez-style module imports with `(import (std ...))` work, and the MCP tooling (`jerboa_module_exports`, `jerboa_module_catalog`, `jerboa_find_definition`) provides substantial introspection. What's missing is the **hot reload** primitive — `(require 'ns :reload)` without restarting the process. Chez doesn't expose this cleanly. Tier 3 in the roadmap.
 
 ---
 
@@ -861,7 +906,7 @@ You can register your own:
 
 `print-method` dispatch lets records, custom types, etc., round-trip through EDN.
 
-**Jerboa has**: JSON, CSV, YAML support. No EDN-equivalent native "Scheme data serialization" format with tag extensions. S-expressions via `read`/`write` come close, but there's no registered tag extension hook and no safety partition.
+**Jerboa status**: **[open]**. JSON, CSV, YAML supported. No EDN-equivalent native Scheme-data serialization with tag extensions. S-expressions via `read`/`write` come close, but there's no registered tag extension hook and no sandboxed-read/unsafe-read partition. Tier 2 — medium effort, self-contained library.
 
 ---
 
@@ -881,7 +926,7 @@ For code that runs on multiple platforms (Clojure, ClojureScript, ClojureCLR, ba
 
 Platform-specific branches baked into the reader. Not #ifdef — actual platform selection at read time.
 
-**Jerboa gap**: Not currently relevant since Jerboa is one target, but reader conditionals become valuable when you have Jerboa-vs-Chez divergences or want to share code with Gerbil.
+**Jerboa status**: **[deferred]**. Not currently relevant since Jerboa is one target. Reader conditionals become valuable if/when Jerboa adds a second target (wasm, for example) or wants to share code with stock Chez or Gerbil. Revisit then.
 
 ---
 
@@ -937,7 +982,9 @@ Used heavily by spec, clojure.xml, datascript, and API design. Lets you have `:u
 
 Keywords are interned; `(identical? :foo :foo)` is always true. Same for symbols.
 
-**Jerboa gap**: Jerboa has symbols but no `keyword` distinct type. `name:` reader syntax creates `#:name` keywords — it's there, but less pervasive in API design. Making keywords callable as functions-of-maps in Jerboa would be high impact (requires an applicable-struct system or a wrapper).
+**Jerboa status**: **[partial]**. Jerboa has a distinct `keyword` type and `name:` reader syntax that creates them, plus `keyword?`, `string->keyword`, `keyword->string` helpers. `(std clojure)`'s `get` and friends accept symbol, string, and keyword keys on records and pmaps interchangeably, so the pragmatic "keyword as API key" use case works today.
+
+What's missing is **keywords callable as functions of maps** — `(:name m)` as shorthand for `(get m :name)`. That requires an applicable-struct system or a reader rewrite (and collides with Jerboa's `:std/sort` module-path syntax). Low priority: `(get m 'name)` reads nearly as cleanly. Deferred.
 
 ---
 
@@ -995,7 +1042,7 @@ Not the side-effecting `for` of JS — list comprehensions with filters and lets
   (println x))
 ```
 
-**Jerboa has**: `for/collect` which supports multiple bindings in `for`, and `#:when` style guards exist in Racket's `for`. Jerboa's `for` supports `(#:when cond)` — check the implementation. If not, this is a small but high-value addition: `:let`, `:while`, `:when` clauses in `for/collect`.
+**Jerboa status**: **[partial]**. `for/collect` and `for/fold` support multiple bindings (Cartesian product nesting). Clause extensions (`:let`, `:while`, `:when` style) aren't fully standardized — worth verifying what's implemented and adding anything missing. Small user-facing win; Tier 3.
 
 ---
 
@@ -1040,7 +1087,7 @@ Set-once synchronization:
 
 Used for rendezvous between threads, or anywhere you need "some thread will eventually produce this value."
 
-**Jerboa has**: `try-result`, async patterns in `(std async)`. Delay is partially there via Chez's `delay`/`force` — but future and promise in the Clojure sense need the thread pool + structured result. `(std concur)` has the building blocks.
+**Jerboa status**: **[partial]**. `try-result`, async patterns in `(std async)`, and CSP `go` blocks cover most use cases. Chez's `delay`/`force` provide the lazy-value part directly. What's missing is the named Clojure surface: `delay` + `realized?`, `future` + `deref` + `future-cancel`, `promise` + `deliver`. These are thin wrappers over the existing primitives — Tier 3 in the roadmap.
 
 ---
 
@@ -1058,7 +1105,7 @@ Small built-ins that matter:
 - `(iterate f x)` — lazy infinite `[x (f x) (f (f x)) ...]`.
 - `(repeatedly n f)` — calls f n times, lazily.
 
-**Jerboa has**: `compose`, `comp`, `partial`, `complement`, `identity`, `constantly`, `curry`, `flip`, `conjoin`, `disjoin`, `juxt`, `cut`. Very good coverage. Missing `memoize`, `fnil`, `iterate`, `every-pred`, `some-fn`, `repeatedly`. Easy to add.
+**Jerboa status**: **[partial]**. `compose`/`comp`, `partial`, `complement`, `negate`, `identity`, `constantly`, `curry`, `flip`, `conjoin`/`disjoin` (Clojure's `every-pred`/`some-fn` under different names), `juxt`, `cut` are all in the prelude. Still missing: **`memoize`**, lazy **`iterate`** (Clojure's `(iterate f x)` = `[x (f x) (f (f x)) ...]`), **`repeatedly`**, **`fnil`**, **`trampoline`** (only strictly needed for mutual recursion across value-returning branches, since Chez has proper tail calls). These are all small, one-day adds. Tier 1 in the roadmap.
 
 ---
 
@@ -1089,7 +1136,7 @@ Clojure's answer to "exceptions should carry data, not just strings":
 
 Lets you catch by data-pattern rather than by class hierarchy, and serialize exceptions through channels/queues.
 
-**Jerboa has**: `try/catch/finally` with pattern-based catches and condition objects. `(std errors)` has its own structured errors. Close in spirit but not the standardized "ex-info + ex-data" convention that clojure-spec, pedestal, etc., all build on.
+**Jerboa status**: **[open]**. `try/catch/finally` with pattern-based catches and condition objects exist. `(std errors)` has its own structured errors. Close in spirit but not the standardized `ex-info`/`ex-data` surface that clojure-spec, pedestal, and porters expect. This is a ~10-line shim on top of Jerboa's condition system — Tier 1 in the roadmap.
 
 ---
 
@@ -1139,7 +1186,7 @@ Unification, relations, constraints, goals. Used for:
 
 Also `clojure.core.logic.pldb` — Prolog-like deductive database.
 
-**Jerboa gap**: No logic programming. A Jerboa port of a miniKanren flavor is a self-contained library — not deeply integrated with core, so it's approachable.
+**Jerboa status**: **[open]** (low priority). No logic programming. A Jerboa port of a miniKanren flavor is a self-contained library — not deeply integrated with core, so it's approachable. Off the Clojure-compat critical path; valuable for anyone doing logic programming specifically. Tier 4.
 
 ---
 
@@ -1162,7 +1209,7 @@ Essential for:
 - HTML/XML navigation (see `clojure.data.zip`)
 - Functional editors
 
-**Jerboa gap**: No zipper library. Straightforward port; not integrated with any core feature.
+**Jerboa status**: **[open]**. No zipper library. Straightforward port of `clojure.zip`, ~200 lines, not integrated with any core feature. Tier 2.
 
 ---
 
@@ -1183,7 +1230,7 @@ Defines **navigators** as composable objects. Navigators include `ALL`, `MAP-VAL
 
 `update-in`/`assoc-in` scale to the depth you're at; Specter scales to arbitrary *shapes* of navigation.
 
-**Jerboa gap**: No equivalent. Like zippers, a self-contained library that would pair naturally with persistent collections.
+**Jerboa status**: **[open]**. No equivalent. Like zippers, a self-contained library that would pair naturally with persistent collections. Tier 2.
 
 ---
 
@@ -1204,7 +1251,7 @@ Added in Clojure 1.10. The idea: **any opaque value can be turned into inspectab
 
 Used by tooling like REBL and Reveal to build **data inspectors**: click into a database connection, see a map; click a table, see rows; click a row, see cells. Any type can implement `Datafiable` to expose itself.
 
-**Jerboa gap**: No unified datafy/nav protocol. Big value for REPL tooling and debugging.
+**Jerboa status**: **[open]**. No unified datafy/nav protocol. Big value for REPL tooling and debugging. Now more tractable since `(std protocol)` is in place — datafy/nav is naturally expressed as two protocols. Tier 2.
 
 ---
 
@@ -1230,7 +1277,7 @@ Used by tooling like REBL and Reveal to build **data inspectors**: click into a 
 
 Generic tree rewriting that works on arbitrary nested Clojure data. One of those "I use it once a month but it's the right tool" libraries.
 
-**Jerboa gap**: No walker. Easy to build on top of a recursive structure visitor.
+**Jerboa status**: **[open]**. No walker. Easy to build on top of a recursive structure visitor — ~100 lines total including `postwalk`/`prewalk`/`walk`/`keywordize-keys`/`stringify-keys`/`macroexpand-all`. Tier 1 in the roadmap.
 
 ---
 
@@ -1257,7 +1304,7 @@ Plus relational operators:
 
 Small relational algebra over sets of maps. Rarely used in production but beautifully minimal.
 
-**Jerboa gap**: No set type or set operations in the prelude.
+**Jerboa status**: **[landed]** for the core operations. `(std clojure)` and `(std pset)` provide `hash-set`, `persistent-set`, `union`, `intersection`, `difference`, `subset?`, `superset?`, `disj`, `contains?`, `conj`. The **relational** operators (`project`, `select`, `join`, `rename`, `index`) from `clojure.set` are still open — they're a small self-contained library that would compose naturally on top of `(std pset)` + pmap.
 
 ---
 
@@ -1283,7 +1330,7 @@ Integrates with `clojure.spec`:
 
 Clojure's property-based testing culture is notable — many libraries ship `test.check` suites.
 
-**Jerboa gap**: No generative testing framework. Massive win for testing serialization, round-tripping, parsers, algorithms.
+**Jerboa status**: **[open]**. No generative testing framework. Would be a major quality-of-life win for testing serialization, round-tripping, parsers, algorithms. Generators + shrinking can be built as a self-contained library; QuickCheck ports are well-documented so the API surface is known. Tier 2.
 
 ---
 
@@ -1309,7 +1356,7 @@ Stuart Sierra's `component`, `integrant`, and `mount` — patterns for managing 
 
 Solves the "how do I wire up 15 stateful services with dependencies and restart them cleanly at the REPL" problem. Makes hot-reload of business code possible without losing connections to the world.
 
-**Jerboa gap**: No lifecycle framework. Low-urgency for small apps but important for long-running services. Could build on top of defrecord + a dependency graph.
+**Jerboa status**: **[open]**. No lifecycle framework. Low-urgency for small apps but important for long-running services. Could build on top of `defrecord` + `(std protocol)` (for `Lifecycle` start/stop) + a dependency graph. Now easier to implement since protocols landed. Tier 3.
 
 ---
 
@@ -1327,7 +1374,7 @@ Not a feature per se but an ecosystem. Clojure's REPL story:
 
 The whole stack rewards "keep the system running, shape it from inside."
 
-**Jerboa has**: `jerboa_repl_session`, `jerboa_eval`, and MCP-based tooling that's actually quite strong here. The gap is mostly editor integration and the "send form from editor to live REPL, see it evaluate" experience. Jerboa + an nREPL-style protocol + LSP tooling could close this.
+**Jerboa status**: **[partial]**. `jerboa_repl_session`, `jerboa_eval`, and the MCP tool surface are actually quite strong for "evaluate this form in a live runtime and see the result" — that's most of the non-visual nREPL experience, delivered as tool calls to the agent instead of messages to an editor. The gap is the **editor-side integration**: the "hit C-x C-e on a form in your source buffer, see the result inline" experience that CIDER/Calva/Conjure deliver. Closing it requires either a proper nREPL-compatible server (so existing Clojure editor plugins work) or native LSP extensions for Jerboa-aware editors. Either is a separate project from language features. Tier 4 in the roadmap.
 
 ---
 
@@ -1384,47 +1431,124 @@ Forward declarations so mutually recursive top-level defs compile.
 ### `pr` vs `print`
 Clojure distinguishes `print` (human-readable, no escapes) from `pr` (EDN-readable round-trippable output). `prn` = `pr` + newline. `println` = `print` + newline. Tiny but constant aid for REPL debugging.
 
+### Jerboa status roll-up for this section
+
+**Landed** in `(jerboa prelude)` or dedicated modules:
+- Threading: `->`, `->>`, `some->`, `cond->`, `as->` (all present); also `->?` for ok/err result threading
+- Collection helpers: `get-in` / `assoc-in` / `update-in` via `(std misc nested)`; `group-by`, `frequencies`, `partition`, `juxt`, `zip`, `into`, `merge`, `select-keys`, `update` (via `(std clojure)` and the prelude)
+- Conditionals: `when`, `when-not`, `when-let`, `if-let`, `if-not`, `awhen`, `aif`, full `case` (via Chez)
+- Arithmetic: `quot`, `rem`, `mod`, `min`, `max`, `bit-*` ops (all via Chez)
+- Set/map construction: `hash-map`, `hash-set`, `sorted-set`, variadic constructors from `(std clojure)` and `(std sorted-set)`
+- Predicate combinators `conjoin`/`disjoin` (same shape as Clojure's `every-pred`/`some-fn`), `complement`, `negate`
+- `declare` — Chez `define` forward refs work naturally; no separate macro needed
+- `pr`/`pr-str` vs `print`/`display` — Chez `write` vs `display` is the structural analogue
+
+**Open** (worth adding):
+- `doto` macro — threads side-effecting calls on one object. Trivial macro. **Tier 1**.
+- Anonymous `#(...)` reader shorthand — requires reader modification (same class of work as [`clojure-reader.md`](./clojure-reader.md)); Jerboa uses `(lambda (x) ...)` / `(cut + <> 1)` instead. **Deferred.**
+- `condp` — single-predicate dispatch form. Small macro, nice-to-have. **Tier 3**.
+- `merge-with`, `zipmap`, `reduce-kv` — the last few map-convenience functions not yet in `(std clojure)`. (`merge` and `select-keys` already landed.) Small self-contained additions. **Tier 1**.
+- `min-key` / `max-key` — select the element of a collection that minimizes/maximizes a key function: `(max-key :age users)`. Trivial ~5-line definitions. **Tier 1**.
+- `fnil` — wraps a function so `nil`/`#f` arguments get replaced with defaults before calling. Trivial closure. **Tier 1**.
+
 ---
 
-## Summary: Where to Focus
+## Summary: Where Things Stand (2026-04-11)
 
-If I had to rank the features by "biggest game-changer you can practically add to Jerboa":
+### What's landed
 
-| Tier | Feature | Difficulty | Payoff |
-|------|---------|-----------|--------|
-| 1 | Persistent data structures + transients | Hard | Foundational |
-| 1 | Transducers | Medium | Huge — unlocks reusable pipelines |
-| 1 | core.async channels + go | Hard | Structured concurrency |
-| 1 | Protocols | Medium | Extensibility + polymorphism |
-| 1 | Map destructuring everywhere | Easy | Daily ergonomics |
-| 2 | Atoms / agents / refs / STM | Medium-Hard | Concurrent programming story |
-| 2 | Dynamic vars + binding | Easy | Context propagation |
-| 2 | Spec (or malli-style schemas) | Medium | Validation + testing |
-| 2 | Lazy sequences in prelude | Easy-Medium | Infinite data model |
-| 2 | Multimethods | Easy | Open dispatch |
-| 2 | Metadata on vars/collections | Medium | Introspection + tooling |
-| 3 | core.match enhancements | Easy | Already strong |
-| 3 | Zippers, clojure.walk, clojure.set | Easy | Library-level, self-contained |
-| 3 | Property testing | Medium | Quality story |
-| 3 | Datafy/Nav + REBL-style tooling | Medium | Dev experience |
-| 3 | ex-info style structured errors | Easy | Error ergonomics |
-| 3 | Specter | Medium | Deep update ergonomics |
-| 4 | core.logic | Medium | Niche but fun |
-| 4 | Component lifecycle | Medium | Long-running systems |
-| 4 | nREPL-style editor integration | Hard | Ecosystem, not language |
+Most of the features originally ranked "Tier 1 / Tier 2" are now in place. The Clojure-compat campaign tracked in [`clojure-remaining.md`](./clojure-remaining.md) — plus earlier work on the persistent data structures and CSP channels — has shipped:
 
-The things that Chez/Jerboa already does as well or better than Clojure:
-- **Proper tail calls** (no `loop`/`recur` needed)
-- **Numeric tower** (Chez rationals + bignums are first-class)
-- **Pattern matching** (Jerboa's `match` is strong)
-- **Macro hygiene** (Chez's `syntax-case` is arguably more powerful than Clojure's macros)
-- **Continuations** (Chez has `call/cc`; Clojure does not)
-- **Compilation speed and startup time** (Chez AOT vs JVM warmup)
+| Feature | Module | Notes |
+|---------|--------|-------|
+| Persistent map / vector / set | `(std pmap)` `(std pvec)` `(std pset)` | HAMT where applicable, structural `=?` and hash |
+| Persistent queue | `(std pqueue)` | O(1) amortized FIFO |
+| Sorted set | `(std sorted-set)` | Range queries, ordered traversal |
+| Transients | `imap-transient`, `pvec-transient`, `pset-persistent!` | Bulk-build API via `(std clojure)` `transient`/`persistent!`/`conj!`/`assoc!` |
+| Transducers | `(std transducer)` | `map`/`filter`/`take`/`dedupe`/etc., composed with `comp`, applied with `transduce`/`into`, integrated with CSP channels via `(chan n xform)` |
+| core.async CSP | `(std csp)` | Channels, `go`, `alts!`, buffers, `mult`/`tap`, `pub`/`sub`, `mix`, `pipe`, `pipeline`, `put!`/`take!`, `timeout` with timer wheel, transducer channels |
+| Atoms + watches + volatiles | `(std misc atom)` | `atom`, `swap!`, `reset!`, `compare-and-set!`, `add-watch!`, `remove-watch!`, `volatile!`/`vreset!`/`vswap!` |
+| Agents | `(std agent)` | `send`/`send-off`/`await`/`agent-error`/`restart-agent`, `:fail` error mode |
+| Protocols | `(std protocol)` | `defprotocol`, `extend-type`, `extend-protocol`, `reify`, `satisfies?` |
+| Multimethods | `(std multi)` | `defmulti`, `defmethod`, `prefer-method`, `derive`, `isa?` hierarchies |
+| Metadata | `(std misc meta)` | `with-meta`, `meta`, `vary-meta`, `strip-meta`; `=?` strips before comparing |
+| Record-as-map | `(std clojure)` + `(std misc nested)` | Records answer `get`/`keys`/`vals`/`count`/`contains?`/`empty?`; `assoc`/`dissoc` escape to pmap; `get-in` walks records |
+| Set operations | `(std pset)` + `(std clojure)` | `union`, `intersection`, `difference`, `subset?`, `superset?` |
+| `get-in`/`assoc-in`/`update-in` | `(std misc nested)` | Polymorphic over pmap, chash, hash-table, vector, pair (alist), and records |
+| Pattern matching | `(jerboa prelude)` | `match` with nested, guards, predicates, or-patterns, view patterns |
 
-The things that are cultural/ecosystem rather than language:
-- REPL-driven workflow tooling
+### What Chez/Jerboa does as well or better than Clojure
+
+- **Proper tail calls** — Chez guarantees TCO, so no `loop`/`recur` ceremony. Natural recursion is fine; `(loop ... (recur ...))` is only a familiarity nicety for migrants.
+- **Numeric tower** — Chez has exact rationals, arbitrary-precision integers, bignums, and complex numbers built in. The Clojure `BigInt`/`BigDecimal`/`Ratio` distinction is flatter and more pervasive in Chez.
+- **Pattern matching** — Jerboa's `match` is already excellent; this was one area of parity from the start.
+- **Macro hygiene** — Chez's `syntax-case` is arguably more powerful than Clojure's macros. Jerboa inherits this.
+- **Continuations** — Chez has `call/cc`; Clojure doesn't.
+- **Compilation speed and startup time** — Chez AOT vs JVM warmup. Jerboa scripts start in ms, not seconds.
+
+### Cultural/ecosystem gaps (not language features)
+
+- REPL-driven workflow tooling (partially addressed via MCP tools, `jerboa_repl_session`, `jerboa_eval`)
 - Dependency management
 - Documentation conventions
 - Community-maintained idiom libraries
+
+---
+
+## Still Worth Implementing (as of 2026-04-11)
+
+What's left, ranked by value-per-effort. Each entry links to the section above for the full discussion.
+
+### Tier 1 — Biggest daily-ergonomics wins, low-to-medium effort
+
+| Feature | Section | Effort | Why it's worth doing |
+|---------|---------|--------|----------------------|
+| **Map destructuring with `:keys` in `let`/`def`** | [§14](#14-destructuring-everywhere) | Easy–Medium | Single biggest "I miss this every day" gap for Clojure migrants. `(def (f {:keys [name age]}) ...)` in function params. A macro on top of the existing `match` machinery. |
+| **`ex-info` / `ex-data` structured exceptions** | [§27](#27-exception-design-ex-info) | Easy | Ten-line shim over Jerboa's condition system. Makes every library catch-by-data-shape instead of catch-by-class. |
+| **`memoize` / `iterate` / `repeatedly`** | [§26](#26-memoize-trampoline-and-friends) | Easy | The three missing functional combinators. Couple dozen lines total. |
+| **`clojure.walk` (`postwalk` / `prewalk` / `keywordize-keys`)** | [§33](#33-clojurewalk) | Easy | Generic tree rewriting. Self-contained library, ~100 lines. |
+| **`doto` macro** | [§38](#38-miscellaneous-small-things-that-add-up) | Trivial | Threads an object through side-effecting calls. One-macro add. |
+| **Dynamic vars + `binding` sugar** | [§16](#16-dynamic-vars-and-thread-local-binding) | Easy | Wrap `make-parameter`/`parameterize` in `def-dynamic` + `binding` macros so Clojure porters don't have to know about Chez parameters. |
+| **Map-convenience stragglers** | [§38](#38-miscellaneous-small-things-that-add-up) | Easy | `merge-with`, `zipmap`, `reduce-kv`, `min-key`/`max-key`. The handful of map-convenience functions not yet exported from `(std clojure)` (merge and select-keys already landed). Each is 5–15 lines. |
+
+### Tier 2 — High value, medium effort, self-contained
+
+| Feature | Section | Effort | Why it's worth doing |
+|---------|---------|--------|----------------------|
+| **Lazy sequences in the prelude** | [§5](#5-lazy-sequences) | Medium | `lazy-seq`, `cycle`, `repeat`, infinite `iterate`, `take-while`, `drop-while`. Chez has the primitives; expose them as a first-class idiom. |
+| **Zippers (`clojure.zip`)** | [§30](#30-zippers) | Medium | Functional tree editing. Classic, well-specified, ~200 lines. Pairs naturally with `match` for AST work. |
+| **Specter-style path navigation** | [§31](#31-specter) | Medium | Path-based deep navigation over arbitrary nested data. Scales `update-in` to arbitrary *shapes*. |
+| **Reducers / parallel fold** | [§7](#7-reducers) | Medium | Auto-parallel `(r/fold + (r/map inc big-vec))`. Needs a divide-and-conquer split protocol on pvec and pmap. |
+| **EDN format with tagged literals** | [§19](#19-edn-and-tagged-literals) | Medium | Safe Scheme-data serialization with an extension hook. Fill-in for JSON/EDN interop. |
+| **Datafy / Nav** | [§32](#32-datafy--nav) | Medium | Protocol for exposing opaque values as inspectable data. Big dev-experience win once REPL tooling matures. |
+| **Property-based testing (test.check style)** | [§35](#35-property-based-testing-testcheck) | Medium | Generators + shrinking. Clojure's `clojure.test.check` is the canonical reference. |
+
+### Tier 3 — Significant effort, significant payoff
+
+| Feature | Section | Effort | Why it's (maybe) worth doing |
+|---------|---------|--------|------------------------------|
+| **STM refs (`ref` / `dosync` / `alter` / `commute`)** | [§9](#9-software-transactional-memory-stm) | Hard | The last big concurrency primitive Jerboa doesn't have. Well-specified design (version counters + read/write sets + commit protocol), just a real engineering project. A scaled-down variant that only coordinates 2–8 refs per transaction is much easier than a fully general one. |
+| **Component lifecycle framework** | [§36](#36-component-lifecycle-libraries) | Medium | Stuart Sierra's `component`, `integrant`, or `mount`. Solves "start 15 services in dependency order, restart cleanly at the REPL." Mostly a library on top of `defrecord` + a dependency graph. |
+| **`clojure.set` relational operators** | [§34](#34-set-operations) | Easy | `project`, `select`, `join`, `rename`, `index`. Small relational algebra over sets of maps. Self-contained. |
+| **Namespace hot reload** | [§18](#18-namespaces) | Medium | `(require 'ns :reload)` without restarting. Chez doesn't expose this cleanly, so it needs real wiring — but it's the linchpin of REPL-driven dev. |
+| **`for` comprehension `:let`/`:while`/`:when` clauses** | [§24](#24-for-comprehensions) | Easy | Jerboa's `for/collect` is already close; this is clause additions. Small user-facing win. |
+| **Delay / Future / Promise polish** | [§25](#25-delays-futures-and-promises) | Easy | Chez has the primitives; wrap them as `delay`/`force`/`realized?`, `future`/`deref`, `promise`/`deliver` for Clojure parity. |
+
+### Tier 4 — Niche, deferred, or non-goal
+
+| Feature | Section | Status | Reasoning |
+|---------|---------|--------|-----------|
+| **Clojure reader literals (`{}`/`#{}`/`[]`/`:kw`)** | [`clojure-reader.md`](./clojure-reader.md), [§4.9](./clojure-remaining.md#49-reader-literals-----v-kw) | Deferred (risky) | Requires opt-in file-local reader modes; permanent debuggability weirdness; most porters adapt to constructor forms in a day. Could be deferred forever. |
+| **Parked `go` via CPS transform** | [§10](#10-coreasync-csp-channels), §3.8 in `clojure-remaining.md` | Deferred | Research-scale macro project. Jerboa's OS-thread `go` is fine for thousands-of-coroutines use cases, just not millions. |
+| **Clojure Spec / full schema system** | [§17](#17-clojure-spec) | Non-goal | Too large to port faithfully. A scaled-down malli-style schema library is the recommended alternative for anyone who needs it. |
+| **core.logic (miniKanren)** | [§29](#29-corelogic-minikanren) | Open, low priority | A self-contained library port; valuable for anyone doing logic programming, but far from the Clojure-compat critical path. |
+| **Keywords as functions `(: k m)` on pmaps** | [§22](#22-keywordsymbol-semantics) | Deferred | Would require applicable-struct support. Instead use `(get m k)`, which is already polymorphic. |
+| **nREPL-style editor protocol** | [§37](#37-repl-driven-development-culture) | Partial | Jerboa's MCP tooling covers a lot of the same ground (`jerboa_eval`, `jerboa_repl_session`). A proper nREPL server would unlock CIDER/Calva-style editor integration but is a separate project. |
+| **Reader conditionals** | [§20](#20-reader-conditionals) | Deferred | Useful only when Jerboa has multiple targets; currently one target. Revisit if Jerboa-wasm or Gerbil-share becomes real. |
+| **`.clj` source loading** | — | Non-goal | Not porting the JVM compiler. |
+
+### Recommendation
+
+If I were picking the next pass after this campaign: **Tier 1 as a single batch**. Map destructuring, `ex-info`, `memoize`/`iterate`/`repeatedly`, `clojure.walk`, `doto`, and dynamic-var sugar together are maybe a few days of work and close most of the "I type this every hour and Jerboa doesn't have it" complaints from Clojure migrants. Tier 2 items become more attractive in isolation once Tier 1 is in place. Tier 3's STM is the only remaining "foundational" gap and deserves a real design round of its own.
 
 The language features above are what you'd port. The culture is built alongside, one idiomatic library at a time.
