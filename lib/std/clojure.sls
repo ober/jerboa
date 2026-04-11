@@ -78,6 +78,8 @@
 
     ;; ---- Re-exports from (std misc atom) ----
     atom atom? deref reset! swap! compare-and-set!
+    add-watch! remove-watch!
+    volatile! volatile? vreset! vswap! vderef
 
     ;; ---- Re-exports from (std misc nested) ----
     get-in assoc-in update-in

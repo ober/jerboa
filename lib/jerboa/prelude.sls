@@ -214,6 +214,10 @@
     atom atom? atom-deref atom-reset! atom-swap! atom-update!
     ;; Clojure-style aliases (familiar to clojure users)
     deref reset! swap! compare-and-set!
+    ;; Watches (fires on every successful swap/reset/update/CAS)
+    add-watch! remove-watch!
+    ;; Volatiles (single-threaded transient cells for transducers)
+    volatile! volatile? vreset! vswap! vderef
 
     ;; ---- std/misc/shared (atomic cell with CAS) ----
     make-shared shared? shared-ref shared-set!

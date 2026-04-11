@@ -1335,6 +1335,20 @@ defprotocol extend-type extend-protocol satisfies?
 
 ### 4.7 Atom watches + volatiles
 
+**[landed]** Added to `(std misc atom)` and re-exported from the
+prelude and `(std clojure)`. `add-watch!` registers a callback under
+a key and fires it on every successful `reset!`/`swap!`/`atom-update!`
+and on successful `compare-and-set!` (a failed CAS does NOT fire
+watches). Callbacks run OUTSIDE the atom's mutex so they can call
+back into the atom without deadlock; raised exceptions are swallowed
+so a broken watch can't corrupt the atom. Same-key re-add replaces
+the previous callback (matches Clojure), and `remove-watch!` is
+idempotent. Both return the atom so calls chain. Volatiles are a
+separate lightweight record (`volatile!` / `volatile?` / `vreset!` /
+`vswap!` / `vderef`) with no mutex, no watches, and no CAS — meant
+for single-threaded transient accumulators inside transducers.
+Covered by `tests/test-atom.ss` (25 tests).
+
 **Watches — the gap.** Clojure atoms support `add-watch` and
 `remove-watch`: register a callback that fires after every successful
 swap with the key, the atom, the old value, and the new value. Used for
@@ -1806,8 +1820,8 @@ in this doc. **[deferred]** items are non-goals.
 | Metadata (`with-meta`/`meta`) | [gap] | §4.4 |
 | `defmulti`/`defmethod` value-dispatch | [gap] | §4.5 |
 | `defprotocol`/`extend-type` | [gap] | §4.6 |
-| Atom watches | [gap] | §4.7 |
-| Volatiles | [gap] | §4.7 |
+| Atom watches | [current] `(std misc atom)` | §4.7 landed |
+| Volatiles | [current] `(std misc atom)` | §4.7 landed |
 | Agents | [gap] | §4.8 |
 | Record-as-map | [gap] | §4.10 |
 | `#!clojure-reader` literal switch | [gap] (risky) | §4.9 |
