@@ -1774,6 +1774,37 @@ type information but is uniform.
 **Risks:** Substantial. Clojure's semantics here are subtle and most
 users rely on them. Probably best tackled as a separate design round.
 
+**[landed]** Phase E.6 shipped the read-path record-as-map surface and
+an assoc/dissoc escape hatch in `(std clojure)`:
+
+- `get`, `contains?`, `count`, `empty?`, `keys`, `vals` now dispatch on
+  `record?` (excluding persistent-map/set/sorted-set/concurrent-hash,
+  which are themselves records). They walk the rtd via Chez's
+  `record-type-field-names` + `record-accessor`, crossing the parent
+  chain so inherited fields are included in declaration order.
+- Key coercion accepts symbols, strings, and keywords — `(get p 'x)`,
+  `(get p "x")`, and `(get p :x)` all hit the same field.
+- `assoc`/`dissoc` on a record escape to a persistent-map containing
+  every field plus the new binding (or minus the dropped key). This
+  loses record type information but is uniform and doesn't require
+  per-type reconstruction code — matching the "Fallback" path from
+  the design above. The original record is unchanged.
+- `get-in` now walks into records too: `(std misc nested)`'s
+  `nested-get` grew a `record?` branch, so records nested inside
+  pmaps, pmaps nested inside records, and records nested inside
+  records all traverse correctly.
+- `persistent-map?` and `imap?` are now re-exported from `(std clojure)`
+  so code can ask whether an `assoc` call escaped the record type.
+
+Tests live in `tests/test-record-map.ss` (32 tests), covering
+symbol/string key coercion, inherited fields, assoc/dissoc escape,
+original-record immutability, regression on persistent types, and
+nested `get-in` traversal. Known-field `assoc` reconstruction (which
+would preserve the record type) is intentionally *not* implemented:
+Chez's sealed-record model doesn't offer a generic way to rebuild
+an instance, and the pmap fallback is a principled choice per the
+design doc.
+
 ### 4.11 IReduce and seq-over-map fast paths
 
 **The gap.** Clojure's `reduce` dispatches to an `IReduce` protocol
@@ -1967,7 +1998,7 @@ in this doc. **[deferred]** items are non-goals.
 | Atom watches | [current] `(std misc atom)` | §4.7 landed |
 | Volatiles | [current] `(std misc atom)` | §4.7 landed |
 | Agents | [landed] `(std agent)` | §4.8 landed |
-| Record-as-map | [gap] | §4.10 |
+| Record-as-map | [landed] `(std clojure)` + `(std misc nested)` | §4.10 landed |
 | `#!clojure-reader` literal switch | [gap] (risky) | §4.9 |
 | `{}`/`#{}`/`[]`/`:kw` default reader | [deferred] | §4.9 |
 | CPS-transformed parked `go` | [deferred] | §3.8 |

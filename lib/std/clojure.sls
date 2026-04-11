@@ -67,10 +67,12 @@
     println prn pr pr-str prn-str
 
     ;; ---- Re-exports from (std immutable) ----
-    imap imap-set imap-ref imap-has?
+    imap imap? imap-set imap-ref imap-has?
     imap=? imap-hash
     in-imap in-imap-pairs in-imap-keys in-imap-values
     ivec ivec-set ivec-ref ivec-length
+    ;; ---- Re-exports from (std pmap) ----
+    persistent-map?
     ;; ---- Re-exports from (std pset) ----
     persistent-set persistent-set?
     persistent-set-contains? persistent-set->list
@@ -129,6 +131,118 @@
           (std sorted-set))
 
   ;; =========================================================================
+  ;; Record-as-map helpers (§4.10)
+  ;;
+  ;; Clojure's defrecord instances are *also* persistent maps — you can
+  ;; (get p :x), (keys p), etc. We extend Jerboa's polymorphic ops to
+  ;; the same on plain records (defstruct / define-record-type) by
+  ;; walking the rtd with `record-type-field-names` + `record-accessor`.
+  ;;
+  ;; The write side (assoc/dissoc on records) falls back to returning
+  ;; a persistent-map containing all the record's fields plus the new
+  ;; binding, matching Clojure's "escape to regular map" behaviour when
+  ;; you assoc an unknown key. For known keys we also return a pmap
+  ;; rather than trying to reconstruct the record — Chez doesn't
+  ;; provide a uniform way to rebuild sealed records given only an
+  ;; instance, so this keeps the implementation simple and uniform
+  ;; at the cost of losing type information after assoc.
+  ;; =========================================================================
+
+  ;; Normalize a user-provided record key to a symbol. Accepts
+  ;; symbol, string, or keyword. Returns #f for anything else.
+  (define (%record-key->symbol k)
+    (cond
+      [(symbol? k) k]
+      [(string? k) (string->symbol k)]
+      [(keyword? k) (string->symbol (keyword->string k))]
+      [else #f]))
+
+  ;; Collect (field-name . accessor) pairs for a record instance,
+  ;; walking the parent chain so inherited fields are included in
+  ;; declaration order (parent first, child fields appended).
+  ;; Returns a fresh list each call; cache in a caller if hot.
+  (define (%record-fields-all rec)
+    (let ([rtd (record-rtd rec)])
+      ;; `walk` receives the tail-so-far and prepends this rtd's fields
+      ;; (in reverse index order) to it. By walking the chain leaf-to-
+      ;; root and feeding each result as the tail, we end up with
+      ;; root-to-leaf declaration order overall.
+      (define (walk-rtd r tail)
+        (let* ([names (record-type-field-names r)]
+               [n (vector-length names)])
+          (let loop ([i (- n 1)] [out tail])
+            (if (< i 0)
+                out
+                (loop (- i 1)
+                      (cons (cons (vector-ref names i)
+                                  (record-accessor r i))
+                            out))))))
+      (let walk ([r rtd] [tail '()])
+        (cond
+          [(not r) tail]
+          [else
+           (walk (record-type-parent r)
+                 (walk-rtd r tail))]))))
+
+  ;; Find a record's field-value by name (walking parent chain).
+  ;; Returns default if not found.
+  (define (%record-ref rec key default)
+    (let ([name (%record-key->symbol key)])
+      (cond
+        [(not name) default]
+        [else
+         (let walk ([r (record-rtd rec)])
+           (cond
+             [(not r) default]
+             [else
+              (let* ([names (record-type-field-names r)]
+                     [n (vector-length names)])
+                (let loop ([i 0])
+                  (cond
+                    [(= i n) (walk (record-type-parent r))]
+                    [(eq? (vector-ref names i) name)
+                     ((record-accessor r i) rec)]
+                    [else (loop (+ i 1))])))]))])))
+
+  ;; Check whether a record has a field with the given name.
+  (define (%record-has-field? rec key)
+    (let ([name (%record-key->symbol key)])
+      (and name
+           (let walk ([r (record-rtd rec)])
+             (cond
+               [(not r) #f]
+               [else
+                (let* ([names (record-type-field-names r)]
+                       [n (vector-length names)])
+                  (let loop ([i 0])
+                    (cond
+                      [(= i n) (walk (record-type-parent r))]
+                      [(eq? (vector-ref names i) name) #t]
+                      [else (loop (+ i 1))])))])))))
+
+  ;; Ordered list of a record's field name symbols (parent first).
+  (define (%record-keys rec)
+    (map car (%record-fields-all rec)))
+
+  ;; Ordered list of a record's field values (parent first).
+  (define (%record-vals rec)
+    (map (lambda (pair) ((cdr pair) rec))
+         (%record-fields-all rec)))
+
+  ;; Escape a record to a persistent-map with its field bindings.
+  ;; Called by assoc/dissoc when they need to produce an updated
+  ;; collection but reconstructing the record is impractical.
+  ;; Field name symbols become the map keys; values become the
+  ;; map values. Inherited fields are included.
+  (define (%record->pmap rec)
+    (let loop ([fields (%record-fields-all rec)] [m pmap-empty])
+      (if (null? fields)
+          m
+          (let ([pair (car fields)])
+            (loop (cdr fields)
+                  (persistent-map-set m (car pair) ((cdr pair) rec)))))))
+
+  ;; =========================================================================
   ;; Numerics
   ;; =========================================================================
   (define (inc n) (+ n 1))
@@ -158,6 +272,8 @@
       [(hash-table? coll) (zero? (hash-length coll))]
       [(vector? coll) (zero? (vector-length coll))]
       [(string? coll) (zero? (string-length coll))]
+      ;; Plain record — empty iff no fields (including inherited).
+      [(record? coll) (null? (%record-fields-all coll))]
       [else (error 'empty? "unsupported collection type" coll)]))
 
   ;; =========================================================================
@@ -175,6 +291,8 @@
       [(hash-table? coll) (hash-length coll)]
       [(vector? coll) (vector-length coll)]
       [(string? coll) (string-length coll)]
+      ;; Plain record — number of fields including inherited ones.
+      [(record? coll) (length (%record-fields-all coll))]
       [else (error 'count "unsupported collection type" coll)]))
 
   ;; =========================================================================
@@ -191,6 +309,16 @@
           (if (persistent-set-contains? coll key) key default)]
          [(sorted-set? coll)
           (if (sorted-set-contains? coll key) key default)]
+         ;; Record — check nested-get first (handles containers), then
+         ;; fall through to record-field lookup. `record?` is checked
+         ;; AFTER the type-specific branches in nested-get so it only
+         ;; catches user-defined records.
+         [(and (record? coll)
+               (not (persistent-map? coll))
+               (not (persistent-set? coll))
+               (not (sorted-set? coll))
+               (not (concurrent-hash? coll)))
+          (%record-ref coll key default)]
          [else (nested-get coll key default)])]))
 
   (define (contains? coll key)
@@ -204,6 +332,8 @@
        (and (integer? key) (exact? key) (>= key 0)
             (< key (vector-length coll)))]
       [(pair? coll) (and (assq key coll) #t)]
+      ;; Plain user record — check if field exists.
+      [(record? coll) (%record-has-field? coll key)]
       [else #f]))
 
   ;; =========================================================================
@@ -246,6 +376,16 @@
            [else
             (hash-put! coll (car rest) (cadr rest))
             (loop (cddr rest))]))]
+      ;; Plain user record — escape to a persistent map containing
+      ;; all the record's fields plus the new bindings. This loses
+      ;; the record type information but matches Clojure's documented
+      ;; behaviour when you assoc a key a record doesn't support.
+      ;; Known-key assoc could theoretically rebuild the record, but
+      ;; Chez doesn't expose a uniform constructor-from-rtd, so we
+      ;; use the pmap escape uniformly. Use per-record struct updates
+      ;; (e.g. defstruct's setters) if you need to preserve type.
+      [(record? coll)
+       (apply assoc (%record->pmap coll) key val more)]
       [else (error 'assoc "unsupported collection type" coll)]))
 
   (define (dissoc coll . ks)
@@ -261,6 +401,11 @@
       [(hash-table? coll)
        (for-each (lambda (k) (hash-remove! coll k)) ks)
        coll]
+      ;; Plain user record — escape to pmap and dissoc from there.
+      ;; You can't actually remove a field from a record (it's part
+      ;; of the type), so we return a pmap with the field omitted.
+      [(record? coll)
+       (apply dissoc (%record->pmap coll) ks)]
       [else (error 'dissoc "unsupported collection type" coll)]))
 
   (define update
@@ -308,6 +453,8 @@
       [(persistent-map? coll) (persistent-map-keys coll)]
       [(concurrent-hash? coll) (concurrent-hash-keys coll)]
       [(hash-table? coll) (hash-keys coll)]
+      ;; Plain record — return field name symbols (parent chain first).
+      [(record? coll) (%record-keys coll)]
       [else (error 'keys "unsupported collection type" coll)]))
 
   (define (vals coll)
@@ -315,6 +462,8 @@
       [(persistent-map? coll) (persistent-map-values coll)]
       [(concurrent-hash? coll) (concurrent-hash-values coll)]
       [(hash-table? coll) (hash-values coll)]
+      ;; Plain record — return field values (same order as keys).
+      [(record? coll) (%record-vals coll)]
       [else (error 'vals "unsupported collection type" coll)]))
 
   ;; =========================================================================

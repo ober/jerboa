@@ -86,7 +86,37 @@
        ;; Alist — fall back to assoc
        (let ([pair (assoc key container)])
          (if pair (cdr pair) default))]
+      [(record? container)
+       ;; Record — look up field by name (accepts symbol, string, keyword).
+       ;; Walks the parent chain so inherited fields are reachable.
+       ;; This powers get-in over nested records / defstruct instances.
+       (%nested-record-ref container key default)]
       [else default]))
+
+  (define (%nested-record-key->symbol k)
+    (cond
+      [(symbol? k) k]
+      [(string? k) (string->symbol k)]
+      [(keyword? k) (string->symbol (keyword->string k))]
+      [else #f]))
+
+  (define (%nested-record-ref rec key default)
+    (let ([name (%nested-record-key->symbol key)])
+      (cond
+        [(not name) default]
+        [else
+         (let walk ([r (record-rtd rec)])
+           (cond
+             [(not r) default]
+             [else
+              (let* ([names (record-type-field-names r)]
+                     [n (vector-length names)])
+                (let loop ([i 0])
+                  (cond
+                    [(= i n) (walk (record-type-parent r))]
+                    [(eq? (vector-ref names i) name)
+                     ((record-accessor r i) rec)]
+                    [else (loop (+ i 1))])))]))])))
 
   (define (nested-empty-like container)
     ;; Return a fresh empty container of the same type as `container`.
