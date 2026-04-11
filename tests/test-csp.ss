@@ -259,6 +259,77 @@
     (list (chan->list s1) (chan->list s2)))
   '((a b) (a b)))
 
+;;; mult policies — default 'block, 'drop, 'timeout
+
+(test "mult-policy defaults to 'block"
+  (mult-policy (make-mult (make-channel)))
+  'block)
+
+(test "mult 'block explicit"
+  (let ([m (make-mult (make-channel) 'block)])
+    (mult-policy m))
+  'block)
+
+(test "mult 'drop — slow sub misses values without stalling fast sub"
+  (let* ([src  (make-channel 8)]
+         [m    (make-mult src 'drop)]
+         ;; fast sub: big buffer, drains everything
+         [fast (make-channel 16)]
+         ;; slow sub: unbuffered, we never read from it, so chan-try-put!
+         ;; returns #f and these values are dropped for the slow sub.
+         [slow (make-channel)])
+    (tap! m fast) (tap! m slow)
+    (for-each (lambda (x) (chan-put! src x)) '(1 2 3 4 5 6 7 8))
+    (chan-close! src)
+    (sleep (millis 120))
+    (list (mult-policy m)
+          (chan->list fast)))
+  '(drop (1 2 3 4 5 6 7 8)))
+
+(test "mult 'drop — rejects 3-arg arity without 'timeout"
+  (guard (exn [#t 'err])
+    (make-mult (make-channel) 'drop 100))
+  'err)
+
+(test "mult 'timeout — arity + ms validation"
+  (list
+    (guard (exn [#t 'no-ms])     (make-mult (make-channel) 'timeout))
+    (guard (exn [#t 'bad-ms])    (make-mult (make-channel) 'timeout -5))
+    (guard (exn [#t 'nonsense])  (make-mult (make-channel) 'bogus)))
+  '(no-ms bad-ms nonsense))
+
+(test "mult 'timeout — mult-policy introspection"
+  (mult-policy (make-mult (make-channel) 'timeout 20))
+  'timeout)
+
+(test "mult 'timeout — slow sub misses values after deadline"
+  (let* ([src  (make-channel 4)]
+         ;; 25ms deadline per value per sub — short enough to test, long
+         ;; enough that a buffered fast sub always accepts.
+         [m    (make-mult src 'timeout 25)]
+         [fast (make-channel 16)]
+         [slow (make-channel)])  ;; never drained
+    (tap! m fast) (tap! m slow)
+    (for-each (lambda (x) (chan-put! src x)) '(a b c d))
+    (chan-close! src)
+    ;; Give the fan-out thread enough time: ~25ms per dropped value,
+    ;; 4 values → up to 100ms of waiting on slow sub. Then close fan out.
+    (sleep (millis 250))
+    (chan->list fast))
+  '(a b c d))
+
+(test "mult 'block — passes every value when all subs keep up"
+  (let* ([src (make-channel 4)]
+         [m   (make-mult src 'block)]
+         [s1  (make-channel 8)]
+         [s2  (make-channel 8)])
+    (tap! m s1) (tap! m s2)
+    (chan-put! src 'x) (chan-put! src 'y) (chan-put! src 'z)
+    (chan-close! src)
+    (sleep (millis 80))
+    (list (chan->list s1) (chan->list s2)))
+  '((x y z) (x y z)))
+
 (test "pub / sub by topic"
   (let* ([src (make-channel 10)]
          [p   (make-pub src car)]

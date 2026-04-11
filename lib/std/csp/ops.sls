@@ -17,7 +17,7 @@
     ;; Composition
     chan-merge chan-split chan-classify-by chan-pipe-to
     ;; Broadcast: mult / tap / untap
-    make-mult mult? mult-source
+    make-mult mult? mult-source mult-policy
     tap! untap! untap-all!
     ;; Topic routing: pub / sub
     make-pub pub? pub-source
@@ -344,42 +344,112 @@
   ;; dynamically maintained set of subscriber channels. Subscribers
   ;; are added with `tap!` and removed with `untap!`.
   ;;
-  ;; Semantics trade-off: this implementation blocks the fan-out
-  ;; thread on the slowest subscriber. Clojure's core.async allows
-  ;; a timeout + drop policy per sub. For v1 we document the
-  ;; slow-subscriber hazard and expect users to hand slow subs a
-  ;; sliding / dropping buffer (see `make-channel/sliding`).
+  ;; Slow-subscriber policy
+  ;; ----------------------
+  ;; The default policy ('block) preserves Clojure's core.async
+  ;; behaviour: the fan-out thread blocks on `chan-put!` until every
+  ;; subscriber has accepted the value, so a slow tap stalls the
+  ;; entire mult. Two additional policies are available at creation
+  ;; time for code that prefers drop-on-slow-consumer semantics:
+  ;;
+  ;;   (make-mult src)               ;; 'block (default)
+  ;;   (make-mult src 'block)        ;; same as (make-mult src)
+  ;;   (make-mult src 'drop)         ;; drop values for a slow sub
+  ;;                                 ;; via chan-try-put!
+  ;;   (make-mult src 'timeout 100)  ;; give each sub up to 100ms;
+  ;;                                 ;; drop if it still can't accept
+  ;;
+  ;; The policy is fixed at creation. `mult-policy` returns the
+  ;; configured policy symbol (useful for introspection and tests).
 
   (define-record-type %mult
-    (fields (immutable source) (mutable subs) (immutable lock)))
+    (fields (immutable source)
+            (mutable   subs)
+            (immutable lock)
+            (immutable policy)    ;; 'block | 'drop | 'timeout
+            (immutable send-fn))) ;; (lambda (sub val) ...)
 
-  (define (make-mult source)
-    (let ([m (make-%mult source '() (make-mutex))])
-      (fork-thread
-        (lambda ()
+  ;; Monotonic-ms clock for the 'timeout policy.
+  (define (%now-ms)
+    (let ([t (current-time 'time-monotonic)])
+      (+ (* (time-second t) 1000)
+         (quotient (time-nanosecond t) 1000000))))
+
+  (define %mult-tick (make-time 'time-duration 1000000 0)) ;; 1 ms
+
+  ;; Pre-built send functions per policy.
+  (define %mult-send-block
+    (lambda (s v)
+      ;; chan-put! errors if already closed elsewhere — guard so an
+      ;; untap of a still-open sub doesn't nuke the fan-out thread.
+      (guard (_ [else (void)]) (chan-put! s v))))
+
+  (define %mult-send-drop
+    (lambda (s v)
+      (guard (_ [else (void)]) (chan-try-put! s v))))
+
+  (define (%make-mult-send-timeout ms)
+    (lambda (s v)
+      (guard (_ [else (void)])
+        (let ([deadline (+ (%now-ms) ms)])
           (let loop ()
-            (let ([v (chan-get! source)])
+            (cond
+              [(chan-try-put! s v) #t]
+              [(>= (%now-ms) deadline) #f]  ;; drop
+              [else (sleep %mult-tick) (loop)]))))))
+
+  ;; Shared fan-out loop: reads from source, dispatches via send-fn,
+  ;; closes all subs on EOF.
+  (define (%mult-run! m)
+    (fork-thread
+      (lambda ()
+        (let ([send-fn (%mult-send-fn m)])
+          (let loop ()
+            (let ([v (chan-get! (%mult-source m))])
               (cond
                 [(eof-object? v)
                  (with-mutex (%mult-lock m)
                    (for-each
                      (lambda (s)
-                       ;; chan-close! errors if already closed elsewhere
-                       ;; — guard so untap of a still-open sub doesn't
-                       ;; nuke the fan-out thread.
                        (guard (_ [else (void)]) (chan-close! s)))
                      (%mult-subs m)))]
                 [else
                  (let ([subs (with-mutex (%mult-lock m) (%mult-subs m))])
-                   (for-each
-                     (lambda (s)
-                       (guard (_ [else (void)]) (chan-put! s v)))
-                     subs))
-                 (loop)])))))
-      m))
+                   (for-each (lambda (s) (send-fn s v)) subs))
+                 (loop)]))))))
+    m)
+
+  (define make-mult
+    (case-lambda
+      [(source)
+       (%mult-run!
+         (make-%mult source '() (make-mutex) 'block %mult-send-block))]
+      [(source policy)
+       (case policy
+         [(block)
+          (%mult-run!
+            (make-%mult source '() (make-mutex) 'block %mult-send-block))]
+         [(drop)
+          (%mult-run!
+            (make-%mult source '() (make-mutex) 'drop %mult-send-drop))]
+         [(timeout)
+          (error 'make-mult
+            "'timeout policy requires a timeout in milliseconds" policy)]
+         [else (error 'make-mult "unknown mult policy" policy)])]
+      [(source policy ms)
+       (unless (eq? policy 'timeout)
+         (error 'make-mult
+           "third argument only valid for 'timeout policy" policy))
+       (unless (and (integer? ms) (positive? ms))
+         (error 'make-mult
+           "timeout must be a positive integer (milliseconds)" ms))
+       (%mult-run!
+         (make-%mult source '() (make-mutex) 'timeout
+           (%make-mult-send-timeout ms)))]))
 
   (define (mult? x) (%mult? x))
   (define (mult-source m) (%mult-source m))
+  (define (mult-policy m) (%mult-policy m))
 
   (define (tap! m ch)
     (with-mutex (%mult-lock m)

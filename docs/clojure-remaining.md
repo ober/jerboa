@@ -681,6 +681,18 @@ specs and a `timeout N` as the default-cutoff:
   time; if you want a different policy you create a new mult. Keep the
   same constraint in Jerboa — the policy is set once.
 
+**[landed]** `make-mult` is extended to accept an optional policy
+symbol (`'block`, `'drop`, `'timeout`) with the timeout ms as a third
+argument. `'block` (default) preserves existing behaviour. `'drop`
+uses `chan-try-put!` on every subscriber — slow subs silently miss
+values. `'timeout N` polls `chan-try-put!` per subscriber with a
+bounded deadline; a sub that still can't accept after N ms drops
+that value. Arg validation raises on nonsense combinations
+(`'timeout` without ms; non-`'timeout` with three args; unknown
+policy symbol). The configured policy is fixed at creation and
+exposed via the new `mult-policy` accessor. Covered by 8 tests in
+`tests/test-csp.ss`.
+
 ### 3.8 Parking go (research, likely deferred)
 
 **The problem.** Jerboa's `(go body ...)` spawns a real OS thread. Each
@@ -1714,7 +1726,7 @@ in this doc. **[deferred]** items are non-goals.
 | `go` / `go-loop` | [current] (OS threads) | §3.8 deferred |
 | `to-chan`/`onto-chan`/`chan-reduce` | [current] | — |
 | `merge`/`split`/`pipe` | [current] | §3.6 landed |
-| `mult`/`tap`/`untap` | [current] | §3.7 slow-sub policy |
+| `mult`/`tap`/`untap` | [current] | §3.7 landed (drop / timeout) |
 | `pub`/`sub`/`unsub` | [current] | — |
 | `pipeline`/`pipeline-async` | [current] | — |
 | `promise-chan` | [current] | — |
@@ -1724,7 +1736,7 @@ in this doc. **[deferred]** items are non-goals.
 | `put!`/`take!` with callbacks | [current] `(std csp ops)` | §3.4 landed |
 | `async/reduce`, `onto-chan!` | [current] `(std csp ops)` | §3.5 landed |
 | `split` n-way | [current] `(std csp ops)` | §3.6 landed |
-| Mult slow-sub policies | [gap] | §3.7 |
+| Mult slow-sub policies | [current] `(std csp ops)` | §3.7 landed |
 | Parked `go` (CPS) | [deferred] | §3.8 |
 | Transducer error handler on chan | [current] `(std csp clj)` | §3.1 landed |
 
