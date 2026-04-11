@@ -435,6 +435,15 @@ soak testing.
 
 ### 3.4 Callback-style `put!` / `take!`
 
+**Status.** [landed] `(std csp ops)` exports `put!` and `take!` and the
+Clojure names are re-exported from `(std csp clj)`. Both spawn one
+helper thread per callback (documented thread-explosion hazard) and
+guard the user callback so a raising callback prints a warning to
+`current-error-port` instead of silently killing the helper thread.
+Exercised by `tests/test-csp.ss` — seven tests covering successful put,
+put on a closed channel, fire-and-forget, take that sees a value, take
+that sees `eof-object` on close, and a full round-trip.
+
 **What Clojure does.** In addition to the blocking / parking `>!!`/`>!`
 and `<!!`/`<!`, core.async offers non-blocking *callback* forms:
 
@@ -1683,7 +1692,7 @@ in this doc. **[deferred]** items are non-goals.
 | `(chan n xform)` | [current] `(std csp clj)` | §3.1 landed |
 | `mix`/`admix`/`toggle` | [gap] | §3.2 |
 | Timer wheel | [gap] | §3.3 |
-| `put!`/`take!` with callbacks | [gap] | §3.4 |
+| `put!`/`take!` with callbacks | [current] `(std csp ops)` | §3.4 landed |
 | `async/reduce`, `onto-chan!` | [gap] | §3.5 |
 | `split` n-way | [gap] | §3.6 |
 | Mult slow-sub policies | [gap] | §3.7 |

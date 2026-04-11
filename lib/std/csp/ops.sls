@@ -12,6 +12,8 @@
     ;; Collection bridges
     to-chan onto-chan
     chan-reduce chan-into
+    ;; Non-blocking callbacks
+    put! take!
     ;; Composition
     chan-merge chan-split chan-pipe-to
     ;; Broadcast: mult / tap / untap
@@ -89,6 +91,74 @@
       [(vector? container)
        (list->vector (append (vector->list container) (chan->list ch)))]
       [else (error 'chan-into "unsupported container" container)]))
+
+  ;;; ======================================================
+  ;;; Callback-style put! / take!
+  ;;; ======================================================
+  ;;
+  ;; Non-blocking versions of put / take that spawn a helper thread,
+  ;; perform the operation, then invoke the user's callback with the
+  ;; result. These are the Clojure core.async `put!` / `take!` — the
+  ;; foundation for bridging callback-based APIs (Netty, raw sockets,
+  ;; AJAX shims) into channel pipelines without writing a go-block
+  ;; per request.
+  ;;
+  ;; Semantics:
+  ;;   - (put! ch v)      — fire-and-forget async put. No callback.
+  ;;                         Errors from a closed channel are swallowed.
+  ;;   - (put! ch v fn)   — async put; callback fn receives #t on a
+  ;;                         successful put and #f if the channel was
+  ;;                         closed before the put could land.
+  ;;   - (take! ch fn)    — async take; callback fn receives the value
+  ;;                         that arrives, or the eof-object when the
+  ;;                         channel closes without delivering one.
+  ;;
+  ;; Both `fn` callbacks run on the helper thread — they should not
+  ;; do heavy work, since each outstanding callback keeps one thread
+  ;; alive. If the callback itself raises an exception, a warning is
+  ;; printed to current-error-port and the helper thread exits (the
+  ;; exception does NOT propagate to the caller of put!/take!).
+  ;;
+  ;; WARNING — thread-per-callback. At high request rates the naive
+  ;; implementation creates one short-lived OS thread per callback.
+  ;; For production workloads consider batching onto a single
+  ;; dedicated dispatch thread. See core-async.md §3.4.
+
+  (define (%run-callback who fn . args)
+    ;; Guarded callback invocation — keeps a misbehaved user callback
+    ;; from bringing down the helper thread silently with no trace.
+    (guard (exn [else
+                 (fprintf (current-error-port)
+                   "~a callback raised: ~a~%"
+                   who
+                   (if (message-condition? exn)
+                       (condition-message exn)
+                       exn))])
+      (apply fn args)))
+
+  (define put!
+    (case-lambda
+      [(ch v)
+       (fork-thread
+         (lambda ()
+           ;; fire-and-forget: swallow closed-channel errors.
+           (guard (_ [else (void)]) (chan-put! ch v))))
+       (void)]
+      [(ch v fn)
+       (fork-thread
+         (lambda ()
+           (let ([ok? (guard (_ [else #f])
+                        (chan-put! ch v)
+                        #t)])
+             (%run-callback 'put! fn ok?))))
+       (void)]))
+
+  (define (take! ch fn)
+    (fork-thread
+      (lambda ()
+        (let ([v (chan-get! ch)])
+          (%run-callback 'take! fn v))))
+    (void))
 
   ;;; ======================================================
   ;;; Composition — merge / split / pipe-to

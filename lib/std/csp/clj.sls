@@ -41,6 +41,8 @@
     chan sliding-buffer dropping-buffer buffer-spec?
     ;; Put / take / close / non-blocking
     >! <! >!! <!! close! poll! offer!
+    ;; Async callback forms
+    put! take!
     ;; Select / timeout (re-exported from std csp select)
     alts! alts!! alt! alt!! default timeout
     ;; Go / thread

@@ -326,6 +326,75 @@
     (chan->list ch))
   '(1 oops 2))
 
+;;; ======== Callback-style put! / take! (Phase C.1) ========
+
+(test "put! with callback — successful put reports #t"
+  (let ([ch (chan 4)]
+        [result (make-channel 1)])
+    (put! ch 'hello (lambda (ok?) (chan-put! result ok?) (chan-close! result)))
+    (let ([ok? (chan-get! result)])
+      (list ok? (chan-get! ch))))
+  '(#t hello))
+
+(test "put! with callback — closed channel reports #f"
+  (let ([ch (chan 1)]
+        [result (make-channel 1)])
+    (chan-close! ch)
+    (put! ch 'bye (lambda (ok?) (chan-put! result ok?) (chan-close! result)))
+    (chan-get! result))
+  #f)
+
+(test "put! fire-and-forget (2-arg form)"
+  (let ([ch (chan 4)])
+    (put! ch 'fire)
+    (sleep (millis 20))  ;; give helper thread a chance
+    (chan-get! ch))
+  'fire)
+
+(test "take! delivers arriving value"
+  (let ([ch (chan 1)]
+        [seen (make-channel 1)])
+    (take! ch (lambda (v) (chan-put! seen v) (chan-close! seen)))
+    (chan-put! ch 42)
+    (chan-get! seen))
+  42)
+
+(test "take! delivers eof on close"
+  (let ([ch (chan 1)]
+        [seen (make-channel 1)])
+    (take! ch (lambda (v)
+                (chan-put! seen (if (eof-object? v) 'eof v))
+                (chan-close! seen)))
+    (chan-close! ch)
+    (chan-get! seen))
+  'eof)
+
+(test "take! runs after put! — full async round-trip"
+  (let ([ch  (chan 4)]
+        [out (make-channel 1)])
+    (take! ch (lambda (v) (chan-put! out (+ v 100)) (chan-close! out)))
+    (put! ch 7)
+    (chan-get! out))
+  107)
+
+(test "put! callback runs for buffered channel without blocking caller"
+  ;; The caller should NOT block even if the channel buffer fills up
+  ;; — put! delegates the wait to a helper thread. Here we fill a
+  ;; size-1 channel with one item; the second put! must return
+  ;; immediately to the caller while waiting in a helper thread, and
+  ;; fire its callback only after a reader drains the channel.
+  (let ([ch     (chan 1)]
+        [tag-ch (make-channel 4)])
+    (chan-put! ch 'first)
+    (put! ch 'second
+      (lambda (ok?) (chan-put! tag-ch (if ok? 'second-delivered 'failed))))
+    (chan-put! tag-ch 'after-put-returned)  ;; should land BEFORE 'second-delivered
+    (let ([a (chan-get! tag-ch)])           ;; drain tag before reading ch
+      (chan-get! ch)                         ;; unblock helper: makes room
+      (let ([b (chan-get! tag-ch)])
+        (list a b))))
+  '(after-put-returned second-delivered))
+
 ;;; Summary
 
 (printf "~%CSP: ~a passed, ~a failed~%" pass fail)
