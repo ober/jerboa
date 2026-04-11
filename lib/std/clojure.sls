@@ -46,6 +46,10 @@
     inc dec
     nil? some? true? false?
 
+    ;; ---- Transients (Clojure-style polymorphic dispatch) ----
+    transient persistent! transient?
+    assoc! dissoc! conj!
+
     ;; ---- Constructors (aliases) ----
     hash-map vec list* vector*
     hash-set make-hash-set
@@ -74,6 +78,13 @@
           (except (jerboa runtime) cons* hash-map)
           (std pmap)
           (std immutable)
+          (rename (std pvec)
+                  (transient  pvec-transient)
+                  (transient? pvec-transient?)
+                  (persistent! pvec-persistent!)
+                  (transient-set!    pvec-t-set!)
+                  (transient-ref     pvec-t-ref)
+                  (transient-append! pvec-t-append!))
           (std concur hash)
           (std misc atom)
           (std misc nested))
@@ -478,6 +489,82 @@
       (lambda (p)
         (for-each (lambda (x) (write x p) (display " " p)) args)
         (newline p))))
+
+  ;; =========================================================================
+  ;; Transients — polymorphic dispatch across imap (pmap) and ivec (pvec)
+  ;;
+  ;; Clojure idiom:
+  ;;   (let ([t (transient m)])
+  ;;     (assoc! t "a" 1)
+  ;;     (assoc! t "b" 2)
+  ;;     (persistent! t))
+  ;;
+  ;;   (let ([t (transient v)])
+  ;;     (conj! t 1)
+  ;;     (conj! t 2)
+  ;;     (persistent! t))
+  ;; =========================================================================
+
+  (define (transient coll)
+    (cond
+      [(persistent-map? coll) (transient-map coll)]
+      [(persistent-vector? coll) (pvec-transient coll)]
+      [else (error 'transient
+                   "expected a persistent map or vector" coll)]))
+
+  (define (transient? x)
+    (or (transient-map? x) (pvec-transient? x)))
+
+  (define (persistent! t)
+    (cond
+      [(transient-map? t) (persistent-map! t)]
+      [(pvec-transient? t) (pvec-persistent! t)]
+      [else (error 'persistent! "expected a transient" t)]))
+
+  (define assoc!
+    ;; Mutating assoc on a transient map.
+    ;; (assoc! t k v)
+    ;; (assoc! t k1 v1 k2 v2 ...)
+    (case-lambda
+      [(t key val)
+       (cond
+         [(transient-map? t) (tmap-set! t key val)]
+         [else (error 'assoc! "expected a transient map" t)])]
+      [(t key val . more)
+       (assoc! t key val)
+       (let loop ([rest more])
+         (cond
+           [(null? rest) t]
+           [(null? (cdr rest))
+            (error 'assoc! "odd number of key/value arguments")]
+           [else
+            (assoc! t (car rest) (cadr rest))
+            (loop (cddr rest))]))]))
+
+  (define (dissoc! t . ks)
+    (cond
+      [(transient-map? t)
+       (for-each (lambda (k) (tmap-delete! t k)) ks)
+       t]
+      [else (error 'dissoc! "expected a transient map" t)]))
+
+  (define (conj! t . xs)
+    (cond
+      [(pvec-transient? t)
+       (for-each (lambda (x) (pvec-t-append! t x)) xs)
+       t]
+      [(transient-map? t)
+       ;; Like conj on maps, xs must be [k v] pairs
+       (for-each
+         (lambda (entry)
+           (cond
+             [(pair? entry)
+              (tmap-set! t (car entry)
+                (if (pair? (cdr entry)) (cadr entry) (cdr entry)))]
+             [else (error 'conj! "cannot conj non-pair onto transient map" entry)]))
+         xs)
+       t]
+      [else (error 'conj! "expected a transient" t)]))
 
   ;; =========================================================================
   ;; Constructor aliases

@@ -26,7 +26,11 @@
     persistent-map-for-each persistent-map-map persistent-map-fold
     persistent-map-filter
     ;; Merge / set operations
-    persistent-map-merge persistent-map-diff)
+    persistent-map-merge persistent-map-diff
+    ;; Transients — mutable, faster for bulk construction
+    transient-map transient-map?
+    tmap-ref tmap-has? tmap-size
+    tmap-set! tmap-delete! persistent-map!)
 
   (import (chezscheme))
 
@@ -101,10 +105,18 @@
   ;;; ========== Construction ==========
   (define (make-persistent-map . kv-args)
     ;; kv-args = key1 val1 key2 val2 ...
-    (let loop ([kv kv-args] [m pmap-empty])
-      (if (null? kv)
-        m
-        (loop (cddr kv) (persistent-map-set m (car kv) (cadr kv))))))
+    ;; Uses a transient so we only allocate one %pmap record at the
+    ;; end. See transient section below.
+    (let ([t (transient-map pmap-empty)])
+      (let loop ([kv kv-args])
+        (cond
+          [(null? kv) (persistent-map! t)]
+          [(null? (cdr kv))
+           (error 'make-persistent-map
+                  "odd number of arguments — expected key/value pairs")]
+          [else
+           (tmap-set! t (car kv) (cadr kv))
+           (loop (cddr kv))]))))
 
   (define (persistent-map . kv-args)
     (apply make-persistent-map kv-args))
@@ -352,11 +364,12 @@
 
   (define (persistent-map-map proc m)
     ;; proc: (key val) -> new-val
-    (let ([result pmap-empty])
+    ;; Uses a transient to amortize the per-entry update cost.
+    (let ([t (transient-map pmap-empty)])
       (persistent-map-for-each
-        (lambda (k v) (set! result (persistent-map-set result k (proc k v))))
+        (lambda (k v) (tmap-set! t k (proc k v)))
         m)
-      result))
+      (persistent-map! t)))
 
   (define (persistent-map-fold proc init m)
     ;; proc: (acc key val) -> new-acc
@@ -368,28 +381,30 @@
 
   (define (persistent-map-filter pred m)
     ;; pred: (key val) -> boolean
-    (let ([result pmap-empty])
+    (let ([t (transient-map pmap-empty)])
       (persistent-map-for-each
         (lambda (k v)
           (when (pred k v)
-            (set! result (persistent-map-set result k v))))
+            (tmap-set! t k v)))
         m)
-      result))
+      (persistent-map! t)))
 
   ;;; ========== Merge ==========
   (define (persistent-map-merge m1 m2 . merge-proc-opt)
     ;; Start with m1, fold m2's entries in.
     ;; merge-proc: (key val-from-m1 val-from-m2) -> new-val
+    ;; Uses a transient over m1 for the running result.
     (let ([merge-proc (if (pair? merge-proc-opt)
                         (car merge-proc-opt)
-                        (lambda (k v1 v2) v2))])
-      (persistent-map-fold
-        (lambda (acc k v)
-          (if (persistent-map-has? acc k)
-            (persistent-map-set acc k
-              (merge-proc k (persistent-map-ref acc k) v))
-            (persistent-map-set acc k v)))
-        m1 m2)))
+                        (lambda (k v1 v2) v2))]
+          [t (transient-map m1)])
+      (persistent-map-for-each
+        (lambda (k v)
+          (if (tmap-has? t k)
+            (tmap-set! t k (merge-proc k (tmap-ref t k) v))
+            (tmap-set! t k v)))
+        m2)
+      (persistent-map! t)))
 
   ;;; ========== Diff ==========
   (define (persistent-map-diff m1 m2)
@@ -397,5 +412,109 @@
     (persistent-map-filter
       (lambda (k v) (not (persistent-map-has? m2 k)))
       m1))
+
+  ;;; ========== Transients ==========
+  ;;
+  ;; A transient-map is a mutable wrapper around a HAMT root that
+  ;; lets Clojure users express bulk construction idiomatically:
+  ;;
+  ;;   (def t (transient-map pmap-empty))
+  ;;   (for ([i (in-range 1000)]) (tmap-set! t i (* i i)))
+  ;;   (def m (persistent-map! t))     ;; invalidates t
+  ;;
+  ;; Correctness note: this first version does NOT implement Clojure's
+  ;; edit-owner tagging, so every hamt-set / hamt-delete still copies
+  ;; the nodes on its path. The wrapper still wins over repeated
+  ;; persistent-map-set because it avoids allocating a %pmap record
+  ;; per update and the bulk constructors skip the hash/equal lookups
+  ;; that go through the record API. Expect a real speedup once
+  ;; in-place mutation of owned nodes is added (see TODO).
+  ;;
+  ;; Use-after-persist protection: persistent-map! clears the `live?`
+  ;; flag; subsequent tmap-* calls raise an error. Mirrors Clojure's
+  ;; "transient used after persistent!" exception.
+
+  (define-record-type %tmap
+    (fields
+      (mutable root)
+      (mutable size)
+      equal-proc
+      hash-proc
+      (mutable live?)))
+
+  (define (transient-map? x) (%tmap? x))
+
+  (define (transient-map m)
+    ;; Create a transient from a persistent map. The persistent map
+    ;; is unaffected (transients copy-on-write into fresh nodes until
+    ;; edit-owner tagging is added).
+    (unless (persistent-map? m)
+      (error 'transient-map "expected a persistent-map" m))
+    (make-%tmap (%pmap-root m) (%pmap-size m)
+                (%pmap-equal-proc m) (%pmap-hash-proc m) #t))
+
+  (define (tmap-check who t)
+    (unless (%tmap? t)
+      (error who "expected a transient-map" t))
+    (unless (%tmap-live? t)
+      (error who "transient used after persistent!" t)))
+
+  (define (tmap-ref t key . default-thunk)
+    (tmap-check 'tmap-ref t)
+    (let ([result (hamt-ref (%tmap-root t) key
+                             ((%tmap-hash-proc t) key)
+                             0 (%tmap-equal-proc t))])
+      (cond
+        [result (cdr result)]
+        [(pair? default-thunk) ((car default-thunk))]
+        [else (error 'tmap-ref "key not found" key)])))
+
+  (define (tmap-has? t key)
+    (tmap-check 'tmap-has? t)
+    (and (hamt-ref (%tmap-root t) key
+                   ((%tmap-hash-proc t) key)
+                   0 (%tmap-equal-proc t))
+         #t))
+
+  (define (tmap-size t)
+    (tmap-check 'tmap-size t)
+    (%tmap-size t))
+
+  (define (tmap-set! t key val)
+    (tmap-check 'tmap-set! t)
+    (let-values ([(new-root delta)
+                  (hamt-set (%tmap-root t) key val
+                            ((%tmap-hash-proc t) key)
+                            0 (%tmap-equal-proc t))])
+      (%tmap-root-set! t new-root)
+      (%tmap-size-set! t (+ (%tmap-size t) delta))
+      t))
+
+  (define (tmap-delete! t key)
+    (tmap-check 'tmap-delete! t)
+    (let-values ([(new-root removed?)
+                  (hamt-delete (%tmap-root t) key
+                               ((%tmap-hash-proc t) key)
+                               0 (%tmap-equal-proc t))])
+      (when removed?
+        (%tmap-root-set! t new-root)
+        (%tmap-size-set! t (- (%tmap-size t) 1)))
+      t))
+
+  (define (persistent-map! t)
+    ;; Finalize a transient back into a persistent map. After this
+    ;; call, the transient is no longer live — any further tmap-*
+    ;; call raises an error, mirroring Clojure's semantics.
+    (tmap-check 'persistent-map! t)
+    (%tmap-live?-set! t #f)
+    (make-%pmap (%tmap-root t) (%tmap-size t)
+                (%tmap-equal-proc t) (%tmap-hash-proc t)))
+
+  ;;; ========== Bulk construction via transients ==========
+  ;;
+  ;; make-persistent-map originally walked its arguments with
+  ;; persistent-map-set, allocating a new %pmap record per key. The
+  ;; transient version re-uses a single %tmap wrapper end-to-end and
+  ;; produces the final %pmap only once, in persistent-map!.
 
 ) ;; end library

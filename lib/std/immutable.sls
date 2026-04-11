@@ -38,6 +38,11 @@
     imap-filter
     imap-merge
 
+    ;; Transient imap — mutable builder for bulk construction
+    imap-transient imap-transient?
+    imap-t-set! imap-t-delete! imap-t-ref imap-t-has? imap-t-size
+    imap-persistent!
+
     ;; Immutable vector (pvec wrappers with short names)
     ivec
     ivec-empty
@@ -78,14 +83,18 @@
   (define (imap . kvs)
     ;; Construct from alternating key/value pairs:
     ;; (imap "a" 1 "b" 2) => {"a": 1, "b": 2}
-    (let loop ([pairs kvs] [m imap-empty])
-      (cond
-        [(null? pairs) m]
-        [(null? (cdr pairs))
-         (error 'imap "odd number of arguments — expected key/value pairs")]
-        [else
-         (loop (cddr pairs)
-               (persistent-map-set m (car pairs) (cadr pairs)))])))
+    ;; Uses a transient internally — single %pmap allocation at the end.
+    (apply make-persistent-map kvs))
+
+  ;; Transient (mutable) imap builder — re-exported from (std pmap)
+  (define imap-transient transient-map)
+  (define imap-transient? transient-map?)
+  (define imap-t-set! tmap-set!)
+  (define imap-t-delete! tmap-delete!)
+  (define imap-t-ref tmap-ref)
+  (define imap-t-has? tmap-has?)
+  (define imap-t-size tmap-size)
+  (define imap-persistent! persistent-map!)
 
   (define (imap-ref m key . default)
     (if (null? default)
@@ -107,14 +116,15 @@
 
   (define (hashtable->imap ht)
     ;; Convert a mutable hashtable to an immutable map.
+    ;; Uses a transient for efficient bulk construction.
     (let-values ([(keys vals) (hashtable-entries ht)])
-      (let loop ([i 0] [m imap-empty])
-        (if (fx= i (vector-length keys))
-            m
-            (loop (fx+ i 1)
-                  (persistent-map-set m
-                    (vector-ref keys i)
-                    (vector-ref vals i)))))))
+      (let ([t (transient-map pmap-empty)])
+        (let loop ([i 0])
+          (if (fx= i (vector-length keys))
+              (persistent-map! t)
+              (begin
+                (tmap-set! t (vector-ref keys i) (vector-ref vals i))
+                (loop (fx+ i 1))))))))
 
   ;; =========================================================================
   ;; Immutable Vector — short aliases for persistent-vector
