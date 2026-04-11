@@ -98,6 +98,7 @@ RUN git clone https://github.com/ober/ChezScheme.git chez-musl-src && \
 WORKDIR /build/mine
 COPY jerbuild.ss /build/mine/jerboa/jerbuild.ss
 COPY lib /build/mine/jerboa/lib
+COPY support /build/mine/jerboa/support
 COPY jerboa-native-rs /build/mine/jerboa/jerboa-native-rs
 
 # ── Pre-build libjerboa_native.a (musl, no duckdb) ───────────────────────────
