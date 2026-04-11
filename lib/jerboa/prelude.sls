@@ -219,6 +219,13 @@
     make-shared shared? shared-ref shared-set!
     shared-update! shared-cas! shared-swap!
 
+    ;; ---- std/misc/nested (Clojure-style nested access) ----
+    ;; get-in is polymorphic (imap/chash/hash/vector/alist);
+    ;; assoc-in / update-in are pure (imap only) and return new containers;
+    ;; assoc-in! / update-in! mutate chash/hash/vector in place.
+    get-in assoc-in update-in assoc-in! update-in!
+    nested-get nested-empty-like
+
     ;; ---- AI compatibility aliases ----
     ;; Common names LLMs hallucinate from Racket/Gerbil/Gambit/CL training data.
     ;; These are thin aliases so AI-generated code works on the first try.
@@ -276,7 +283,8 @@
     (std csv)
     (std ergo)
     (std misc atom)
-    (std misc shared))
+    (std misc shared)
+    (std misc nested))
 
   ;; ---- AI compatibility aliases ----
   (define hash-has-key? hash-key?)
