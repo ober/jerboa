@@ -25,6 +25,10 @@
     persistent-map->list persistent-map-keys persistent-map-values
     persistent-map-for-each persistent-map-map persistent-map-fold
     persistent-map-filter
+    ;; Structural equality / hashing
+    persistent-map=? persistent-map-hash
+    ;; Iterators (return lists compatible with std/iter's for/for/collect)
+    in-pmap in-pmap-pairs in-pmap-keys in-pmap-values
     ;; Merge / set operations
     persistent-map-merge persistent-map-diff
     ;; Transients — mutable, faster for bulk construction
@@ -412,6 +416,121 @@
     (persistent-map-filter
       (lambda (k v) (not (persistent-map-has? m2 k)))
       m1))
+
+  ;;; ========== Structural equality ==========
+  ;;
+  ;; Two persistent maps are equal iff they have the same size AND
+  ;; every (key, value) pair in m1 is also present in m2 (with a
+  ;; value that equal?'s). Size check is O(1); the membership walk
+  ;; is O(n * log_32 n) ≈ O(n). Short-circuits on first mismatch via
+  ;; an internal escape continuation.
+  ;;
+  ;; Does NOT require key order to match — HAMT iteration order is
+  ;; a function of hash layout, not insertion order, so ordering is
+  ;; not part of the value-equality contract.
+  ;;
+  ;; Values are compared with a recursive helper `pmap-val=?` so that
+  ;; nested persistent maps compare structurally rather than by eq?
+  ;; (Chez's equal? does not understand user-defined record types).
+
+  (define (pmap-val=? a b)
+    (cond
+      [(and (%pmap? a) (%pmap? b)) (persistent-map=? a b)]
+      [(and (pair? a) (pair? b))
+       (and (pmap-val=? (car a) (car b))
+            (pmap-val=? (cdr a) (cdr b)))]
+      [(and (vector? a) (vector? b))
+       (let ([la (vector-length a)])
+         (and (= la (vector-length b))
+              (let loop ([i 0])
+                (cond
+                  [(= i la) #t]
+                  [(pmap-val=? (vector-ref a i) (vector-ref b i))
+                   (loop (+ i 1))]
+                  [else #f]))))]
+      [else (equal? a b)]))
+
+  (define (persistent-map=? m1 m2)
+    (cond
+      [(eq? m1 m2) #t]
+      [(not (%pmap? m1)) #f]
+      [(not (%pmap? m2)) #f]
+      [(not (= (%pmap-size m1) (%pmap-size m2))) #f]
+      [else
+       (call/cc
+         (lambda (return)
+           (persistent-map-for-each
+             (lambda (k v)
+               (let ([result (hamt-ref (%pmap-root m2) k
+                                       ((%pmap-hash-proc m2) k)
+                                       0 (%pmap-equal-proc m2))])
+                 (unless (and result (pmap-val=? (cdr result) v))
+                   (return #f))))
+             m1)
+           #t))]))
+
+  ;;; ========== Structural hash ==========
+  ;;
+  ;; Order-independent hash: combine per-entry hashes with XOR so
+  ;; rearranging entries yields the same map-hash. Each entry is
+  ;; hashed as (pmap-val-hash k) xor (pmap-val-hash v) which mixes
+  ;; key and value. Uses a recursive helper that understands nested
+  ;; %pmap values, so the invariant
+  ;;   (=> (persistent-map=? m1 m2) (= (persistent-map-hash m1)
+  ;;                                   (persistent-map-hash m2)))
+  ;; holds even for maps whose values are themselves %pmap records
+  ;; (which Chez's equal-hash compares by identity).
+
+  (define (pmap-val-hash x)
+    (cond
+      [(%pmap? x) (persistent-map-hash x)]
+      [(pair? x)
+       ;; Cheap mixing — sensitive to position so (a . b) and (b . a)
+       ;; don't collide, but still deterministic for equal values.
+       (bitwise-xor (pmap-val-hash (car x))
+                    (bitwise-arithmetic-shift (pmap-val-hash (cdr x)) 1))]
+      [(vector? x)
+       (let ([len (vector-length x)])
+         (let loop ([i 0] [h len])
+           (if (= i len)
+               h
+               (loop (+ i 1)
+                     (bitwise-xor h
+                       (bitwise-arithmetic-shift
+                         (pmap-val-hash (vector-ref x i)) 3))))))]
+      [else (equal-hash x)]))
+
+  (define (persistent-map-hash m)
+    (let ([h 0])
+      (persistent-map-for-each
+        (lambda (k v)
+          ;; Combine k and v with a non-linear mix so swapping
+          ;; two entries' halves can't alias in the global XOR.
+          (set! h (bitwise-xor h
+                    (bitwise-xor (pmap-val-hash k)
+                      (bitwise-arithmetic-shift (pmap-val-hash v) 1)))))
+        m)
+      ;; Mix size in so empty vs. full-of-zeros don't collide.
+      (bitwise-xor h (equal-hash (%pmap-size m)))))
+
+  ;;; ========== Iterators ==========
+  ;;
+  ;; (std iter)'s for/for-collect/for/fold walk plain lists, so each
+  ;; iterator here materializes the map into a list. This matches the
+  ;; existing in-hash-keys / in-hash-values / in-hash-pairs pattern.
+
+  (define (in-pmap-keys m)
+    (persistent-map-keys m))
+
+  (define (in-pmap-values m)
+    (persistent-map-values m))
+
+  (define (in-pmap-pairs m)
+    (persistent-map->list m))
+
+  ;; `in-pmap` — default iterator yields (key . val) pairs, matching
+  ;; Clojure's (for [[k v] m] ...) idiom once users destructure.
+  (define in-pmap in-pmap-pairs)
 
   ;;; ========== Transients ==========
   ;;

@@ -37,6 +37,8 @@
     imap-fold
     imap-filter
     imap-merge
+    imap=? imap-hash
+    in-imap in-imap-pairs in-imap-keys in-imap-values
 
     ;; Transient imap — mutable builder for bulk construction
     imap-transient imap-transient?
@@ -113,6 +115,12 @@
   (define imap-fold persistent-map-fold)
   (define imap-filter persistent-map-filter)
   (define imap-merge persistent-map-merge)
+  (define imap=? persistent-map=?)
+  (define imap-hash persistent-map-hash)
+  (define in-imap in-pmap)
+  (define in-imap-pairs in-pmap-pairs)
+  (define in-imap-keys in-pmap-keys)
+  (define in-imap-values in-pmap-values)
 
   (define (hashtable->imap ht)
     ;; Convert a mutable hashtable to an immutable map.

@@ -212,6 +212,101 @@
           (persistent-map-has? m3 'c)))
   '(2 #t #f #t))
 
+;;; ======== Structural equality ========
+
+(test "=? identical"
+  (let ([m (persistent-map 'a 1 'b 2)])
+    (persistent-map=? m m))
+  #t)
+
+(test "=? same content different order"
+  (persistent-map=?
+    (persistent-map 'a 1 'b 2 'c 3)
+    (persistent-map 'c 3 'b 2 'a 1))
+  #t)
+
+(test "=? different sizes"
+  (persistent-map=?
+    (persistent-map 'a 1 'b 2)
+    (persistent-map 'a 1))
+  #f)
+
+(test "=? same size different keys"
+  (persistent-map=?
+    (persistent-map 'a 1 'b 2)
+    (persistent-map 'a 1 'c 2))
+  #f)
+
+(test "=? same keys different values"
+  (persistent-map=?
+    (persistent-map 'a 1 'b 2)
+    (persistent-map 'a 1 'b 99))
+  #f)
+
+(test "=? nested equal"
+  (persistent-map=?
+    (persistent-map 'a (persistent-map 'x 1))
+    (persistent-map 'a (persistent-map 'x 1)))
+  #t)
+
+(test "=? empty maps"
+  (persistent-map=? pmap-empty pmap-empty)
+  #t)
+
+(test "=? non-pmap → #f"
+  (persistent-map=? (persistent-map 'a 1) '((a . 1)))
+  #f)
+
+;;; ======== Structural hash ========
+
+(test "hash equal when content matches (different insertion order)"
+  (= (persistent-map-hash (persistent-map 'a 1 'b 2 'c 3))
+     (persistent-map-hash (persistent-map 'c 3 'b 2 'a 1)))
+  #t)
+
+(test "hash differs for different content"
+  (not (= (persistent-map-hash (persistent-map 'a 1))
+          (persistent-map-hash (persistent-map 'a 2))))
+  #t)
+
+(test "hash is integer"
+  (integer? (persistent-map-hash (persistent-map 'a 1 'b 2)))
+  #t)
+
+(test "hash empty map"
+  (integer? (persistent-map-hash pmap-empty))
+  #t)
+
+(test "hash respects nested pmap equality"
+  (= (persistent-map-hash (persistent-map 'a (persistent-map 'x 1)))
+     (persistent-map-hash (persistent-map 'a (persistent-map 'x 1))))
+  #t)
+
+;;; ======== Iterators ========
+
+(test "in-pmap-keys returns a list"
+  (list? (in-pmap-keys (persistent-map 'a 1 'b 2)))
+  #t)
+
+(test "in-pmap-keys has all keys"
+  (let ([ks (sort (lambda (a b) (string<? (symbol->string a)
+                                          (symbol->string b)))
+                  (in-pmap-keys (persistent-map 'a 1 'b 2 'c 3)))])
+    ks)
+  '(a b c))
+
+(test "in-pmap-values sum"
+  (apply + (in-pmap-values (persistent-map 'a 1 'b 2 'c 3)))
+  6)
+
+(test "in-pmap-pairs count"
+  (length (in-pmap-pairs (persistent-map 'a 1 'b 2)))
+  2)
+
+(test "in-pmap default is pairs"
+  (length (in-pmap (persistent-map 'a 1 'b 2 'c 3)))
+  3)
+
 ;;; Summary
 
 (printf "~%Persistent Hash Maps: ~a passed, ~a failed~%" pass fail)

@@ -43,6 +43,7 @@
     first rest next last
     conj cons* empty?
     reduce into range
+    seq =? hash
     inc dec
     nil? some? true? false?
 
@@ -66,7 +67,13 @@
 
     ;; ---- Re-exports from (std immutable) ----
     imap imap-set imap-ref imap-has?
+    imap=? imap-hash
+    in-imap in-imap-pairs in-imap-keys in-imap-values
     ivec ivec-set ivec-ref ivec-length
+    ;; ---- Re-exports from (std pset) ----
+    persistent-set persistent-set?
+    persistent-set-contains? persistent-set->list
+    persistent-set-hash in-pset
 
     ;; ---- Re-exports from (std misc atom) ----
     atom atom? deref reset! swap! compare-and-set!
@@ -479,6 +486,72 @@
                  [(persistent-map? from-coll) (persistent-map->list from-coll)]
                  [else (error 'into "cannot into map from this" from-coll)]))]
       [else (error 'into "unsupported to-coll" to-coll)]))
+
+  ;; =========================================================================
+  ;; seq — polymorphic sequence view of a collection.
+  ;;
+  ;; Clojure's (seq coll) returns nil for empty collections and a
+  ;; sequence of elements otherwise. We model Clojure's nil as #f.
+  ;;   - Maps yield (key . val) pairs (matching Clojure's MapEntry).
+  ;;   - Sets yield the elements in HAMT order.
+  ;;   - Vectors and strings yield elements left-to-right.
+  ;;   - Lists return themselves.
+  ;; =========================================================================
+
+  (define (seq coll)
+    (cond
+      [(eq? coll #f) #f]
+      [(null? coll) #f]
+      [(pair? coll) coll]
+      [(persistent-map? coll)
+       (if (zero? (persistent-map-size coll)) #f (persistent-map->list coll))]
+      [(persistent-set? coll)
+       (if (zero? (persistent-set-size coll)) #f (persistent-set->list coll))]
+      [(concurrent-hash? coll)
+       (if (zero? (concurrent-hash-size coll))
+           #f
+           ;; Return (k . v) pairs, matching map semantics.
+           (let ([ks (concurrent-hash-keys coll)])
+             (map (lambda (k) (cons k (concurrent-hash-get coll k))) ks)))]
+      [(hash-table? coll)
+       (if (zero? (hash-length coll)) #f (hash->list coll))]
+      [(vector? coll)
+       (if (zero? (vector-length coll)) #f (vector->list coll))]
+      [(string? coll)
+       (if (zero? (string-length coll)) #f (string->list coll))]
+      [else (error 'seq "unsupported collection type" coll)]))
+
+  ;; =========================================================================
+  ;; Equality and hash — polymorphic wrappers.
+  ;;
+  ;; Clojure's (= a b) is structural; Chez's equal? already does the
+  ;; right thing for lists, vectors, strings, and numbers, but records
+  ;; (including %pmap / %pset) compare with eq? by default. We dispatch
+  ;; on the collection type so the specialized =/hash implementations
+  ;; are used transparently.
+  ;; =========================================================================
+
+  (define =?
+    (case-lambda
+      [(a) #t]
+      [(a b)
+       (cond
+         [(and (persistent-map? a) (persistent-map? b)) (persistent-map=? a b)]
+         [(and (persistent-set? a) (persistent-set? b)) (persistent-set=? a b)]
+         [else (equal? a b)])]
+      [(a b . more)
+       (and (=? a b)
+            (let loop ([x b] [rest more])
+              (cond
+                [(null? rest) #t]
+                [else (and (=? x (car rest)) (loop (car rest) (cdr rest)))])))]))
+
+  (define (hash x)
+    ;; Polymorphic structural hash, consistent with =?.
+    (cond
+      [(persistent-map? x) (persistent-map-hash x)]
+      [(persistent-set? x) (persistent-set-hash x)]
+      [else (equal-hash x)]))
 
   ;; =========================================================================
   ;; Printing

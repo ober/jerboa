@@ -55,6 +55,8 @@
     pset-union pset-intersection pset-difference
     persistent-set-subset? pset-subset?
     persistent-set=? pset=?
+    persistent-set-hash pset-hash
+    in-pset
     ;; Transient variant for bulk construction
     transient-set transient-set?
     tset-add! tset-remove! tset-contains? tset-size
@@ -187,11 +189,25 @@
     (and (= (persistent-set-size s1) (persistent-set-size s2))
          (persistent-set-subset? s1 s2)))
 
+  ;; Order-independent structural hash. Mirrors persistent-map-hash
+  ;; but only consumes the keys (values are always the sentinel #t).
+  (define (persistent-set-hash s)
+    (let ([h 0])
+      (persistent-set-for-each
+        (lambda (x) (set! h (bitwise-xor h (equal-hash x))))
+        s)
+      (bitwise-xor h (equal-hash (persistent-set-size s)))))
+
+  ;; Iterator — returns a list of elements, compatible with (std iter).
+  (define (in-pset s)
+    (persistent-set->list s))
+
   (define pset-union persistent-set-union)
   (define pset-intersection persistent-set-intersection)
   (define pset-difference persistent-set-difference)
   (define pset-subset? persistent-set-subset?)
   (define pset=? persistent-set=?)
+  (define pset-hash persistent-set-hash)
 
   ;;; ========== Transients (set variant) ==========
   ;;
