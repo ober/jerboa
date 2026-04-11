@@ -40,6 +40,16 @@
       (vector-set! to (+ to-start i)
                       (vector-ref from (+ from-start i)))))
 
+  ;;; ========== Alist lookup with custom equality ==========
+  ;; Chez's built-in assoc only accepts 2 arguments (key and alist).
+  ;; SRFI-1's 3-arg (assoc key alist =?) is not available here, so we
+  ;; hand-roll a find that consults the user-supplied equality procedure.
+  (define (assoc-with equal-proc key alist)
+    (cond
+      [(null? alist) #f]
+      [(equal-proc (caar alist) key) (car alist)]
+      [else (assoc-with equal-proc key (cdr alist))]))
+
   ;;; ========== HAMT constants ==========
   (define BITS      5)
   (define BRANCHING 32)
@@ -119,8 +129,7 @@
 
       [(hamt-coll? node)
        (and (= (hamt-coll-hash node) key-hash)
-            (let ([p (assoc key (hamt-coll-pairs node) equal-proc)])
-              p))]))
+            (assoc-with equal-proc key (hamt-coll-pairs node)))]))
 
   (define (persistent-map-ref m key . default-thunk)
     (let ([result (hamt-ref (%pmap-root m) key
@@ -206,7 +215,7 @@
          (if (= coll-hash key-hash)
            ;; Same hash: update or extend the collision bucket
            (let* ([pairs    (hamt-coll-pairs node)]
-                  [existing (assoc key pairs equal-proc)])
+                  [existing (assoc-with equal-proc key pairs)])
              (if existing
                (values
                  (make-hamt-coll key-hash
