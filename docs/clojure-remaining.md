@@ -1565,6 +1565,26 @@ limitation applies).
 
 ### 4.8 Agents
 
+**[landed]** Phase E.5 shipped `(std agent)`. The module exports
+`agent`, `agent?`, `send`, `send-off`, `agent-value`, `agent-error`,
+`clear-agent-errors`, `restart-agent`, `await`, and `shutdown-agent!`.
+Each agent wraps a single worker thread that reads actions off a
+buffered CSP channel and applies them to the agent's value in order.
+Because there's one worker per agent, actions are guaranteed
+serialized regardless of how many threads call `send` concurrently.
+
+Error semantics match Clojure's `:fail` mode: if an action throws,
+the exception lands in the agent's error slot and subsequent `send`
+calls raise until `restart-agent` is called to clear the error and
+reset the value. `send-off` is currently an alias for `send` — Jerboa
+doesn't distinguish CPU and I/O thread pools.
+
+`(std agent)` is *not* in the prelude because `send` is a common name
+that would conflict with `(std actor)`'s `send`. Users who want both
+modules should import one of them with a rename. A new module header
+note cross-references `(std actor)` for users who want supervised
+hierarchies instead of a single state cell.
+
 **The gap.** Clojure's agent is an asynchronous state cell with an
 action queue: you `(send agent fn args)` and the function is applied to
 the current agent value on a background thread pool. Errors put the
@@ -1946,7 +1966,7 @@ in this doc. **[deferred]** items are non-goals.
 | `defprotocol`/`extend-type` | [landed] `(std protocol)` | §4.6 landed |
 | Atom watches | [current] `(std misc atom)` | §4.7 landed |
 | Volatiles | [current] `(std misc atom)` | §4.7 landed |
-| Agents | [gap] | §4.8 |
+| Agents | [landed] `(std agent)` | §4.8 landed |
 | Record-as-map | [gap] | §4.10 |
 | `#!clojure-reader` literal switch | [gap] (risky) | §4.9 |
 | `{}`/`#{}`/`[]`/`:kw` default reader | [deferred] | §4.9 |
