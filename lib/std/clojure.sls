@@ -81,6 +81,9 @@
     add-watch! remove-watch!
     volatile! volatile? vreset! vswap! vderef
 
+    ;; ---- Re-exports from (std misc meta) ----
+    with-meta meta vary-meta meta-wrapped? strip-meta
+
     ;; ---- Re-exports from (std misc nested) ----
     get-in assoc-in update-in
 
@@ -104,7 +107,8 @@
                   assoc iota 1+ 1-
                   atom?
                   merge merge!
-                  list*)
+                  list*
+                  meta)
           (except (jerboa runtime) cons* hash-map)
           (std pmap)
           (std immutable)
@@ -119,6 +123,7 @@
                   (persistent-set!    pset-persistent!))
           (std concur hash)
           (std misc atom)
+          (std misc meta)
           (std misc nested)
           (std pqueue)
           (std sorted-set))
@@ -619,10 +624,12 @@
     (case-lambda
       [(a) #t]
       [(a b)
-       (cond
-         [(and (persistent-map? a) (persistent-map? b)) (persistent-map=? a b)]
-         [(and (persistent-set? a) (persistent-set? b)) (persistent-set=? a b)]
-         [else (equal? a b)])]
+       ;; Metadata does not participate in equality — strip wrappers first.
+       (let ([a (strip-meta a)] [b (strip-meta b)])
+         (cond
+           [(and (persistent-map? a) (persistent-map? b)) (persistent-map=? a b)]
+           [(and (persistent-set? a) (persistent-set? b)) (persistent-set=? a b)]
+           [else (equal? a b)]))]
       [(a b . more)
        (and (=? a b)
             (let loop ([x b] [rest more])

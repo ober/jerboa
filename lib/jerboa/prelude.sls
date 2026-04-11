@@ -219,6 +219,9 @@
     ;; Volatiles (single-threaded transient cells for transducers)
     volatile! volatile? vreset! vswap! vderef
 
+    ;; ---- std/misc/meta (Clojure-style metadata wrappers) ----
+    with-meta meta vary-meta meta-wrapped? strip-meta
+
     ;; ---- std/misc/shared (atomic cell with CAS) ----
     make-shared shared? shared-ref shared-set!
     shared-update! shared-cas! shared-swap!
@@ -253,7 +256,8 @@
             iota 1+ 1-
             partition
             make-date make-time
-            atom?)
+            atom?
+            meta)
     (only (jerboa core)
       def def* defrule defrules
       defstruct defclass defmethod
@@ -287,6 +291,7 @@
     (std csv)
     (std ergo)
     (std misc atom)
+    (std misc meta)
     (std misc shared)
     (std misc nested))
 

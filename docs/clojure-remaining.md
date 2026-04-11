@@ -1066,6 +1066,26 @@ sorted-set sorted-set?
 
 ### 4.4 Metadata system (`with-meta` / `meta` / `vary-meta`)
 
+**[landed]** Phase E.4 shipped `(std misc meta)` using Option 3
+(wrapper record). The module exports `with-meta`, `meta`, `vary-meta`,
+`meta-wrapped?`, and `strip-meta`. All five names are re-exported from
+the prelude and from `(std clojure)`. `(std clojure)`'s `=?` is taught
+to call `strip-meta` on both sides before comparing, so metadata does
+not participate in equality. `with-meta` re-wraps rather than nests:
+calling it on an already-wrapped value replaces the existing metadata
+in a single layer, keeping `strip-meta` a single-step operation.
+
+The wrapper approach is opt-in: values are only wrapped when metadata
+is attached, so there's zero overhead for the 99% of code that doesn't
+use it. The trade-off is that metadata-carrying values need to be
+`strip-meta`'d before being passed to ops that don't know about the
+wrapper. Polymorphic dispatches in `(std clojure)` that check types
+will see the wrapper record rather than the underlying collection —
+callers should `strip-meta` before calling things like `get`, `assoc`,
+or `count` on metadata-tagged values, or the dispatch will fall through
+to the error case. This is a documented limitation; full transparent
+unwrapping in every op would cost ~2 ns per call for everyone.
+
 **The gap.** Clojure values can carry an immutable metadata map that
 doesn't affect equality or hash but can be queried and updated. Used for
 type hints, docstrings, line-number tracking in macros, spec annotations,
@@ -1921,7 +1941,7 @@ in this doc. **[deferred]** items are non-goals.
 | Transducer ↔ pmap/pset bridge | [current] `(std transducer)` | §4.1 landed |
 | PersistentQueue | [current] `(std pqueue)` | §4.2 landed |
 | Sorted-set | [current] `(std sorted-set)` | §4.3 landed |
-| Metadata (`with-meta`/`meta`) | [gap] | §4.4 |
+| Metadata (`with-meta`/`meta`) | [landed] `(std misc meta)` | §4.4 landed |
 | `defmulti`/`defmethod` value-dispatch | [landed] `(std multi)` | §4.5 landed |
 | `defprotocol`/`extend-type` | [landed] `(std protocol)` | §4.6 landed |
 | Atom watches | [current] `(std misc atom)` | §4.7 landed |
