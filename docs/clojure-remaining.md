@@ -1156,6 +1156,50 @@ Half a day.
 
 ### 4.5 Value-dispatched multimethods (`defmulti` / `defmethod`)
 
+**[landed]** Phase E.2 shipped `(std multi)`. The module exports
+`defmulti`, `defmethod`, `multimethod?`, `multimethod-name`, `get-method`,
+`remove-method`, and `methods`. Because the prelude already binds
+`defmethod` to the struct-typed dispatcher, `(std multi)` is *not* in the
+prelude — users import it explicitly and shadow the prelude's
+`defmethod`:
+
+```scheme
+(import (except (jerboa prelude) defmethod)
+        (std multi))
+
+(defmulti area (lambda (s) (car s)))
+(defmethod area 'circle (c) (* 3.14 (cadr c) (cadr c)))
+(defmethod area 'square (s) (let ([side (cadr s)]) (* side side)))
+(defmethod area 'default (x) (error 'area "unknown shape" x))
+(area '(circle 3))   ;; => 28.26
+```
+
+Dispatch keys are compared with `equal?`, so any hashable value works
+(symbols, numbers, strings, lists, pmaps). The sentinel `'default` on
+`defmethod` / `remove-method` / `get-method` targets the fallback slot.
+Without a default, a miss raises. Concurrency: each multimethod owns a
+mutex; dispatch lookup runs under the mutex but the body runs outside,
+so methods may recursively invoke the same multimethod without
+deadlocking.
+
+Internally, `defmulti` returns a procedure and registers it in a
+module-level `eq?`-hashtable keyed on the procedure identity, so
+`defmethod` can look up the underlying record without threading a second
+identifier through macro hygiene.
+
+Tests: `tests/test-multi.ss` — 24 tests covering basic dispatch, default
+fallthrough, `multimethod?`/`multimethod-name` introspection, `methods`
+alist, `get-method` (found / missing / default), `remove-method`
+(drops / idempotent / clears default), no-default raise, redefinition,
+equal?-based keys (string / int / list), two-arg dispatch, and error on
+non-multimethod procs.
+
+Advanced Clojure features (`isa?` hierarchies, `prefer-method`,
+`derive`/`underive`) are deferred to a follow-up — the current module
+implements the 90% case.
+
+---
+
 **The gap.** Jerboa has `defmethod` in the prelude, but it dispatches on
 **struct type** — you write `(defmethod (area (c circle)) ...)` and it
 registers a method against the `circle` record type. Clojure's
@@ -1818,7 +1862,7 @@ in this doc. **[deferred]** items are non-goals.
 | PersistentQueue | [current] `(std pqueue)` | §4.2 landed |
 | Sorted-set | [current] `(std sorted-set)` | §4.3 landed |
 | Metadata (`with-meta`/`meta`) | [gap] | §4.4 |
-| `defmulti`/`defmethod` value-dispatch | [gap] | §4.5 |
+| `defmulti`/`defmethod` value-dispatch | [landed] `(std multi)` | §4.5 landed |
 | `defprotocol`/`extend-type` | [gap] | §4.6 |
 | Atom watches | [current] `(std misc atom)` | §4.7 landed |
 | Volatiles | [current] `(std misc atom)` | §4.7 landed |
