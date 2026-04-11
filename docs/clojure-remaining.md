@@ -1673,7 +1673,7 @@ in this doc. **[deferred]** items are non-goals.
 | `pub`/`sub`/`unsub` | [current] | — |
 | `pipeline`/`pipeline-async` | [current] | — |
 | `promise-chan` | [current] | — |
-| `(chan n xform)` | [gap] | §3.1 |
+| `(chan n xform)` | [current] `(std csp clj)` | §3.1 landed |
 | `mix`/`admix`/`toggle` | [gap] | §3.2 |
 | Timer wheel | [gap] | §3.3 |
 | `put!`/`take!` with callbacks | [gap] | §3.4 |
@@ -1681,7 +1681,7 @@ in this doc. **[deferred]** items are non-goals.
 | `split` n-way | [gap] | §3.6 |
 | Mult slow-sub policies | [gap] | §3.7 |
 | Parked `go` (CPS) | [deferred] | §3.8 |
-| Transducer error handler on chan | [gap] | §3.1 |
+| Transducer error handler on chan | [current] `(std csp clj)` | §3.1 landed |
 
 ### Persistent data structures and Clojure idioms
 

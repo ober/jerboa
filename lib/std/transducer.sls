@@ -78,6 +78,7 @@
 
     ;; Reduction
     transduce
+    apply-xf
 
     ;; Reducing functions
     rf-cons

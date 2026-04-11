@@ -13,7 +13,8 @@
         (except (std csp) go go-named)
         (std csp select)
         (std csp ops)
-        (std csp clj))
+        (std csp clj)
+        (std transducer))
 
 (define pass 0)
 (define fail 0)
@@ -246,6 +247,84 @@
   (list-sort <
     (chan->list (merge (list (to-chan '(1 2)) (to-chan '(3 4))) 4)))
   '(1 2 3 4))
+
+;;; ======== Transducer-backed channels (Phase A.2) ========
+
+(test "chan/mapping — increments every put"
+  (let ([ch (chan 8 (mapping (lambda (x) (+ x 1))))])
+    (chan-put! ch 1) (chan-put! ch 2) (chan-put! ch 3)
+    (chan-close! ch)
+    (chan->list ch))
+  '(2 3 4))
+
+(test "chan/filtering — keeps only evens"
+  (let ([ch (chan 8 (filtering even?))])
+    (for-each (lambda (x) (chan-put! ch x)) '(1 2 3 4 5 6))
+    (chan-close! ch)
+    (chan->list ch))
+  '(2 4 6))
+
+(test "chan/taking — early-stop closes channel"
+  (let ([ch (chan 8 (taking 3))])
+    ;; Put 5 values; only first 3 survive, and channel is auto-closed
+    ;; after the 3rd by the reduced? signal.
+    (chan-put! ch 'a) (chan-put! ch 'b) (chan-put! ch 'c)
+    ;; Subsequent try-puts should fail because ch is closed.
+    (let ([drained (chan->list ch)]
+          [after   (chan-try-put! ch 'd)])
+      (list drained after)))
+  '((a b c) #f))
+
+(test "chan/flat-mapping — one input produces many outputs"
+  (let ([ch (chan 16 (flat-mapping (lambda (x) (list x (* x 10)))))])
+    (chan-put! ch 1) (chan-put! ch 2)
+    (chan-close! ch)
+    (chan->list ch))
+  '(1 10 2 20))
+
+(test "chan/composed — filter then map then take"
+  (let ([ch (chan 32
+              (compose-transducers
+                (filtering odd?)
+                (mapping (lambda (x) (* x x)))
+                (taking 3)))])
+    ;; Use chan-try-put! so a closed channel (after taking stops) simply
+    ;; returns #f instead of raising. Then drain to see the survivors.
+    (for-each (lambda (x) (chan-try-put! ch x)) '(1 2 3 4 5 6 7 8 9 10))
+    (chan->list ch))
+  '(1 9 25))
+
+(test "chan/partitioning-by — close flushes pending partition"
+  (let ([ch (chan 16 (partitioning-by even?))])
+    (for-each (lambda (x) (chan-put! ch x)) '(1 3 2 4 5 7))
+    (chan-close! ch)
+    (chan->list ch))
+  '((1 3) (2 4) (5 7)))
+
+(test "chan/ex-handler — exception routed to handler, value dropped"
+  (let ([ch (chan 8
+              (mapping (lambda (x)
+                         (if (= x 0) (error 'bad "zero") x)))
+              ;; Handler returns #f ⇒ swallow the error; nothing put.
+              (lambda (exn) #f))])
+    (chan-put! ch 1)
+    (chan-put! ch 0)  ;; raises inside xform — ex-handler returns #f
+    (chan-put! ch 2)
+    (chan-close! ch)
+    (chan->list ch))
+  '(1 2))
+
+(test "chan/ex-handler — handler returns substitute value"
+  (let ([ch (chan 8
+              (mapping (lambda (x)
+                         (if (= x 0) (error 'bad "zero") x)))
+              (lambda (exn) 'oops))])
+    (chan-put! ch 1)
+    (chan-put! ch 0)  ;; raises → handler returns 'oops → enqueued raw
+    (chan-put! ch 2)
+    (chan-close! ch)
+    (chan->list ch))
+  '(1 oops 2))
 
 ;;; Summary
 

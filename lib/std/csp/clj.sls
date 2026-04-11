@@ -61,7 +61,8 @@
   (import (except (chezscheme) merge)
           (except (std csp) go go-named)
           (std csp select)
-          (std csp ops))
+          (std csp ops)
+          (std transducer))
 
   ;; ======================================================
   ;; Buffer specs — opaque tags for chan to dispatch on
@@ -77,25 +78,79 @@
   ;; chan — Clojure-style constructor
   ;; ======================================================
   ;;
-  ;; Clojure supports (chan), (chan n), (chan buf), (chan n xform),
-  ;; (chan buf xform). Transducers aren't implemented yet — passing a
-  ;; third arg raises an error.
+  ;; Clojure supports all of
+  ;;   (chan)
+  ;;   (chan n)            (chan buf)
+  ;;   (chan n xform)      (chan buf xform)
+  ;;   (chan n xform eh)   (chan buf xform eh)
+  ;;
+  ;; With a transducer, every put runs through `xform` before landing
+  ;; in the buffer. If the transducer signals early termination
+  ;; (via `reduced`), the channel closes immediately. If a step raises
+  ;; an exception the optional `ex-handler` is called with the
+  ;; condition; its return value is enqueued verbatim (a #f return
+  ;; drops the value silently, matching Clojure semantics).
+
+  ;; Build a bare channel from a buffer-size or buffer-spec argument.
+  (define (%make-bare-chan x)
+    (cond
+      [(buffer-spec? x)
+       (case (buffer-spec-kind x)
+         [(sliding)  (make-channel/sliding  (buffer-spec-size x))]
+         [(dropping) (make-channel/dropping (buffer-spec-size x))]
+         [else       (make-channel (buffer-spec-size x))])]
+      [(and (integer? x) (zero? x)) (make-channel)]
+      [(integer? x) (make-channel x)]
+      [else (error 'chan "expected buffer spec or non-negative integer" x)]))
+
+  ;; Attach a transducer to an already-constructed channel. Builds a
+  ;; buffer-rf that writes directly into the channel's queue, wraps it
+  ;; in the user's xform, and installs two closures (step / done) on
+  ;; the channel record. `reduced` is translated into the symbol 'stop
+  ;; so (std csp) does not need to know about the reduced type.
+  (define (%attach-xform! ch xform ex-handler)
+    (let* ([buffer-rf
+            (case-lambda
+              [() ch]
+              [(acc) acc]
+              [(acc val) (%chan-enqueue-raw! acc val) acc])]
+           [rf (apply-xf xform buffer-rf)])
+      (channel-xform-fn-set!
+        ch
+        (lambda (c val)
+          (call/cc
+            (lambda (k)
+              (with-exception-handler
+                (lambda (exn)
+                  (cond
+                    [ex-handler
+                     (let ([v (ex-handler exn)])
+                       (when v (%chan-enqueue-raw! c v))
+                       (k #f))]
+                    [else (raise exn)]))
+                (lambda ()
+                  (let ([result (rf c val)])
+                    (if (reduced? result) 'stop #f))))))))
+      (channel-xform-done-fn-set!
+        ch
+        (lambda (c)
+          (call/cc
+            (lambda (k)
+              (with-exception-handler
+                (lambda (exn)
+                  (when ex-handler (ex-handler exn))
+                  (k #f))
+                (lambda () (rf c) #f))))))
+      ch))
 
   (define chan
     (case-lambda
       [() (make-channel)]
-      [(x)
-       (cond
-         [(buffer-spec? x)
-          (case (buffer-spec-kind x)
-            [(sliding)  (make-channel/sliding  (buffer-spec-size x))]
-            [(dropping) (make-channel/dropping (buffer-spec-size x))]
-            [else       (make-channel (buffer-spec-size x))])]
-         [(and (integer? x) (zero? x)) (make-channel)]
-         [(integer? x) (make-channel x)]
-         [else (error 'chan "expected buffer spec or non-negative integer" x)])]
-      [(_n _xform)
-       (error 'chan "transducers are not supported yet")]))
+      [(x) (%make-bare-chan x)]
+      [(x xform)
+       (%attach-xform! (%make-bare-chan x) xform #f)]
+      [(x xform ex-handler)
+       (%attach-xform! (%make-bare-chan x) xform ex-handler)]))
 
   ;; ======================================================
   ;; Put / take / close / poll / offer
