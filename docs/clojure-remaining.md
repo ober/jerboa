@@ -1704,7 +1704,7 @@ in this doc. **[deferred]** items are non-goals.
 | `inc`/`dec`/`count`/`empty?` | [current] | — |
 | `hash-map`/`hash-set`/`vec` constructors | [current] | — |
 | Atoms + deref/swap!/reset!/CAS | [current] | — |
-| Transducer ↔ pmap/pset bridge | [gap] | §4.1 |
+| Transducer ↔ pmap/pset bridge | [current] `(std transducer)` | §4.1 landed |
 | PersistentQueue | [gap] (ideque exists) | §4.2 |
 | Sorted-set | [gap] | §4.3 |
 | Metadata (`with-meta`/`meta`) | [gap] | §4.4 |

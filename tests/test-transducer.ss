@@ -1,7 +1,8 @@
 #!chezscheme
 ;;; Tests for (std transducer) — Composable data transformations
 
-(import (chezscheme) (std transducer))
+(import (chezscheme) (std transducer)
+        (std pmap) (std pset) (std pvec))
 
 (define pass 0)
 (define fail 0)
@@ -235,6 +236,80 @@
 (test "filtering/empty collection"
   (sequence (filtering even?) '())
   '())
+
+;;; ===================================================================
+;;; Bridges to persistent collections (pmap / pset / pvec)
+;;; ===================================================================
+
+;;;; Test 28: transduce over a persistent-vector
+(test "transduce/pvec source"
+  (transduce (mapping (lambda (x) (* x x))) (rf-sum) 0
+             (persistent-vector 1 2 3 4))
+  30)
+
+;;;; Test 29: transduce over a persistent-set
+(test "transduce/pset source sums to 12 (2+4+6)"
+  (transduce (filtering even?) (rf-sum) 0
+             (persistent-set 1 2 3 4 5 6))
+  12)
+
+;;;; Test 30: transduce over a persistent-map — yields (k . v) pairs
+(test "transduce/pmap source sums values"
+  (transduce (mapping (lambda (p) (cdr p))) (rf-sum) 0
+             (persistent-map 'a 1 'b 2 'c 3))
+  6)
+
+;;;; Test 31: rf-into-pvec via into
+(test-true "into/pvec dest is persistent-vector"
+  (persistent-vector?
+    (into pvec-empty (filtering odd?) '(1 2 3 4 5))))
+
+(test "into/pvec filter odd"
+  (persistent-vector->list
+    (into pvec-empty (filtering odd?) '(1 2 3 4 5)))
+  '(1 3 5))
+
+;;;; Test 32: rf-into-pset via into
+(test-true "into/pset dest is persistent-set"
+  (persistent-set?
+    (into pset-empty (mapping (lambda (x) (* x x))) '(1 2 3 4))))
+
+(test "into/pset size after mapping"
+  (persistent-set-size
+    (into pset-empty (mapping (lambda (x) (* x x))) '(1 2 3 4)))
+  4)
+
+;;;; Test 33: rf-into-pmap via into
+(test "into/pmap from kv pairs"
+  (persistent-map-ref
+    (into pmap-empty
+          (mapping (lambda (p) (cons (car p) (* (cdr p) 2))))
+          '((a . 1) (b . 2) (c . 3)))
+    'b)
+  4)
+
+;;;; Test 34: early termination on persistent collection with (taking n)
+(test "transduce/pvec with taking — early stop"
+  (transduce (taking 3) (rf-sum) 0 (persistent-vector 1 2 3 4 5 6 7))
+  6)
+
+;;;; Test 35: composed transducer on a persistent vector
+(test "transduce/pvec composed filter+map"
+  (transduce (compose-transducers (filtering even?)
+                                  (mapping (lambda (x) (* x 10))))
+             (rf-cons) '()
+             (persistent-vector 1 2 3 4 5 6))
+  '(20 40 60))
+
+;;;; Test 36: string source to list via transduce
+(test "transduce/string source"
+  (sequence (mapping char-upcase) "abc")
+  '(#\A #\B #\C))
+
+;;;; Test 37: vector source to vector destination
+(test "into/vector-from-vector"
+  (into (vector) (mapping (lambda (x) (+ x 1))) (vector 10 20 30))
+  (vector 11 21 31))
 
 (printf "~%~a tests: ~a passed, ~a failed~%"
   (+ pass fail) pass fail)

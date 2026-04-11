@@ -53,6 +53,10 @@
     ;; transducers are just procedures; the record wraps them for identity.)
     transducer?
 
+    ;; Reduced sentinel (exposed so users and other libraries
+    ;; can signal early termination in custom reducing functions)
+    reduced reduced? unreduced
+
     ;; Core transducers
     mapping
     filtering
@@ -81,13 +85,23 @@
     rf-count
     rf-sum
     rf-into-vector
+    rf-into-pmap
+    rf-into-pset
+    rf-into-pvec
 
     ;; High-level combinators
     into
     sequence
     eduction)
 
-  (import (chezscheme))
+  (import (chezscheme)
+          (std pmap)
+          (std pset)
+          (rename (std pvec)
+                  (transient         pvec-transient)
+                  (transient?        pvec-transient?)
+                  (persistent!       pvec-persistent!)
+                  (transient-append! pvec-t-append!)))
 
   ;; ======================================================================
   ;; Transducer record
@@ -176,6 +190,28 @@
         [()      (inner)]
         [(acc)   (list->vector (inner acc))]
         [(acc x) (inner acc x)])))
+
+  ;; Collect into a persistent-map. Steps receive (k . v) pairs
+  ;; (matching Clojure's map-as-seq-of-entries convention).
+  (define (rf-into-pmap)
+    (case-lambda
+      [()       (transient-map pmap-empty)]
+      [(t)      (persistent-map! t)]
+      [(t kv)   (tmap-set! t (car kv) (cdr kv)) t]))
+
+  ;; Collect into a persistent-set.
+  (define (rf-into-pset)
+    (case-lambda
+      [()       (transient-set pset-empty)]
+      [(t)      (persistent-set! t)]
+      [(t x)    (tset-add! t x) t]))
+
+  ;; Collect into a persistent-vector via the pvec transient API.
+  (define (rf-into-pvec)
+    (case-lambda
+      [()       (pvec-transient pvec-empty)]
+      [(t)      (pvec-persistent! t)]
+      [(t x)    (pvec-t-append! t x) t]))
 
   ;; ======================================================================
   ;; Core transducers
@@ -418,19 +454,90 @@
 
   ;; (transduce xf rf init coll)
   ;; Apply transducer xf to reducing function rf, then fold coll.
-  ;; coll must be a proper list.
+  ;; coll may be a proper list, a vector, a string, or a persistent
+  ;; map/set/vector (HAMT / BVT structures from std pmap/pset/pvec).
+  ;;
+  ;; Elements handed to the reducing function:
+  ;;   - list/vector/string/pvec : each element in order
+  ;;   - pset                    : each element (HAMT iteration order)
+  ;;   - pmap                    : each (key . val) pair (like Clojure's seq-of-entries)
   (define (transduce xf rf init coll)
     (let ([xrf (apply-xf xf rf)])
-      (let loop ([acc init] [lst coll])
-        (cond
-          [(null? lst)
-           ;; Call completion
-           (xrf (ensure-unreduced acc))]
-          [(reduced? acc)
-           (xrf (reduced-box-val acc))]
-          [else
-           (let ([result (xrf acc (car lst))])
-             (loop result (cdr lst)))]))))
+      (cond
+        ;; List — existing fast path.
+        [(or (null? coll) (pair? coll))
+         (let loop ([acc init] [lst coll])
+           (cond
+             [(null? lst)
+              (xrf (ensure-unreduced acc))]
+             [(reduced? acc)
+              (xrf (reduced-box-val acc))]
+             [else
+              (let ([result (xrf acc (car lst))])
+                (loop result (cdr lst)))]))]
+        ;; Vector — indexed walk.
+        [(vector? coll)
+         (let ([n (vector-length coll)])
+           (let loop ([acc init] [i 0])
+             (cond
+               [(fx>= i n)
+                (xrf (ensure-unreduced acc))]
+               [(reduced? acc)
+                (xrf (reduced-box-val acc))]
+               [else
+                (loop (xrf acc (vector-ref coll i)) (fx+ i 1))])))]
+        ;; String — indexed walk yielding characters.
+        [(string? coll)
+         (let ([n (string-length coll)])
+           (let loop ([acc init] [i 0])
+             (cond
+               [(fx>= i n)
+                (xrf (ensure-unreduced acc))]
+               [(reduced? acc)
+                (xrf (reduced-box-val acc))]
+               [else
+                (loop (xrf acc (string-ref coll i)) (fx+ i 1))])))]
+        ;; Persistent map — iterate (k, v) and hand the rf a pair.
+        [(persistent-map? coll)
+         (call/cc
+           (lambda (escape)
+             (let ([final
+                    (persistent-map-fold
+                      (lambda (acc k v)
+                        (let ([r (xrf acc (cons k v))])
+                          (if (reduced? r)
+                              (escape (xrf (reduced-box-val r)))
+                              r)))
+                      init coll)])
+               (xrf (ensure-unreduced final)))))]
+        ;; Persistent set — each element.
+        [(persistent-set? coll)
+         (call/cc
+           (lambda (escape)
+             (let ([final
+                    (persistent-set-fold
+                      (lambda (acc x)
+                        (let ([r (xrf acc x)])
+                          (if (reduced? r)
+                              (escape (xrf (reduced-box-val r)))
+                              r)))
+                      init coll)])
+               (xrf (ensure-unreduced final)))))]
+        ;; Persistent vector — ordered.
+        [(persistent-vector? coll)
+         (call/cc
+           (lambda (escape)
+             (let ([final
+                    (persistent-vector-fold
+                      (lambda (acc x)
+                        (let ([r (xrf acc x)])
+                          (if (reduced? r)
+                              (escape (xrf (reduced-box-val r)))
+                              r)))
+                      init coll)])
+               (xrf (ensure-unreduced final)))))]
+        [else
+         (error 'transduce "unsupported collection type" coll)])))
 
   ;; ======================================================================
   ;; High-level combinators
@@ -441,9 +548,12 @@
     (transduce xf (rf-cons) '() coll))
 
   ;; (into dest xf coll)
-  ;; dest: '()      -> returns a list
-  ;;       #()      -> returns a vector
-  ;;       ""       -> returns a string (elements must be chars)
+  ;; dest: '()              -> returns a list
+  ;;       #()              -> returns a vector
+  ;;       ""               -> returns a string (elements must be chars)
+  ;;       persistent-map   -> returns a persistent-map (src yields k.v pairs)
+  ;;       persistent-set   -> returns a persistent-set
+  ;;       persistent-vec   -> returns a persistent-vector
   (define (into dest xf coll)
     (cond
       [(null? dest)
@@ -453,6 +563,14 @@
          (transduce xf rf (rf) coll))]
       [(string? dest)
        (list->string (sequence xf coll))]
+      [(persistent-map? dest)
+       ;; Start from the existing dest via a transient. rf-into-pmap's
+       ;; completion finalises the transient back into a persistent map.
+       (transduce xf (rf-into-pmap) (transient-map dest) coll)]
+      [(persistent-set? dest)
+       (transduce xf (rf-into-pset) (transient-set dest) coll)]
+      [(persistent-vector? dest)
+       (transduce xf (rf-into-pvec) (pvec-transient dest) coll)]
       [else
        (error 'into "unsupported destination type" dest)]))
 
