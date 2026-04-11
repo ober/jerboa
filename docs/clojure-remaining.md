@@ -380,7 +380,22 @@ Covered by 10 tests in `tests/test-csp.ss`.
 
 ### 3.3 Timer wheel for `timeout`
 
-**Current behaviour.** `(timeout ms)` at `lib/std/csp/select.sls:259`
+**[landed]** Both implementations live in `lib/std/csp/select.sls`. The
+default `timeout` is still thread-per-deadline; setting
+`JERBOA_CSP_TIMER_WHEEL=1` in the environment at Scheme start flips
+`timeout` to the wheel-backed dispatch. A new `wheel-timeout` export
+always routes through the wheel so callers (and tests) can opt in
+without restarting the process. The wheel is a single long-lived
+thread that owns a min-heap of absolute deadlines (via
+`(std misc pqueue)`) plus a size-1 wake-up channel. Enqueue is
+O(log n), the main loop sleeps in 5ms chunks, and the wake-up channel
+short-circuits the sleep when a new shorter deadline arrives. The
+singleton wheel is built lazily under a double-checked lock so code
+that never calls `timeout` (or `wheel-timeout`) pays nothing for the
+timer thread. Covered by the timer-wheel subsection of
+`tests/test-csp.ss`.
+
+**Current behaviour.** `(timeout ms)` at `lib/std/csp/select.sls`
 creates a fresh channel and spawns one helper thread that sleeps `ms`
 then closes the channel. For low-rate timeouts (tens per second) this is
 fine. For high-rate short-timeout workloads (rate limiting, retry
@@ -1746,7 +1761,7 @@ in this doc. **[deferred]** items are non-goals.
 | Fixed/sliding/dropping buffers | [current] | — |
 | `>!!`/`<!!`/`close!`/`poll!`/`offer!` | [current] | — |
 | `alts!`/`alt!` with priority/default | [current] | — |
-| `timeout` channel | [current] (thread-per-timeout) | §3.3 improves |
+| `timeout` channel | [current] (thread-per-timeout + opt-in wheel) | §3.3 landed |
 | `go` / `go-loop` | [current] (OS threads) | §3.8 deferred |
 | `to-chan`/`onto-chan`/`chan-reduce` | [current] | — |
 | `merge`/`split`/`pipe` | [current] | §3.6 landed |
@@ -1756,7 +1771,7 @@ in this doc. **[deferred]** items are non-goals.
 | `promise-chan` | [current] | — |
 | `(chan n xform)` | [current] `(std csp clj)` | §3.1 landed |
 | `mix`/`admix`/`toggle` | [current] `(std csp mix)` | §3.2 landed |
-| Timer wheel | [gap] | §3.3 |
+| Timer wheel | [current] `(std csp select)` | §3.3 landed |
 | `put!`/`take!` with callbacks | [current] `(std csp ops)` | §3.4 landed |
 | `async/reduce`, `onto-chan!` | [current] `(std csp ops)` | §3.5 landed |
 | `split` n-way | [current] `(std csp ops)` | §3.6 landed |

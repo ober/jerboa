@@ -53,11 +53,15 @@
     ;; (it's re-exported from (std csp clj) for convenience).
     default
     ;; Timeout channel
-    timeout timeout-channel)
+    timeout timeout-channel
+    ;; Force the timer-wheel implementation regardless of env var.
+    ;; Useful for tests and for callers that always want the wheel.
+    wheel-timeout)
 
   (import (chezscheme)
           (std csp)
-          (std event))
+          (std event)
+          (std misc pqueue))
 
   ;; ==========================================================
   ;; Event bridge — expose a channel as a (std event) event.
@@ -251,12 +255,138 @@
   ;; ==========================================================
   ;; timeout — channel that closes itself after N milliseconds.
   ;;
-  ;; Spawns one helper thread per timeout. At the scale of a few
-  ;; hundred outstanding timeouts per second that's fine; above
-  ;; that, use a timer-wheel (see Phase 4 in core-async.md).
+  ;; Two implementations selected at library load time by the
+  ;; `JERBOA_CSP_TIMER_WHEEL` environment variable.
+  ;;
+  ;; Default (env unset or !=1)
+  ;; --------------------------
+  ;; One helper thread per timeout. Cheap to spin up and fine up to
+  ;; a few hundred outstanding timeouts per second. Each `(timeout N)`
+  ;; allocates a thread that sleeps N ms then closes the channel.
+  ;;
+  ;; Wheel mode (JERBOA_CSP_TIMER_WHEEL=1)
+  ;; -------------------------------------
+  ;; A single long-lived timer thread owns a min-heap of absolute
+  ;; deadlines. Enqueue is O(log n), dispatch is O(log n) per fire,
+  ;; and there is no per-deadline thread — appropriate for high-rate
+  ;; short-timeout workloads (rate limiting, retry back-off).
+  ;;
+  ;; Chez's `condition-wait` has no timed variant, so the wheel's
+  ;; "wait until next deadline" path sleeps in 5ms chunks and
+  ;; short-circuits through a size-1 wake-up channel when a new
+  ;; shorter deadline is enqueued. 5ms is the practical granularity
+  ;; floor; a deadline 3ms away may fire at 5ms.
   ;; ==========================================================
 
-  (define (timeout ms)
+  (define (ms->time ms)
+    (let* ([whole-secs (quotient ms 1000)]
+           [rem-ms     (remainder ms 1000)]
+           [nanos      (* rem-ms 1000000)])
+      (make-time 'time-duration nanos whole-secs)))
+
+  (define (%now-ms)
+    (let ([t (current-time 'time-monotonic)])
+      (+ (* (time-second t) 1000)
+         (quotient (time-nanosecond t) 1000000))))
+
+  ;; -- Timer wheel --------------------------------------------
+
+  (define-record-type %timer-wheel
+    (fields (immutable heap)      ;; pqueue of (deadline . chan)
+            (immutable lock)      ;; mutex guarding heap
+            (immutable wake-ch))) ;; size-1 wake-up channel
+
+  (define (%make-timer-wheel)
+    (let ([w (make-%timer-wheel
+               (make-pqueue (lambda (a b) (< (car a) (car b))))
+               (make-mutex)
+               (make-channel 1))])
+      (fork-thread (lambda () (%timer-wheel-loop w)))
+      w))
+
+  ;; Push (deadline . ch) onto the heap and poke the wake-up channel
+  ;; so a sleeping timer thread rechecks. The poke is non-blocking;
+  ;; if the wake channel is already full (previous poke not yet
+  ;; consumed) we drop the new poke — one is enough.
+  (define (%timer-wheel-enqueue! w deadline ch)
+    (with-mutex (%timer-wheel-lock w)
+      (pqueue-push! (%timer-wheel-heap w) (cons deadline ch)))
+    (chan-try-put! (%timer-wheel-wake-ch w) 'poke))
+
+  ;; Sleep in 5ms chunks until `until` (absolute deadline in ms) has
+  ;; passed, or a wake-up message arrives. Returns 'expired if the
+  ;; deadline was reached, 'woken if short-circuited.
+  (define %wheel-chunk-ms 5)
+  (define (%wait-until until wake-ch)
+    (let loop ()
+      (let* ([now (%now-ms)]
+             [rem (- until now)])
+        (cond
+          [(<= rem 0) 'expired]
+          [(chan-try-get wake-ch) 'woken]
+          [else
+           (let ([chunk (if (< rem %wheel-chunk-ms) rem %wheel-chunk-ms)])
+             (sleep (ms->time chunk))
+             (loop))]))))
+
+  ;; Pop every entry whose deadline is <= now. Returns the list of
+  ;; channels to close, in fire order.
+  (define (%drain-expired! w now)
+    (with-mutex (%timer-wheel-lock w)
+      (let loop ([acc '()])
+        (cond
+          [(pqueue-empty? (%timer-wheel-heap w)) (reverse acc)]
+          [(<= (car (pqueue-peek (%timer-wheel-heap w))) now)
+           (loop (cons (cdr (pqueue-pop! (%timer-wheel-heap w))) acc))]
+          [else (reverse acc)]))))
+
+  ;; Main loop. If the heap is empty, block on the wake-up channel.
+  ;; Otherwise peek the min deadline: if due, drain+close; if not,
+  ;; chunk-sleep until it fires or a wake arrives.
+  (define (%timer-wheel-loop w)
+    (let loop ()
+      (let ([next
+             (with-mutex (%timer-wheel-lock w)
+               (cond
+                 [(pqueue-empty? (%timer-wheel-heap w)) #f]
+                 [else (car (pqueue-peek (%timer-wheel-heap w)))]))])
+        (cond
+          [(not next)
+           (chan-get! (%timer-wheel-wake-ch w))
+           (loop)]
+          [else
+           (let ([now (%now-ms)])
+             (cond
+               [(<= next now)
+                (for-each (lambda (ch)
+                            (guard (_ [else (void)])
+                              (chan-close! ch)))
+                          (%drain-expired! w now))
+                (loop)]
+               [else
+                (%wait-until next (%timer-wheel-wake-ch w))
+                (loop)]))]))))
+
+  ;; -- Dispatch -----------------------------------------------
+
+  (define %use-wheel?
+    (equal? (getenv "JERBOA_CSP_TIMER_WHEEL") "1"))
+
+  ;; Lazily built so libraries that never call `timeout` don't pay
+  ;; for a timer thread. The initial `#f` is replaced on first use
+  ;; under the singleton lock.
+  (define %timer-wheel-singleton #f)
+  (define %timer-wheel-init-lock (make-mutex))
+
+  (define (%ensure-timer-wheel!)
+    (or %timer-wheel-singleton
+        (with-mutex %timer-wheel-init-lock
+          (or %timer-wheel-singleton
+              (let ([w (%make-timer-wheel)])
+                (set! %timer-wheel-singleton w)
+                w)))))
+
+  (define (%thread-timeout ms)
     (let ([ch (make-channel)])
       (fork-thread
         (lambda ()
@@ -264,12 +394,19 @@
           (chan-close! ch)))
       ch))
 
-  (define timeout-channel timeout)
+  ;; Always uses the timer wheel, regardless of JERBOA_CSP_TIMER_WHEEL.
+  ;; Lazily spins up the singleton on first call.
+  (define (wheel-timeout ms)
+    (let ([ch (make-channel)]
+          [w  (%ensure-timer-wheel!)])
+      (%timer-wheel-enqueue! w (+ (%now-ms) ms) ch)
+      ch))
 
-  (define (ms->time ms)
-    (let* ([whole-secs (quotient ms 1000)]
-           [rem-ms     (remainder ms 1000)]
-           [nanos      (* rem-ms 1000000)])
-      (make-time 'time-duration nanos whole-secs)))
+  (define (timeout ms)
+    (if %use-wheel?
+        (wheel-timeout ms)
+        (%thread-timeout ms)))
+
+  (define timeout-channel timeout)
 
 ) ;; end library

@@ -127,6 +127,56 @@
     (eof-object? (car pick)))
   #t)
 
+;; ---- Timer wheel (§3.3) --------------------------------------
+;;
+;; `wheel-timeout` always uses the timer-wheel implementation,
+;; regardless of JERBOA_CSP_TIMER_WHEEL. These tests exercise the
+;; wheel directly so CI doesn't need two runs.
+
+(test "wheel-timeout fires"
+  (let ([pick (alts!! (list (wheel-timeout 15)))])
+    (eof-object? (car pick)))
+  #t)
+
+(test "wheel-timeout two deadlines fire in order"
+  ;; Start two wheel timeouts simultaneously and verify the
+  ;; shorter one is observable-closed first.
+  (let* ([t1 (wheel-timeout 10)]
+         [t2 (wheel-timeout 50)])
+    (sleep (millis 20))
+    (list (chan-closed? t1) (chan-closed? t2)))
+  '(#t #f))
+
+(test "wheel-timeout new-shorter-deadline wakes sleeper"
+  ;; Enqueue a long deadline first, then a short one; the wake-ch
+  ;; should let the wheel pick up the short one before the long.
+  (let* ([long  (wheel-timeout 200)])
+    (sleep (millis 5))          ;; let wheel start sleeping on long
+    (let ([short (wheel-timeout 15)])
+      (sleep (millis 35))
+      (list (chan-closed? short) (chan-closed? long))))
+  '(#t #f))
+
+(test "wheel-timeout many concurrent fire"
+  ;; 20 concurrent deadlines, all short. Confirm every channel
+  ;; ends up closed after one global wait.
+  (let ([chs (let loop ([n 0] [acc '()])
+               (if (= n 20)
+                   (reverse acc)
+                   (loop (+ n 1)
+                         (cons (wheel-timeout (+ 5 (random 20))) acc))))])
+    (sleep (millis 60))
+    (for-all chan-closed? chs))
+  #t)
+
+(test "wheel-timeout integrates with alts!!"
+  ;; Race a normal channel against the wheel.
+  (let* ([c (make-channel)]
+         [t (wheel-timeout 10)]
+         [pick (alts!! (list c t))])
+    (and (eq? (cadr pick) t) (eof-object? (car pick))))
+  #t)
+
 (test "alt!! dispatches to winning channel"
   (let ([c1 (make-channel 1)] [c2 (make-channel 1)])
     (chan-put! c1 42)
