@@ -48,7 +48,8 @@
     ;; Go / thread
     go go-loop clj-thread
     ;; Collection bridges
-    to-chan onto-chan
+    to-chan onto-chan onto-chan! onto-chan!!
+    async-reduce
     ;; Composition
     merge split pipe
     ;; Broadcast
@@ -211,6 +212,10 @@
   (define merge      chan-merge)
   (define split      chan-split)
   (define pipe       chan-pipe-to)
+
+  ;; Clojure core.async's `async/reduce` — an async fold over a
+  ;; channel that returns a promise-channel holding the final value.
+  (define async-reduce chan-reduce-async)
 
   (define mult       make-mult)
   (define tap        tap!)

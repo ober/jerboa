@@ -499,6 +499,16 @@ Re-export in `(std csp clj)`.
 
 ### 3.5 `async/reduce` and `onto-chan!`/`onto-chan!!`
 
+**Status.** [landed] `(std csp ops)` now exports `chan-reduce-async`,
+`onto-chan!`, and `onto-chan!!`. `(std csp clj)` re-exports them under
+the Clojure names `async-reduce`, `onto-chan!`, `onto-chan!!`.
+Matching Clojure's actual implementation, `async-reduce` returns a
+plain size-1 channel (NOT a promise-channel) — the first taker gets
+the folded value, the channel then closes, and subsequent takers see
+`(eof-object)`. Callers who need caching semantics should wrap the
+result channel in a mult or promise-chan. Covered by eight tests in
+`tests/test-csp.ss`.
+
 **What Clojure does.** `clojure.core.async/reduce` is a go-block reduce
 that reads from a channel until it closes and returns a promise-chan
 with the final result:
@@ -1683,7 +1693,7 @@ in this doc. **[deferred]** items are non-goals.
 | `alts!`/`alt!` with priority/default | [current] | — |
 | `timeout` channel | [current] (thread-per-timeout) | §3.3 improves |
 | `go` / `go-loop` | [current] (OS threads) | §3.8 deferred |
-| `to-chan`/`onto-chan`/`chan-reduce` | [current] | §3.5 async variant |
+| `to-chan`/`onto-chan`/`chan-reduce` | [current] | — |
 | `merge`/`split`/`pipe` | [current] | §3.6 n-way split |
 | `mult`/`tap`/`untap` | [current] | §3.7 slow-sub policy |
 | `pub`/`sub`/`unsub` | [current] | — |
@@ -1693,7 +1703,7 @@ in this doc. **[deferred]** items are non-goals.
 | `mix`/`admix`/`toggle` | [gap] | §3.2 |
 | Timer wheel | [gap] | §3.3 |
 | `put!`/`take!` with callbacks | [current] `(std csp ops)` | §3.4 landed |
-| `async/reduce`, `onto-chan!` | [gap] | §3.5 |
+| `async/reduce`, `onto-chan!` | [current] `(std csp ops)` | §3.5 landed |
 | `split` n-way | [gap] | §3.6 |
 | Mult slow-sub policies | [gap] | §3.7 |
 | Parked `go` (CPS) | [deferred] | §3.8 |

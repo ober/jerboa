@@ -395,6 +395,66 @@
         (list a b))))
   '(after-put-returned second-delivered))
 
+;;; ======== async-reduce + onto-chan! / onto-chan!! (Phase C.2) ========
+
+(test "async-reduce sum"
+  (let* ([input (to-chan '(1 2 3 4 5))]
+         [p     (async-reduce + 0 input)])
+    (<!! p))
+  15)
+
+(test "async-reduce conj into list"
+  (let* ([input (to-chan '(a b c d))]
+         [p     (async-reduce (lambda (acc v) (cons v acc)) '() input)])
+    (<!! p))
+  '(d c b a))
+
+(test "async-reduce on empty channel returns init"
+  (let* ([ch  (make-channel)]
+         [p   (async-reduce + 100 ch)])
+    (chan-close! ch)
+    (<!! p))
+  100)
+
+(test "async-reduce second get returns eof (channel drains then closes)"
+  ;; Matches Clojure's async/reduce which uses (chan 1) internally —
+  ;; the first taker gets the value, the channel then closes, and
+  ;; subsequent takers see (eof-object). Users who need caching
+  ;; semantics should wrap the result channel in a mult or promise.
+  (let* ([input (to-chan '(10 20 30))]
+         [p     (async-reduce + 0 input)])
+    (let ([a (<!! p)] [b (<!! p)])
+      (list a (eof-object? b))))
+  '(60 #t))
+
+(test "onto-chan! (async) feeds and closes"
+  (let ([ch (make-channel 16)])
+    (onto-chan! ch '(1 2 3))
+    (chan->list ch))
+  '(1 2 3))
+
+(test "onto-chan! with close?=#f leaves channel open"
+  (let ([ch (make-channel 16)])
+    (onto-chan! ch '(a b c) #f)
+    (sleep (millis 20))          ;; let feeder finish
+    (list (chan-get! ch) (chan-get! ch) (chan-get! ch)
+          (chan-closed? ch)))
+  '(a b c #f))
+
+(test "onto-chan!! (blocking) returns only after everything landed"
+  ;; With a big enough buffer the blocking variant returns
+  ;; synchronously; we then drain.
+  (let ([ch (make-channel 16)])
+    (onto-chan!! ch '(x y z))
+    (chan->list ch))
+  '(x y z))
+
+(test "onto-chan!! followed by async-reduce is deterministic"
+  (let ([ch (make-channel 64)])
+    (onto-chan!! ch '(1 2 3 4 5 6 7 8 9 10))
+    (<!! (async-reduce + 0 ch)))
+  55)
+
 ;;; Summary
 
 (printf "~%CSP: ~a passed, ~a failed~%" pass fail)

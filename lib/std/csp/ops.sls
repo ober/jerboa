@@ -10,8 +10,8 @@
 (library (std csp ops)
   (export
     ;; Collection bridges
-    to-chan onto-chan
-    chan-reduce chan-into
+    to-chan onto-chan onto-chan! onto-chan!!
+    chan-reduce chan-reduce-async chan-into
     ;; Non-blocking callbacks
     put! take!
     ;; Composition
@@ -61,6 +61,29 @@
            (when close? (chan-close! ch))))
        ch]))
 
+  ;; Clojure core.async aliases:
+  ;;
+  ;;   (onto-chan!  ch lst)         — non-blocking: returns ch and
+  ;;                                   feeds items from a helper thread.
+  ;;                                   Same behavior as onto-chan above.
+  ;;   (onto-chan!! ch lst)         — blocking: runs on the caller's
+  ;;                                   thread and only returns once every
+  ;;                                   item has been delivered (and the
+  ;;                                   channel closed, if close? is #t).
+  ;;
+  ;; Use the blocking form when you want back-pressure to reach the
+  ;; caller (e.g. tests, pipelines where the next stage can't start
+  ;; until the feed has completed).
+  (define onto-chan! onto-chan)
+
+  (define onto-chan!!
+    (case-lambda
+      [(ch lst) (onto-chan!! ch lst #t)]
+      [(ch lst close?)
+       (for-each (lambda (x) (chan-put! ch x)) lst)
+       (when close? (chan-close! ch))
+       ch]))
+
   ;; (chan-reduce f init ch)      → fold ch into a single value.
   ;;
   ;; Runs on the caller's thread — this is the blocking variant.
@@ -71,6 +94,30 @@
         (if (eof-object? v)
             acc
             (loop (f acc v))))))
+
+  ;; (chan-reduce-async f init ch) → channel with the final acc.
+  ;;
+  ;; Clojure core.async's `async/reduce`: spawns a helper thread that
+  ;; folds `ch` with `f` starting from `init`, and delivers the
+  ;; single final value onto a fresh size-1 channel which is then
+  ;; closed. The caller can `chan-get!` / `<!!` to await the result.
+  ;; Any number of takers can read the value back — once the put
+  ;; lands the channel sits with one value until drained, and after
+  ;; close a taker on the drained channel receives `(eof-object)`.
+  ;;
+  ;; If `f` raises, the helper thread swallows the exception and
+  ;; closes the result channel so a pending taker observes eof
+  ;; rather than hanging. This matches the documented semantics in
+  ;; core-async.md §3.5 and mirrors how `go` treats body exceptions.
+  (define (chan-reduce-async f init ch)
+    (let ([out (make-channel 1)])
+      (fork-thread
+        (lambda ()
+          (guard (_ [else (chan-close! out)])
+            (let ([acc (chan-reduce f init ch)])
+              (chan-put! out acc)
+              (chan-close! out)))))
+      out))
 
   ;; (chan-into container ch)     → collect into a list or vector.
   ;;
