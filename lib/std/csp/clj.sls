@@ -54,6 +54,8 @@
     merge split split-by pipe
     ;; Broadcast
     mult tap untap untap-all
+    ;; Dynamic fan-in (mix)
+    mix admix unmix unmix-all toggle solo-mode
     ;; Topic
     pub sub unsub unsub-all
     ;; Pipelines
@@ -225,6 +227,14 @@
   (define tap        tap!)
   (define untap      untap!)
   (define untap-all  untap-all!)
+
+  ;; Dynamic fan-in — Clojure names for (std csp mix)
+  (define mix        make-mix)
+  (define admix      admix!)
+  (define unmix      unmix!)
+  (define unmix-all  unmix-all!)
+  (define toggle     toggle!)
+  (define solo-mode  solo-mode!)
 
   (define pub        make-pub)
   (define sub        sub!)

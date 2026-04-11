@@ -35,6 +35,14 @@
   ;; helper for sleeps in tests — chez make-time takes nanos + whole secs
   (make-time 'time-duration (* ms 1000000) 0))
 
+;; Drain whatever is currently buffered on `ch` without blocking.
+;; Useful for tests that pump values into a channel from a background
+;; thread but never close that channel (e.g. the mix out channel).
+(define (chan->list-nowait ch)
+  (let loop ([acc '()])
+    (let ([v (chan-try-get ch)])
+      (if v (loop (cons v acc)) (reverse acc)))))
+
 (printf "--- CSP / core.async ---~%~%")
 
 ;;; ======== Phase 0: buffered + buffer policies ========
@@ -329,6 +337,144 @@
     (sleep (millis 80))
     (list (chan->list s1) (chan->list s2)))
   '((x y z) (x y z)))
+
+;;; mix / admix / toggle — dynamic fan-in
+
+(test "mix — basic fan-in from two sources"
+  (let* ([out (make-channel 16)]
+         [m   (make-mix out)]
+         [a   (make-channel 4)]
+         [b   (make-channel 4)])
+    (admix m a) (admix m b)
+    (chan-put! a 1) (chan-put! a 2)
+    (chan-put! b 3) (chan-put! b 4)
+    (chan-close! a) (chan-close! b)
+    (sleep (millis 100))
+    (list-sort < (chan->list-nowait out)))
+  '(1 2 3 4))
+
+(test "mix — unmix stops forwarding from a source"
+  (let* ([out (make-channel 16)]
+         [m   (make-mix out)]
+         [a   (make-channel 4)]
+         [b   (make-channel 4)])
+    (admix m a) (admix m b)
+    (chan-put! a 'a1)
+    (sleep (millis 30))
+    (unmix m a)
+    (chan-put! a 'a2)    ;; should NOT appear in out
+    (chan-put! b 'b1)
+    (sleep (millis 60))
+    (chan-close! b)
+    (sleep (millis 60))
+    ;; a is still open but not in the mix, so a2 should not land.
+    (list-sort (lambda (x y) (string<? (symbol->string x) (symbol->string y)))
+               (chan->list-nowait out)))
+  '(a1 b1))
+
+(test "mix — unmix-all clears all inputs"
+  (let* ([out (make-channel 16)]
+         [m   (make-mix out)]
+         [a   (make-channel 4)]
+         [b   (make-channel 4)])
+    (admix m a) (admix m b)
+    (chan-put! a 'x)
+    (sleep (millis 30))
+    (unmix-all! m)
+    (chan-put! a 'nope) (chan-put! b 'nope)
+    (sleep (millis 60))
+    (chan->list-nowait out))
+  '(x))
+
+(test "mix — mute drops values from one source"
+  (let* ([out (make-channel 16)]
+         [m   (make-mix out)]
+         [a   (make-channel 4)]
+         [b   (make-channel 4)])
+    (admix m a) (admix m b)
+    (toggle m (list (cons a '((mute . #t)))))
+    (chan-put! a 'muted-1) (chan-put! a 'muted-2)
+    (chan-put! b 'kept-1)
+    (chan-close! a) (chan-close! b)
+    (sleep (millis 120))
+    (chan->list-nowait out))
+  '(kept-1))
+
+(test "mix — pause skips reading from a source"
+  (let* ([out (make-channel 16)]
+         [m   (make-mix out)]
+         [a   (make-channel 4)]
+         [b   (make-channel 4)])
+    (admix m a) (admix m b)
+    (toggle m (list (cons a '((pause . #t)))))
+    (chan-put! a 'paused-a)    ;; sits in buffer, not drained
+    (chan-put! b 'from-b)
+    (sleep (millis 80))
+    ;; unpause a, flush
+    (toggle m (list (cons a '((pause . #f)))))
+    (sleep (millis 80))
+    (chan-close! a) (chan-close! b)
+    (sleep (millis 60))
+    (list-sort (lambda (x y) (string<? (symbol->string x) (symbol->string y)))
+               (chan->list-nowait out)))
+  '(from-b paused-a))
+
+(test "mix — solo defaults to mute for non-solo inputs"
+  (let* ([out (make-channel 16)]
+         [m   (make-mix out)]
+         [a   (make-channel 4)]
+         [b   (make-channel 4)])
+    (admix m a) (admix m b)
+    (toggle m (list (cons a '((solo . #t)))))
+    ;; a is solo, so b is effectively muted (solo-mode default = 'mute)
+    (chan-put! a 'solo-a) (chan-put! b 'muted-b)
+    (chan-close! a) (chan-close! b)
+    (sleep (millis 120))
+    (chan->list-nowait out))
+  '(solo-a))
+
+(test "mix — solo-mode 'pause blocks non-solo reads"
+  (let* ([out (make-channel 16)]
+         [m   (make-mix out)]
+         [a   (make-channel 4)]
+         [b   (make-channel 4)])
+    (solo-mode m 'pause)
+    (admix m a) (admix m b)
+    (toggle m (list (cons a '((solo . #t)))))
+    (chan-put! a 'solo-a) (chan-put! b 'blocked-b)
+    (sleep (millis 80))
+    ;; now remove solo; b's value should finally drain
+    (toggle m (list (cons a '((solo . #f)))))
+    (sleep (millis 80))
+    (chan-close! a) (chan-close! b)
+    (sleep (millis 60))
+    (list (mix-solo-mode m)
+          (list-sort (lambda (x y) (string<? (symbol->string x) (symbol->string y)))
+                     (chan->list-nowait out))))
+  '(pause (blocked-b solo-a)))
+
+(test "mix — toggle with plist syntax"
+  (let* ([out (make-channel 16)]
+         [m   (make-mix out)]
+         [a   (make-channel 4)])
+    (admix m a)
+    (toggle m (list (cons a '(mute #t))))
+    (chan-put! a 'dropped)
+    (chan-close! a)
+    (sleep (millis 80))
+    (chan->list-nowait out))
+  '())
+
+(test "mix? predicate"
+  (list (mix? (make-mix (make-channel)))
+        (mix? (make-channel))
+        (mix? 42))
+  '(#t #f #f))
+
+(test "solo-mode! validates arg"
+  (guard (exn [#t 'err])
+    (solo-mode! (make-mix (make-channel)) 'bogus))
+  'err)
 
 (test "pub / sub by topic"
   (let* ([src (make-channel 10)]

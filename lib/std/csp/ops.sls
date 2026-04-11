@@ -19,6 +19,10 @@
     ;; Broadcast: mult / tap / untap
     make-mult mult? mult-source mult-policy
     tap! untap! untap-all!
+    ;; Dynamic fan-in: mix / admix / toggle
+    make-mix mix? mix-out mix-solo-mode
+    admix! unmix! unmix-all!
+    toggle! solo-mode!
     ;; Topic routing: pub / sub
     make-pub pub? pub-source
     sub! unsub! unsub-all!
@@ -28,7 +32,8 @@
     promise-channel-put! promise-channel-get!)
 
   (import (chezscheme)
-          (std csp))
+          (std csp)
+          (std csp mix))
 
   ;;; ======================================================
   ;;; Collection bridges

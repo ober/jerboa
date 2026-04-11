@@ -344,6 +344,30 @@ Clojure names:
 
 **Effort:** ~200 lines for the mix module + 80 lines of tests. One day.
 
+**[landed]** Implemented in `lib/std/csp/mix.sls` and re-exported from
+`(std csp ops)` as `make-mix`, `mix?`, `mix-out`, `mix-solo-mode`,
+`admix!`, `unmix!`, `unmix-all!`, `toggle!`, `solo-mode!`. Clojure
+short names in `(std csp clj)`: `mix`, `admix`, `unmix`, `unmix-all`,
+`toggle`, `solo-mode`.
+
+Implementation notes:
+
+- The fan-in loop uses `alts!!` over `[control-ch + active-inputs]`.
+  The control channel is a size-1 channel poked non-blockingly on
+  every reconfigure (`admix!`, `unmix!`, `toggle!`, `solo-mode!`).
+- After `alts!!` returns, the loop **re-snapshots** before forwarding
+  to handle the race where an input was unmixed/paused/muted after
+  the snapshot but before `alts!!` picked it. Values that no longer
+  belong to an effective-active, non-muted sub are dropped.
+- Solo semantics: if any sub has `solo?` set, only solo'd subs are
+  active; non-solo subs get treated per `solo-mode` — either `'mute`
+  (default: still read, dropped) or `'pause` (not read at all).
+- `toggle!` accepts the per-input flag map as an alist of alists,
+  an alist of plists, or a hashtable → hashtable/plist/alist. Flag
+  keys are `'mute`, `'pause`, `'solo`.
+
+Covered by 10 tests in `tests/test-csp.ss`.
+
 **Risks:**
 
 - **Control-channel back-pressure.** The control channel needs to be
@@ -1731,7 +1755,7 @@ in this doc. **[deferred]** items are non-goals.
 | `pipeline`/`pipeline-async` | [current] | — |
 | `promise-chan` | [current] | — |
 | `(chan n xform)` | [current] `(std csp clj)` | §3.1 landed |
-| `mix`/`admix`/`toggle` | [gap] | §3.2 |
+| `mix`/`admix`/`toggle` | [current] `(std csp mix)` | §3.2 landed |
 | Timer wheel | [gap] | §3.3 |
 | `put!`/`take!` with callbacks | [current] `(std csp ops)` | §3.4 landed |
 | `async/reduce`, `onto-chan!` | [current] `(std csp ops)` | §3.5 landed |
