@@ -1698,14 +1698,14 @@ in this doc. **[deferred]** items are non-goals.
 | `in-pmap`/`in-pset`/iterators | [current] | — |
 | `get`/`assoc`/`dissoc`/`merge` | [current] `(std clojure)` | — |
 | `get-in`/`assoc-in`/`update-in` | [current] `(std misc nested)` | — |
-| `conj`/`peek`/`pop` polymorphism | [current] (mostly) | §4.2 adds pqueue |
+| `conj`/`peek`/`pop` polymorphism | [current] (list/pvec/pqueue/set/map) | §4.2 landed |
 | `first`/`rest`/`next`/`last` | [current] | — |
 | `reduce`/`into`/`range`/`seq` | [current] | §4.1 into-pmap |
 | `inc`/`dec`/`count`/`empty?` | [current] | — |
 | `hash-map`/`hash-set`/`vec` constructors | [current] | — |
 | Atoms + deref/swap!/reset!/CAS | [current] | — |
 | Transducer ↔ pmap/pset bridge | [current] `(std transducer)` | §4.1 landed |
-| PersistentQueue | [gap] (ideque exists) | §4.2 |
+| PersistentQueue | [current] `(std pqueue)` | §4.2 landed |
 | Sorted-set | [gap] | §4.3 |
 | Metadata (`with-meta`/`meta`) | [gap] | §4.4 |
 | `defmulti`/`defmethod` value-dispatch | [gap] | §4.5 |

@@ -42,6 +42,7 @@
     merge update select-keys
     first rest next last
     conj cons* empty?
+    peek pop
     reduce into range
     seq =? hash
     inc dec
@@ -79,7 +80,13 @@
     atom atom? deref reset! swap! compare-and-set!
 
     ;; ---- Re-exports from (std misc nested) ----
-    get-in assoc-in update-in)
+    get-in assoc-in update-in
+
+    ;; ---- Re-exports from (std pqueue) ----
+    persistent-queue pqueue-empty pqueue?
+    pqueue-conj pqueue-peek pqueue-pop
+    pqueue-count pqueue->list
+    pqueue-empty? list->pqueue)
 
   (import (except (chezscheme)
                   make-hash-table hash-table?
@@ -101,7 +108,8 @@
                   (persistent-set!    pset-persistent!))
           (std concur hash)
           (std misc atom)
-          (std misc nested))
+          (std misc nested)
+          (std pqueue))
 
   ;; =========================================================================
   ;; Numerics
@@ -372,9 +380,10 @@
 
   ;; Clojure's conj:
   ;;   - list:   prepend
-  ;;   - vector: append
+  ;;   - vector: append (both mutable Chez vectors and persistent vectors)
   ;;   - map:    must be a [k v] pair; assoc
   ;;   - set:    add element
+  ;;   - queue:  enqueue at the back
   (define (conj coll . xs)
     (cond
       [(null? coll)
@@ -386,6 +395,19 @@
       [(vector? coll)
        ;; Build a new vector
        (list->vector (append (vector->list coll) xs))]
+      [(persistent-vector? coll)
+       (let loop ([v coll] [rest xs])
+         (if (null? rest) v
+             (loop (persistent-vector-append v (car rest)) (cdr rest))))]
+      [(pqueue? coll)
+       ;; NOTE: pqueue? is srfi-134's ideque predicate, which is a
+       ;; superset of "queue" — any ideque passed in is treated as a
+       ;; queue. This branch must precede the persistent-map? check
+       ;; because ideques are records distinct from pmap, but we want
+       ;; the polymorphism to be unambiguous.
+       (let loop ([q coll] [rest xs])
+         (if (null? rest) q
+             (loop (pqueue-conj q (car rest)) (cdr rest))))]
       [(persistent-map? coll)
        ;; Expect (k . v) pairs or (list k v)
        (let loop ([m coll] [rest xs])
@@ -404,6 +426,43 @@
          (if (null? rest) s
              (loop (persistent-set-add s (car rest)) (cdr rest))))]
       [else (error 'conj "unsupported collection type" coll)]))
+
+  ;; =========================================================================
+  ;; peek / pop — Clojure's stack/queue surface
+  ;;
+  ;; Clojure defines these on "stack-like" collections with type-
+  ;; specific ends:
+  ;;   - list:              peek = first, pop = rest
+  ;;   - persistent-vector: peek = last,  pop = drop-last   (stack end)
+  ;;   - persistent-queue:  peek = front, pop = drop-front  (FIFO end)
+  ;; Calling either on an empty coll returns nil (#f) for peek and
+  ;; raises for pop, mirroring clojure.lang.IPersistentStack.
+  ;; =========================================================================
+
+  (define (peek coll)
+    (cond
+      [(or (eq? coll #f) (null? coll)) #f]
+      [(pair? coll) (car coll)]
+      [(pqueue? coll) (pqueue-peek coll)]
+      [(persistent-vector? coll)
+       (let ([n (persistent-vector-length coll)])
+         (if (zero? n) #f (persistent-vector-ref coll (- n 1))))]
+      [(vector? coll)
+       (let ([n (vector-length coll)])
+         (if (zero? n) #f (vector-ref coll (- n 1))))]
+      [else (error 'peek "unsupported collection type" coll)]))
+
+  (define (pop coll)
+    (cond
+      [(null? coll) (error 'pop "cannot pop from an empty list")]
+      [(pair? coll) (cdr coll)]
+      [(pqueue? coll) (pqueue-pop coll)]
+      [(persistent-vector? coll)
+       (let ([n (persistent-vector-length coll)])
+         (cond
+           [(zero? n) (error 'pop "cannot pop from an empty vector")]
+           [else (persistent-vector-slice coll 0 (- n 1))]))]
+      [else (error 'pop "unsupported collection type" coll)]))
 
   ;; cons* — Chez's built-in cons* has identical semantics to Clojure's list*:
   ;; (cons* 1 2 3 '(4 5)) → (1 2 3 4 5). Re-used below as list*.
