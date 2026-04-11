@@ -51,7 +51,7 @@
     to-chan onto-chan onto-chan! onto-chan!!
     async-reduce
     ;; Composition
-    merge split pipe
+    merge split split-by pipe
     ;; Broadcast
     mult tap untap untap-all
     ;; Topic
@@ -211,6 +211,10 @@
 
   (define merge      chan-merge)
   (define split      chan-split)
+  ;; n-way classifier — not in core.async, but common enough in third
+  ;; party libs (e.g. dispatch / group-by-channel) to deserve a short
+  ;; name here. Returns a hashtable keyed by classifier output.
+  (define split-by   chan-classify-by)
   (define pipe       chan-pipe-to)
 
   ;; Clojure core.async's `async/reduce` — an async fold over a

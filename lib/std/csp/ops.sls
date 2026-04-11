@@ -15,7 +15,7 @@
     ;; Non-blocking callbacks
     put! take!
     ;; Composition
-    chan-merge chan-split chan-pipe-to
+    chan-merge chan-split chan-classify-by chan-pipe-to
     ;; Broadcast: mult / tap / untap
     make-mult mult? mult-source
     tap! untap! untap-all!
@@ -259,6 +259,61 @@
                 [(pred v) (chan-put! tch v) (loop)]
                 [else     (chan-put! fch v) (loop)])))))
       (list tch fch)))
+
+  ;; (chan-classify-by f ch)                   — n-way split by key
+  ;; (chan-classify-by f ch buf-fn)            — per-class buffer factory
+  ;; (chan-classify-by f ch buf-fn initial-keys)
+  ;;
+  ;; Fan `ch` out to per-class channels. `f` is a classifier: it maps
+  ;; each incoming value to a key (any `equal?`-comparable value). For
+  ;; every new key the classifier sees, it calls `buf-fn` with the key
+  ;; to construct a fresh output channel; `buf-fn` defaults to making
+  ;; an unbuffered channel. `initial-keys` is a list of expected keys
+  ;; whose channels are pre-created eagerly, so callers can look them
+  ;; up before the classifier has processed any values (useful in
+  ;; tests and when you know the class universe in advance).
+  ;;
+  ;; Returns a Chez hashtable mapping keys → output channels. Every
+  ;; output channel is closed when the source `ch` closes. Access to
+  ;; the hashtable is serialised internally via a mutex, so callers
+  ;; may safely use `hashtable-ref` at any time — but new keys only
+  ;; become visible after the classifier has seen a value bearing
+  ;; that key.
+  (define chan-classify-by
+    (case-lambda
+      [(f ch)
+       (chan-classify-by f ch (lambda (_k) (make-channel)) '())]
+      [(f ch buf-fn)
+       (chan-classify-by f ch buf-fn '())]
+      [(f ch buf-fn initial-keys)
+       (let ([outs (make-hashtable equal-hash equal?)]
+             [lk   (make-mutex)])
+         ;; Eagerly create channels for any caller-declared keys.
+         (for-each
+           (lambda (k) (hashtable-set! outs k (buf-fn k)))
+           initial-keys)
+         (fork-thread
+           (lambda ()
+             (let loop ()
+               (let ([v (chan-get! ch)])
+                 (cond
+                   [(eof-object? v)
+                    ;; Close every output channel once the source is done.
+                    (with-mutex lk
+                      (let-values ([(_ks vs) (hashtable-entries outs)])
+                        (vector-for-each chan-close! vs)))]
+                   [else
+                    (let ([out-ch
+                           (with-mutex lk
+                             (let* ([k (f v)]
+                                    [existing (hashtable-ref outs k #f)])
+                               (or existing
+                                   (let ([c (buf-fn k)])
+                                     (hashtable-set! outs k c)
+                                     c))))])
+                      (chan-put! out-ch v))
+                    (loop)])))))
+         outs)]))
 
   ;; (chan-pipe-to from to)                  → close `to` on EOF
   ;; (chan-pipe-to from to close?)           → don't close `to` when

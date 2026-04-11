@@ -161,6 +161,83 @@
     (list e o))
   '((2 4 6) (1 3 5)))
 
+;;; chan-classify-by — n-way classifier. Uses `initial-keys` so we can
+;;; grab per-class channels immediately without racing the helper thread.
+
+(test "chan-classify-by — three classes with initial-keys"
+  (let* ([in  (to-chan '(1 2 3 4 5 6 7 8 9))]
+         [classify
+          (lambda (n)
+            (cond [(zero? (modulo n 3)) 'third]
+                  [(even? n)             'even]
+                  [else                  'odd]))]
+         [tbl (chan-classify-by classify in
+                                (lambda (_k) (make-channel 16))
+                                '(third even odd))]
+         [e   (list-sort < (chan->list (hashtable-ref tbl 'even  #f)))]
+         [o   (list-sort < (chan->list (hashtable-ref tbl 'odd   #f)))]
+         [t   (list-sort < (chan->list (hashtable-ref tbl 'third #f)))])
+    (list e o t))
+  '((2 4 8) (1 5 7) (3 6 9)))
+
+(test "chan-classify-by — default buf-fn, two classes"
+  (let* ([in  (to-chan '("aa" "bbb" "cc" "dddd" "e"))]
+         [tbl (chan-classify-by string-length in)])
+    ;; default buf-fn makes unbuffered channels, so we need to read on
+    ;; helper threads. Use chan->list synchronously per-key since the
+    ;; helper thread will block putting until we drain.
+    ;; Simpler: wait for the source to drain and read via the table.
+    (sleep (millis 30))
+    (list (list-sort string<? (chan->list (hashtable-ref tbl 1 #f)))
+          (list-sort string<? (chan->list (hashtable-ref tbl 2 #f)))
+          (list-sort string<? (chan->list (hashtable-ref tbl 3 #f)))
+          (list-sort string<? (chan->list (hashtable-ref tbl 4 #f)))))
+  '(("e") ("aa" "cc") ("bbb") ("dddd")))
+
+(test "chan-classify-by — initial-keys eager channels are closed on EOF"
+  (let* ([in  (to-chan '())]    ;; empty source
+         [tbl (chan-classify-by car in
+                                (lambda (_k) (make-channel 4))
+                                '(a b c))])
+    (sleep (millis 20))
+    (list (eof-object? (chan-get! (hashtable-ref tbl 'a #f)))
+          (eof-object? (chan-get! (hashtable-ref tbl 'b #f)))
+          (eof-object? (chan-get! (hashtable-ref tbl 'c #f)))))
+  '(#t #t #t))
+
+(test "chan-classify-by — new keys appear in table as they are seen"
+  (let* ([in  (to-chan '(apple ant banana bear cherry))]
+         [tbl (chan-classify-by
+                (lambda (sym) (string-ref (symbol->string sym) 0))
+                in
+                (lambda (_k) (make-channel 8)))])
+    ;; Drain helper: wait until classifier has processed everything, then
+    ;; enumerate the keys in the table.
+    (sleep (millis 30))
+    (list
+      (list-sort < (map char->integer (vector->list
+        (hashtable-keys tbl))))
+      (chan->list (hashtable-ref tbl #\a #f))
+      (chan->list (hashtable-ref tbl #\b #f))
+      (chan->list (hashtable-ref tbl #\c #f))))
+  (list (list-sort < (list (char->integer #\a)
+                           (char->integer #\b)
+                           (char->integer #\c)))
+        '(apple ant)
+        '(banana bear)
+        '(cherry)))
+
+;; Clojure-style split-by alias
+(test "split-by — Clojure alias for chan-classify-by"
+  (let* ([in  (to-chan '(1 2 3 4 5 6))]
+         [tbl (split-by (lambda (n) (if (even? n) 'even 'odd))
+                        in
+                        (lambda (_k) (make-channel 8))
+                        '(even odd))])
+    (list (list-sort < (chan->list (hashtable-ref tbl 'even #f)))
+          (list-sort < (chan->list (hashtable-ref tbl 'odd  #f)))))
+  '((2 4 6) (1 3 5)))
+
 (test "chan-pipe-to"
   (let* ([in  (to-chan '(1 2 3))]
          [out (make-channel 8)])

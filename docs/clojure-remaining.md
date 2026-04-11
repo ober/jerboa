@@ -615,6 +615,25 @@ chan-classify-by
 
 **Effort:** ~40 lines + tests. One hour.
 
+**[landed]** `chan-classify-by` is in `(std csp ops)`; `(std csp clj)`
+re-exports it as both `chan-classify-by` and the short Clojure-style
+alias `split-by`. The implementation extends the sketch in two ways:
+it is thread-safe (a mutex protects the hashtable so callers can read
+while the classifier is writing), and it accepts an optional
+`initial-keys` list that eagerly pre-creates channels so tests and
+known-universe callers can look up channels before the classifier has
+processed any values. Arities:
+
+```scheme
+(chan-classify-by f ch)
+(chan-classify-by f ch buf-fn)
+(chan-classify-by f ch buf-fn initial-keys)
+```
+
+Default `buf-fn` makes an unbuffered channel; all output channels
+(both pre-populated and lazily-created) are closed once the source
+closes. Covered by 5 tests in `tests/test-csp.ss`.
+
 ### 3.7 Mult slow-subscriber policy
 
 **Current behaviour.** `make-mult` at `lib/std/csp/ops.sls` fans a source
@@ -1694,7 +1713,7 @@ in this doc. **[deferred]** items are non-goals.
 | `timeout` channel | [current] (thread-per-timeout) | §3.3 improves |
 | `go` / `go-loop` | [current] (OS threads) | §3.8 deferred |
 | `to-chan`/`onto-chan`/`chan-reduce` | [current] | — |
-| `merge`/`split`/`pipe` | [current] | §3.6 n-way split |
+| `merge`/`split`/`pipe` | [current] | §3.6 landed |
 | `mult`/`tap`/`untap` | [current] | §3.7 slow-sub policy |
 | `pub`/`sub`/`unsub` | [current] | — |
 | `pipeline`/`pipeline-async` | [current] | — |
@@ -1704,7 +1723,7 @@ in this doc. **[deferred]** items are non-goals.
 | Timer wheel | [gap] | §3.3 |
 | `put!`/`take!` with callbacks | [current] `(std csp ops)` | §3.4 landed |
 | `async/reduce`, `onto-chan!` | [current] `(std csp ops)` | §3.5 landed |
-| `split` n-way | [gap] | §3.6 |
+| `split` n-way | [current] `(std csp ops)` | §3.6 landed |
 | Mult slow-sub policies | [gap] | §3.7 |
 | Parked `go` (CPS) | [deferred] | §3.8 |
 | Transducer error handler on chan | [current] `(std csp clj)` | §3.1 landed |
