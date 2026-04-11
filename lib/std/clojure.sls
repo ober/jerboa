@@ -50,9 +50,14 @@
     transient persistent! transient?
     assoc! dissoc! conj!
 
+    ;; ---- Sets ----
+    hash-set set set?
+    disj
+    union intersection difference subset? superset?
+
     ;; ---- Constructors (aliases) ----
     hash-map vec list* vector*
-    hash-set make-hash-set
+    make-hash-set
     ;; The prelude's mutable hash-table can still be constructed
     ;; with make-hash-table.
 
@@ -85,6 +90,8 @@
                   (transient-set!    pvec-t-set!)
                   (transient-ref     pvec-t-ref)
                   (transient-append! pvec-t-append!))
+          (rename (std pset)
+                  (persistent-set!    pset-persistent!))
           (std concur hash)
           (std misc atom)
           (std misc nested))
@@ -113,6 +120,7 @@
       [(null? coll) #t]
       [(pair? coll) #f]
       [(persistent-map? coll) (zero? (persistent-map-size coll))]
+      [(persistent-set? coll) (zero? (persistent-set-size coll))]
       [(concurrent-hash? coll) (zero? (concurrent-hash-size coll))]
       [(hash-table? coll) (zero? (hash-length coll))]
       [(vector? coll) (zero? (vector-length coll))]
@@ -128,6 +136,7 @@
       [(null? coll) 0]
       [(pair? coll) (length coll)]
       [(persistent-map? coll) (persistent-map-size coll)]
+      [(persistent-set? coll) (persistent-set-size coll)]
       [(concurrent-hash? coll) (concurrent-hash-size coll)]
       [(hash-table? coll) (hash-length coll)]
       [(vector? coll) (vector-length coll)]
@@ -140,12 +149,18 @@
 
   (define get
     (case-lambda
-      [(coll key) (nested-get coll key #f)]
-      [(coll key default) (nested-get coll key default)]))
+      [(coll key) (get coll key #f)]
+      [(coll key default)
+       (cond
+         ;; Sets: membership check — return `key` if present
+         [(persistent-set? coll)
+          (if (persistent-set-contains? coll key) key default)]
+         [else (nested-get coll key default)])]))
 
   (define (contains? coll key)
     (cond
       [(persistent-map? coll) (persistent-map-has? coll key)]
+      [(persistent-set? coll) (persistent-set-contains? coll key)]
       [(concurrent-hash? coll) (concurrent-hash-key? coll key)]
       [(hash-table? coll) (hash-key? coll key)]
       [(vector? coll)
@@ -377,6 +392,10 @@
                         (cdr rest))]
                  [else
                   (error 'conj "cannot conj non-pair onto map" entry)]))))]
+      [(persistent-set? coll)
+       (let loop ([s coll] [rest xs])
+         (if (null? rest) s
+             (loop (persistent-set-add s (car rest)) (cdr rest))))]
       [else (error 'conj "unsupported collection type" coll)]))
 
   ;; cons* — Chez's built-in cons* has identical semantics to Clojure's list*:
@@ -509,16 +528,18 @@
     (cond
       [(persistent-map? coll) (transient-map coll)]
       [(persistent-vector? coll) (pvec-transient coll)]
+      [(persistent-set? coll) (transient-set coll)]
       [else (error 'transient
-                   "expected a persistent map or vector" coll)]))
+                   "expected a persistent map, vector, or set" coll)]))
 
   (define (transient? x)
-    (or (transient-map? x) (pvec-transient? x)))
+    (or (transient-map? x) (pvec-transient? x) (transient-set? x)))
 
   (define (persistent! t)
     (cond
       [(transient-map? t) (persistent-map! t)]
       [(pvec-transient? t) (pvec-persistent! t)]
+      [(transient-set? t) (pset-persistent! t)]
       [else (error 'persistent! "expected a transient" t)]))
 
   (define assoc!
@@ -564,6 +585,9 @@
              [else (error 'conj! "cannot conj non-pair onto transient map" entry)]))
          xs)
        t]
+      [(transient-set? t)
+       (for-each (lambda (x) (tset-add! t x)) xs)
+       t]
       [else (error 'conj! "expected a transient" t)]))
 
   ;; =========================================================================
@@ -591,12 +615,72 @@
   ;; vector* — builds a mutable vector (Chez's (vector ...) works too)
   (define (vector* . args) (apply vector args))
 
-  ;; hash-set / make-hash-set placeholders — will be replaced by (std pset)
-  ;; once that module lands. For now they use a hash-table with dummy values.
-  (define (make-hash-set) (make-hash-table))
+  ;; =========================================================================
+  ;; Sets — Clojure-style persistent set API on top of (std pset)
+  ;; =========================================================================
+
+  ;; hash-set — Clojure's #{:a :b :c} constructor
   (define (hash-set . items)
-    (let ([h (make-hash-table)])
-      (for-each (lambda (x) (hash-put! h x #t)) items)
-      h))
+    (apply persistent-set items))
+
+  ;; set — alias for hash-set (Clojure has both; `set` also coerces
+  ;; a collection into a set, which we handle by expanding the arg)
+  (define set
+    (case-lambda
+      [() pset-empty]
+      [(coll)
+       (cond
+         [(null? coll) pset-empty]
+         [(persistent-set? coll) coll]
+         [(pair? coll) (apply persistent-set coll)]
+         [(vector? coll) (apply persistent-set (vector->list coll))]
+         [(persistent-vector? coll)
+          (apply persistent-set (persistent-vector->list coll))]
+         [else (error 'set "unsupported collection" coll)])]))
+
+  (define set? persistent-set?)
+
+  ;; make-hash-set — parameterless constructor
+  (define (make-hash-set) pset-empty)
+
+  ;; disj — Clojure's "remove from set"
+  (define (disj s . items)
+    (cond
+      [(persistent-set? s)
+       (let loop ([cur s] [rest items])
+         (if (null? rest) cur
+             (loop (persistent-set-remove cur (car rest)) (cdr rest))))]
+      [else (error 'disj "expected a persistent set" s)]))
+
+  ;; Clojure's clojure.set/ operations
+  (define (union . sets)
+    (cond
+      [(null? sets) pset-empty]
+      [(null? (cdr sets)) (car sets)]
+      [else
+       (let loop ([acc (car sets)] [rest (cdr sets)])
+         (if (null? rest) acc
+             (loop (persistent-set-union acc (car rest)) (cdr rest))))]))
+
+  (define (intersection . sets)
+    (cond
+      [(null? sets) pset-empty]
+      [(null? (cdr sets)) (car sets)]
+      [else
+       (let loop ([acc (car sets)] [rest (cdr sets)])
+         (if (null? rest) acc
+             (loop (persistent-set-intersection acc (car rest)) (cdr rest))))]))
+
+  (define (difference . sets)
+    (cond
+      [(null? sets) pset-empty]
+      [(null? (cdr sets)) (car sets)]
+      [else
+       (let loop ([acc (car sets)] [rest (cdr sets)])
+         (if (null? rest) acc
+             (loop (persistent-set-difference acc (car rest)) (cdr rest))))]))
+
+  (define (subset? s1 s2) (persistent-set-subset? s1 s2))
+  (define (superset? s1 s2) (persistent-set-subset? s2 s1))
 
 ) ;; end library
