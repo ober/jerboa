@@ -58,7 +58,12 @@
 
     ;; Middleware
     wrap-health-check
-    wrap-metrics-endpoint)
+    wrap-metrics-endpoint
+
+    ;; WebSocket integration
+    make-websocket-response
+    websocket-response?
+    websocket-response-handler)
 
   (import (chezscheme)
           (std fiber)
@@ -114,6 +119,17 @@
     (make-response status
       '(("Content-Type" . "text/html; charset=utf-8"))
       html))
+
+  ;; ========== WebSocket response ==========
+  ;;
+  ;; When a handler returns a websocket-response, the connection handler
+  ;; performs the WebSocket handshake and calls the ws-handler with
+  ;; (fd poller req) so it can create a fiber-ws and run a WS loop.
+  ;; The handler proc receives (fd poller req).
+
+  (define-record-type websocket-response
+    (fields (immutable handler))   ;; (lambda (fd poller req) ...)
+    (sealed #t))
 
   ;; ========== HTTP Parser ==========
   ;;
@@ -399,27 +415,39 @@
 
   ;; Connection handler: one fiber per connection, keep-alive loop
   (define (handle-connection fd poller handler metrics)
-    (let loop ()
-      (let ([req (read-request fd poller)])
-        (when req
-          (metrics-inc-requests! metrics)
-          (let ([resp (guard (exn [#t
-                        (metrics-inc-errors! metrics)
-                        (respond-text 500
-                          (if (message-condition? exn)
-                            (condition-message exn)
-                            "Internal Server Error"))])
-                        (handler req))])
-            (when (response? resp)
-              ;; Track 5xx errors
-              (when (>= (response-status resp) 500)
-                (metrics-inc-errors! metrics))
-              (write-response fd poller resp)
-              ;; Keep-alive: check Connection header
-              (let ([conn (request-header req "connection")])
-                (unless (and conn (string=? (string-downcase conn) "close"))
-                  (loop))))))))
-    (fiber-tcp-close fd))
+    (let ([ws-upgraded? #f])
+      (let loop ()
+        (let ([req (read-request fd poller)])
+          (when req
+            (metrics-inc-requests! metrics)
+            (let ([resp (guard (exn [#t
+                          (metrics-inc-errors! metrics)
+                          (respond-text 500
+                            (if (message-condition? exn)
+                              (condition-message exn)
+                              "Internal Server Error"))])
+                          (handler req))])
+              (cond
+                [(websocket-response? resp)
+                 ;; WebSocket upgrade — hand off fd to WS handler
+                 ;; The WS handler owns the fd now; don't close it here
+                 (set! ws-upgraded? #t)
+                 (guard (exn [#t (void)])
+                   ((websocket-response-handler resp) fd poller req))]
+                [(response? resp)
+                 ;; Track 5xx errors
+                 (when (>= (response-status resp) 500)
+                   (metrics-inc-errors! metrics))
+                 (write-response fd poller resp)
+                 ;; Keep-alive: check Connection header
+                 (let ([conn (request-header req "connection")])
+                   (unless (and conn (string=? (string-downcase conn) "close"))
+                     (loop)))]
+                ;; If resp is something else, just close
+                [else (void)])))))
+      ;; Only close fd if not handed off to WebSocket
+      (unless ws-upgraded?
+        (fiber-tcp-close fd))))
 
   ;; Accept loop with optional admission control
   (define (accept-loop listen-fd poller handler server)
