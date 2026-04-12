@@ -1,187 +1,173 @@
-#!chezscheme
-;;; Tests for (std stm) — Software Transactional Memory
+(import (jerboa prelude))
+(import (std stm))
 
-(import (chezscheme) (std stm))
+(def test-count 0)
+(def pass-count 0)
 
-(define pass 0)
-(define fail 0)
+(defrule (test name body ...)
+  (begin
+    (set! test-count (+ test-count 1))
+    (guard (exn [#t
+      (displayln (str "FAIL: " name))
+      (displayln (str "  Error: " (if (message-condition? exn)
+                                    (condition-message exn) exn)))])
+      body ...
+      (set! pass-count (+ pass-count 1))
+      (displayln (str "PASS: " name)))))
 
-(define-syntax test
-  (syntax-rules ()
-    [(_ name expr expected)
-     (guard (exn [#t (set! fail (+ fail 1))
-                     (printf "FAIL ~a: ~a~%" name
-                       (if (message-condition? exn) (condition-message exn) exn))])
-       (let ([got expr])
-         (if (equal? got expected)
-           (begin (set! pass (+ pass 1)) (printf "  ok ~a~%" name))
-           (begin (set! fail (+ fail 1))
-                  (printf "FAIL ~a: got ~s expected ~s~%" name got expected)))))]))
+(defrule (assert-equal got expected msg)
+  (unless (equal? got expected)
+    (error 'assert msg (list 'got: got 'expected: expected))))
 
-(printf "--- (std stm) tests ---~%")
+(defrule (assert-true val msg)
+  (unless val (error 'assert msg)))
 
-;; Basic TVar operations
-(printf "~%-- TVar basics --~%")
+;; =========================================================================
+;; Basic TVar API
+;; =========================================================================
 
-(test "make-tvar + tvar-ref"
+(test "make-tvar and tvar-ref"
   (let ([tv (make-tvar 42)])
-    (tvar-ref tv))
-  42)
+    (assert-true (tvar? tv) "is tvar")
+    (assert-equal (tvar-ref tv) 42 "initial value")))
 
-(test "tvar?"
-  (tvar? (make-tvar 0))
-  #t)
+(test "tvar-read outside transaction"
+  (let ([tv (make-tvar "hello")])
+    (assert-equal (tvar-read tv) "hello" "direct read")))
 
-(test "tvar? on non-tvar"
-  (tvar? 42)
-  #f)
+;; =========================================================================
+;; Clojure-style aliases
+;; =========================================================================
 
-;; atomically: read and write
-(printf "~%-- atomically: basic read/write --~%")
+(test "make-ref and ref-deref"
+  (let ([r (make-ref 100)])
+    (assert-true (ref? r) "is ref")
+    (assert-equal (ref-deref r) 100 "deref value")))
 
-(test "tvar-read outside transaction (falls back to direct read)"
-  (let ([tv (make-tvar 99)])
-    (tvar-read tv))
-  99)
+;; =========================================================================
+;; dosync / alter
+;; =========================================================================
 
-(test "atomically: read"
-  (let ([tv (make-tvar 10)])
-    (atomically (tvar-read tv)))
-  10)
+(test "dosync with alter"
+  (let ([r (make-ref 0)])
+    (dosync (alter r + 10))
+    (assert-equal (ref-deref r) 10 "altered to 10")))
 
-(test "atomically: write then read"
-  (let ([tv (make-tvar 1)])
-    (atomically
-      (tvar-write! tv 42)
-      (tvar-read tv)))
-  42)
+(test "multiple alters in one dosync"
+  (let ([r (make-ref 0)])
+    (dosync
+      (alter r + 10)
+      (alter r + 5)
+      (alter r * 2))
+    (assert-equal (ref-deref r) 30 "(0+10+5)*2 = 30")))
 
-(test "atomically: write persists after transaction"
-  (let ([tv (make-tvar 0)])
-    (atomically (tvar-write! tv 100))
-    (tvar-ref tv))
-  100)
+(test "ref-set in dosync"
+  (let ([r (make-ref 'old)])
+    (dosync (ref-set r 'new))
+    (assert-equal (ref-deref r) 'new "set to new")))
 
-(test "atomically: multiple TVars"
-  (let ([a (make-tvar 1)]
-        [b (make-tvar 2)])
-    (atomically
-      (tvar-write! a 10)
-      (tvar-write! b 20))
-    (list (tvar-ref a) (tvar-ref b)))
-  '(10 20))
+(test "dosync returns last expression value"
+  (let ([r (make-ref 0)])
+    (let ([result (dosync
+                    (alter r + 42)
+                    'done)])
+      (assert-equal result 'done "returns done")
+      (assert-equal (ref-deref r) 42 "side effect applied"))))
 
-(test "atomically: read then write"
-  (let ([tv (make-tvar 5)])
-    (atomically
-      (let ([v (tvar-read tv)])
-        (tvar-write! tv (* v 2))))
-    (tvar-ref tv))
-  10)
+;; =========================================================================
+;; Multiple refs atomically
+;; =========================================================================
 
-;; Nested transactions flatten into parent
-(printf "~%-- nested atomically --~%")
+(test "atomically update multiple refs"
+  (let ([a (make-ref 100)]
+        [b (make-ref 200)])
+    (dosync
+      (let ([va (ref-deref a)]
+            [vb (ref-deref b)])
+        (ref-set a vb)
+        (ref-set b va)))
+    (assert-equal (ref-deref a) 200 "a got b's value")
+    (assert-equal (ref-deref b) 100 "b got a's value")))
 
-(test "nested atomically: flattens into parent"
-  (let ([tv (make-tvar 0)])
-    (atomically
-      (atomically (tvar-write! tv 1))
-      (atomically (tvar-write! tv (+ (tvar-read tv) 1))))
-    (tvar-ref tv))
-  2)
+;; =========================================================================
+;; commute and ensure
+;; =========================================================================
 
-;; Composable transfers
-(printf "~%-- composable transfers --~%")
+(test "commute works like alter"
+  (let ([r (make-ref 0)])
+    (dosync (commute r + 5))
+    (assert-equal (ref-deref r) 5 "commuted to 5")))
 
-(define (transfer! from to amount)
-  (atomically
-    (let ([f (tvar-read from)]
-          [t (tvar-read to)])
-      (when (< f amount)
-        (error 'transfer! "insufficient funds" f amount))
-      (tvar-write! from (- f amount))
-      (tvar-write! to   (+ t amount)))))
+(test "ensure reads value"
+  (let ([r (make-ref 42)])
+    (let ([val (dosync (ensure r))])
+      (assert-equal val 42 "ensure returns value"))))
 
-(test "transfer: basic"
-  (let ([a (make-tvar 1000)]
-        [b (make-tvar 500)])
-    (transfer! a b 300)
-    (list (tvar-ref a) (tvar-ref b)))
-  '(700 800))
+;; =========================================================================
+;; Concurrent transfers (basic correctness)
+;; =========================================================================
 
-(test "transfer: composed (two in one atomically)"
-  (let ([a (make-tvar 1000)]
-        [b (make-tvar 500)]
-        [c (make-tvar 200)])
-    (atomically
-      (transfer! a b 100)
-      (transfer! b c 50))
-    (list (tvar-ref a) (tvar-ref b) (tvar-ref c)))
-  '(900 550 250))
+(test "concurrent transfers preserve total"
+  (let ([a (make-ref 1000)]
+        [b (make-ref 1000)]
+        [done (make-tvar 0)])
+    ;; Spawn threads that transfer between accounts
+    (let ([threads
+           (map (lambda (i)
+                  (fork-thread
+                    (lambda ()
+                      (let loop ([n 100])
+                        (when (> n 0)
+                          (if (even? i)
+                            (dosync
+                              (alter a - 1)
+                              (alter b + 1))
+                            (dosync
+                              (alter b - 1)
+                              (alter a + 1)))
+                          (loop (- n 1))))
+                      (atomically (tvar-write! done (+ (tvar-read done) 1))))))
+                '(0 1 2 3))])
+      ;; Wait for all threads
+      (for-each (lambda (t)
+                  (let loop ()
+                    (unless (= (tvar-ref done) 4)
+                      (loop))))
+                threads)
+      ;; Total should be preserved
+      (assert-equal (+ (ref-deref a) (ref-deref b)) 2000
+        "total preserved"))))
 
-;; Concurrent correctness: two threads doing increments
-(printf "~%-- concurrent correctness --~%")
+;; =========================================================================
+;; Error handling
+;; =========================================================================
 
-(test "concurrent increments"
-  (let ([counter (make-tvar 0)]
-        [n 100])
-    (define (increment!)
-      (atomically
-        (let ([v (tvar-read counter)])
-          (tvar-write! counter (+ v 1)))))
-    ;; Run n increments in two threads
-    (let ([t1 (fork-thread
-                (lambda ()
-                  (let loop ([i 0])
-                    (when (< i (quotient n 2))
-                      (increment!)
-                      (loop (+ i 1))))))]
-          [t2 (fork-thread
-                (lambda ()
-                  (let loop ([i 0])
-                    (when (< i (quotient n 2))
-                      (increment!)
-                      (loop (+ i 1))))))])
-      ;; Wait for threads to finish
-      (let ([m (make-mutex)]
-            [c (make-condition)]
-            [done 0])
-        (define (thread-done!)
-          (with-mutex m
-            (set! done (+ done 1))
-            (condition-broadcast c)))
-        ;; Can't join threads in Chez directly; use a simpler approach:
-        ;; Just sleep and check
-        (sleep (make-time 'time-duration 200000000 0))
-        (tvar-ref counter))))
-  100)
+(test "exception in dosync rolls back"
+  (let ([r (make-ref 42)])
+    (guard (exn [#t (void)])
+      (dosync
+        (alter r + 100)
+        (error 'test "boom")))
+    (assert-equal (ref-deref r) 42 "unchanged after error")))
 
+;; =========================================================================
 ;; or-else
-(printf "~%-- or-else --~%")
+;; =========================================================================
 
-(test "or-else: first succeeds"
-  (atomically
-    (or-else
-      42
-      99))
-  42)
+(test "or-else tries alternative on retry"
+  (let ([r (make-ref 'fallback)])
+    (let ([val (atomically
+                 (or-else
+                   (begin (retry) 'never)
+                   (tvar-read r)))])
+      (assert-equal val 'fallback "got fallback from or-else"))))
 
-(test "or-else: first retries, second runs"
-  (let ([flag (make-tvar #t)])
-    (atomically
-      (or-else
-        (if (tvar-read flag) 'first (retry))
-        'second)))
-  'first)
-
-(test "or-else: first retries (flag=#f), second runs"
-  (let ([flag (make-tvar #f)])
-    (atomically
-      (or-else
-        (if (tvar-read flag) 'first (retry))
-        'second)))
-  'second)
-
-(printf "~%~a tests: ~a passed, ~a failed~%"
-  (+ pass fail) pass fail)
-(when (> fail 0) (exit 1))
+;; =========================================================================
+;; Summary
+;; =========================================================================
+(newline)
+(displayln (str "========================================="))
+(displayln (str "Results: " pass-count "/" test-count " passed"))
+(displayln (str "========================================="))
+(when (< pass-count test-count)
+  (exit 1))

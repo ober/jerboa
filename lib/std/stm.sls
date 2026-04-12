@@ -24,7 +24,11 @@
     tvar-read
     tvar-write!
     retry
-    or-else)
+    or-else
+
+    ;; Clojure-style aliases
+    make-ref ref? ref-deref
+    dosync alter ref-set commute ensure)
 
   (import (chezscheme))
 
@@ -192,5 +196,43 @@
       [(_ expr1 expr2)
        (guard (exn [(stm-retry? exn) expr2])
          expr1)]))
+
+  ;; ========== Clojure-style STM aliases ==========
+  ;;
+  ;; ref = tvar, dosync = atomically, alter = read+apply+write,
+  ;; ref-set = tvar-write!, commute = alter (simplified — no special
+  ;; commute optimization yet), ensure = read (pins version).
+
+  (define make-ref make-tvar)
+  (define ref? tvar?)
+  (define ref-deref tvar-read)
+
+  (define-syntax dosync
+    (syntax-rules ()
+      [(_ body ...)
+       (atomically body ...)]))
+
+  ;; alter — (alter r f args ...) → apply f to current value + args
+  (define (alter r f . args)
+    (let* ([old (tvar-read r)]
+           [new (apply f old args)])
+      (tvar-write! r new)
+      new))
+
+  ;; ref-set — (ref-set r val) → set ref to val
+  (define (ref-set r val)
+    (tvar-write! r val)
+    val)
+
+  ;; commute — like alter but may re-apply at commit.
+  ;; For now, same as alter (correct but not maximally concurrent).
+  (define (commute r f . args)
+    (apply alter r f args))
+
+  ;; ensure — read-lock a ref to prevent write skew.
+  ;; Reading the ref within a transaction already pins the version,
+  ;; so ensure is just a read.
+  (define (ensure r)
+    (tvar-read r))
 
   ) ;; end library
