@@ -16,7 +16,7 @@
     current-scheduler
     default-scheduler
     cpu-count)
-  (import (chezscheme) (std actor deque))
+  (import (chezscheme) (std actor deque) (std misc cpu))
 
   ;; Per-worker state (one per OS thread in the pool)
   (define-record-type worker
@@ -131,18 +131,5 @@
     (scheduler-running?-set! sched #f)
     (with-mutex (scheduler-mutex sched)
       (condition-broadcast (scheduler-work-available sched))))
-
-  ;; Read CPU count from /proc/cpuinfo on Linux; fallback to 4
-  (define (cpu-count)
-    (guard (exn [#t 4])
-      (let ([p (open-input-file "/proc/cpuinfo")])
-        (let loop ([n 0])
-          (let ([line (get-line p)])
-            (cond
-              [(eof-object? line) (close-port p) (fxmax n 1)]
-              [(and (fx>= (string-length line) 9)
-                    (string=? (substring line 0 9) "processor"))
-               (loop (fx+ n 1))]
-              [else (loop n)]))))))
 
   ) ;; end library

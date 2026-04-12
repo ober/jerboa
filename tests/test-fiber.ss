@@ -298,6 +298,329 @@
                     "all values flow through bounded channel"))))
 
 ;; =========================================================================
+;; Test 19: Fiber cancellation — cancel a sleeping fiber
+;; =========================================================================
+(test "fiber-cancel! wakes a sleeping fiber"
+  (lambda ()
+    (let ([caught (box #f)])
+      (with-fibers
+        (let ([f (fiber-spawn* (lambda ()
+                   (guard (e [(fiber-cancelled-condition? e)
+                              (set-box! caught #t)])
+                     (fiber-sleep 10000))))])
+          ;; Give it time to park
+          (fiber-spawn* (lambda ()
+            (fiber-sleep 50)
+            (fiber-cancel! f)))))
+      (assert-equal (unbox caught) #t "cancelled fiber should catch &fiber-cancelled"))))
+
+;; =========================================================================
+;; Test 20: Fiber cancellation — cancel at yield point
+;; =========================================================================
+(test "fiber-cancel! triggers at next yield"
+  (lambda ()
+    (let ([caught (box #f)])
+      (with-fibers
+        (let ([f (fiber-spawn* (lambda ()
+                   (guard (e [(fiber-cancelled-condition? e)
+                              (set-box! caught #t)])
+                     (let loop ()
+                       (fiber-yield)
+                       (loop)))))])
+          (fiber-spawn* (lambda ()
+            (fiber-sleep 30)
+            (fiber-cancel! f)))))
+      (assert-equal (unbox caught) #t "cancel detected at yield point"))))
+
+;; =========================================================================
+;; Test 21: Double cancel is idempotent
+;; =========================================================================
+(test "fiber-cancel! is idempotent"
+  (lambda ()
+    (let ([count (box 0)])
+      (with-fibers
+        (let ([f (fiber-spawn* (lambda ()
+                   (guard (e [(fiber-cancelled-condition? e)
+                              (set-box! count (fx+ (unbox count) 1))])
+                     (fiber-sleep 10000))))])
+          (fiber-spawn* (lambda ()
+            (fiber-sleep 30)
+            (fiber-cancel! f)
+            (fiber-cancel! f)))))
+      (assert-equal (unbox count) 1 "cancel handler runs once"))))
+
+;; =========================================================================
+;; Test 22: fiber-cancelled? predicate
+;; =========================================================================
+(test "fiber-cancelled? reflects cancel state"
+  (lambda ()
+    (let ([before (box #f)]
+          [after (box #f)])
+      (with-fibers
+        (let ([f (fiber-spawn* (lambda ()
+                   (fiber-sleep 10000)))])
+          (fiber-spawn* (lambda ()
+            (set-box! before (fiber-cancelled? f))
+            (fiber-cancel! f)
+            (set-box! after (fiber-cancelled? f))))))
+      (assert-equal (unbox before) #f "not cancelled initially")
+      (assert-equal (unbox after) #t "cancelled after fiber-cancel!"))))
+
+;; =========================================================================
+;; Test 23: Fiber-local storage — isolation across fibers
+;; =========================================================================
+(test "fiber-parameter isolated across concurrent fibers"
+  (lambda ()
+    (let ([fp (make-fiber-parameter 'default)]
+          [r1 (box #f)]
+          [r2 (box #f)])
+      (with-fibers
+        (fiber-spawn* (lambda ()
+          (fp 'fiber-a)
+          (fiber-yield)
+          (set-box! r1 (fp))))
+        (fiber-spawn* (lambda ()
+          (fp 'fiber-b)
+          (fiber-yield)
+          (set-box! r2 (fp)))))
+      (assert-equal (unbox r1) 'fiber-a "fiber A sees its own value")
+      (assert-equal (unbox r2) 'fiber-b "fiber B sees its own value"))))
+
+;; =========================================================================
+;; Test 24: Fiber-local storage — default value
+;; =========================================================================
+(test "fiber-parameter returns default outside fiber"
+  (lambda ()
+    (let ([fp (make-fiber-parameter 42)])
+      (assert-equal (fp) 42 "default outside fiber"))))
+
+;; =========================================================================
+;; Test 25: fiber-parameterize
+;; =========================================================================
+(test "fiber-parameterize restores old value"
+  (lambda ()
+    (let ([fp (make-fiber-parameter 'original)]
+          [inner (box #f)]
+          [outer (box #f)])
+      (with-fibers
+        (fiber-spawn* (lambda ()
+          (fp 'original)
+          (fiber-parameterize ([fp 'temporary])
+            (set-box! inner (fp)))
+          (set-box! outer (fp)))))
+      (assert-equal (unbox inner) 'temporary "inner should be temporary")
+      (assert-equal (unbox outer) 'original "outer should be restored"))))
+
+;; =========================================================================
+;; Test 26: fiber-join — join on completed fiber
+;; =========================================================================
+(test "fiber-join returns result of completed fiber"
+  (lambda ()
+    (let ([result (box #f)])
+      (with-fibers
+        (let ([f (fiber-spawn* (lambda () 42))])
+          (fiber-spawn* (lambda ()
+            (set-box! result (fiber-join f))))))
+      (assert-equal (unbox result) 42 "join should return fiber result"))))
+
+;; =========================================================================
+;; Test 27: fiber-join — join on crashed fiber re-raises
+;; =========================================================================
+(test "fiber-join re-raises exception from crashed fiber"
+  (lambda ()
+    (let ([caught (box #f)])
+      (with-fibers
+        (let ([f (fiber-spawn* (lambda ()
+                   (error 'test-crash "boom")))])
+          (fiber-spawn* (lambda ()
+            (guard (e [#t (set-box! caught #t)])
+              (fiber-join f))))))
+      (assert-equal (unbox caught) #t "join should re-raise crash"))))
+
+;; =========================================================================
+;; Test 28: fiber-join with timeout
+;; =========================================================================
+(test "fiber-join timeout raises &fiber-timeout"
+  (lambda ()
+    (let ([timed-out (box #f)])
+      (with-fibers
+        (let ([f (fiber-spawn* (lambda ()
+                   (fiber-sleep 10000)))])
+          (fiber-spawn* (lambda ()
+            (guard (e [(fiber-timeout-condition? e)
+                       (set-box! timed-out #t)]
+                      [#t (void)])
+              (fiber-join f 50))
+            ;; Clean up the sleeping fiber
+            (fiber-cancel! f)))))
+      (assert-equal (unbox timed-out) #t "join should timeout"))))
+
+;; =========================================================================
+;; Test 29: fiber-link! — crash propagation
+;; =========================================================================
+(test "fiber-link! propagates crash to linked fiber"
+  (lambda ()
+    (let ([linked-crash (box #f)])
+      (with-fibers
+        (let ([child (fiber-spawn* (lambda ()
+                       (fiber-sleep 100)
+                       (error 'child "child crash")))])
+          (fiber-spawn* (lambda ()
+            (fiber-link! child)
+            (guard (e [(fiber-linked-crash? e)
+                       (set-box! linked-crash #t)])
+              (fiber-sleep 10000))))))
+      (assert-equal (unbox linked-crash) #t "linked fiber should receive crash"))))
+
+;; =========================================================================
+;; Test 30: fiber-unlink! — unlink stops propagation
+;; =========================================================================
+(test "fiber-unlink! prevents crash propagation"
+  (lambda ()
+    (let ([received-crash (box #f)])
+      (with-fibers
+        (let ([child (fiber-spawn* (lambda ()
+                       (fiber-sleep 100)
+                       (error 'child "child crash")))])
+          (fiber-spawn* (lambda ()
+            (fiber-link! child)
+            (fiber-unlink! child)
+            (guard (e [(fiber-linked-crash? e)
+                       (set-box! received-crash #t)])
+              (fiber-sleep 300))))))
+      (assert-equal (unbox received-crash) #f "unlinked fiber should not receive crash"))))
+
+;; =========================================================================
+;; Test 31: fiber-select — recv from ready channel
+;; =========================================================================
+(test "fiber-select picks ready recv channel"
+  (lambda ()
+    (let ([result (box #f)])
+      (with-fibers
+        (let ([ch (make-fiber-channel)])
+          (fiber-spawn* (lambda ()
+            (fiber-channel-send ch 99)))
+          (fiber-spawn* (lambda ()
+            (fiber-sleep 30)
+            (let ([v (fiber-select
+                       [ch val => val])])
+              (set-box! result v))))))
+      (assert-equal (unbox result) 99 "select should recv from ready channel"))))
+
+;; =========================================================================
+;; Test 32: fiber-select — default clause
+;; =========================================================================
+(test "fiber-select with default on empty channels"
+  (lambda ()
+    (let ([result (box #f)])
+      (with-fibers
+        (let ([ch (make-fiber-channel)])
+          (fiber-spawn* (lambda ()
+            (let ([v (fiber-select
+                       [ch val => val]
+                       [:default => 'nothing])])
+              (set-box! result v))))))
+      (assert-equal (unbox result) 'nothing "select default when nothing ready"))))
+
+;; =========================================================================
+;; Test 33: fiber-select — timeout clause
+;; =========================================================================
+(test "fiber-select with timeout"
+  (lambda ()
+    (let ([result (box #f)])
+      (with-fibers
+        (let ([ch (make-fiber-channel)])
+          (fiber-spawn* (lambda ()
+            (let ([v (fiber-select
+                       [ch val => val]
+                       [:timeout 50 => 'timed-out])])
+              (set-box! result v))))))
+      (assert-equal (unbox result) 'timed-out "select should timeout"))))
+
+;; =========================================================================
+;; Test 34: fiber-timeout — channel fires after delay
+;; =========================================================================
+(test "fiber-timeout creates a channel that fires"
+  (lambda ()
+    (let ([result (box #f)])
+      (with-fibers
+        (fiber-spawn* (lambda ()
+          (let ([tch (fiber-timeout 50)])
+            (fiber-channel-recv tch)
+            (set-box! result 'fired)))))
+      (assert-equal (unbox result) 'fired "timeout channel should fire"))))
+
+;; =========================================================================
+;; Test 35: with-fiber-group — all succeed
+;; =========================================================================
+(test "with-fiber-group waits for all children"
+  (lambda ()
+    (let ([r1 (box #f)]
+          [r2 (box #f)]
+          [group-done (box #f)])
+      (with-fibers
+        (fiber-spawn* (lambda ()
+          (with-fiber-group
+            (lambda (g)
+              (fiber-group-spawn g (lambda ()
+                (fiber-sleep 30)
+                (set-box! r1 'done)))
+              (fiber-group-spawn g (lambda ()
+                (fiber-sleep 50)
+                (set-box! r2 'done)))))
+          ;; This only executes after with-fiber-group returns
+          (set-box! group-done #t))))
+      (assert-equal (unbox group-done) #t "group completed")
+      (assert-equal (unbox r1) 'done "child 1 completes")
+      (assert-equal (unbox r2) 'done "child 2 completes"))))
+
+;; =========================================================================
+;; Test 36: with-fiber-group — first error cancels rest
+;; =========================================================================
+(test "with-fiber-group cancels siblings on error"
+  (lambda ()
+    (let ([caught (box #f)]
+          [sibling-cancelled (box #f)])
+      (with-fibers
+        (fiber-spawn* (lambda ()
+          (guard (e [#t (set-box! caught #t)])
+            (with-fiber-group
+              (lambda (g)
+                (fiber-group-spawn g (lambda ()
+                  (fiber-sleep 30)
+                  (error 'child "boom")))
+                (fiber-group-spawn g (lambda ()
+                  (guard (e [(fiber-cancelled-condition? e)
+                             (set-box! sibling-cancelled #t)])
+                    (fiber-sleep 10000))))))))))
+      (assert-equal (unbox caught) #t "group re-raises error")
+      (assert-equal (unbox sibling-cancelled) #t "sibling was cancelled"))))
+
+;; =========================================================================
+;; Test 37: fiber-id exported and accessible
+;; =========================================================================
+(test "fiber-id returns unique ids"
+  (lambda ()
+    (let ([ids '()]
+          [mx (make-mutex)])
+      (with-fibers
+        (do ([i 0 (fx+ i 1)]) ((fx= i 3))
+          (fiber-spawn* (lambda ()
+            (let ([id (fiber-id (fiber-self))])
+              (mutex-acquire mx)
+              (set! ids (cons id ids))
+              (mutex-release mx))))))
+      (assert-equal (length ids) 3 "3 ids collected")
+      ;; Check all unique: sorted list should have no adjacent duplicates
+      (let ([sorted (sort < ids)])
+        (assert-equal
+          (let check ([lst sorted])
+            (cond [(or (null? lst) (null? (cdr lst))) #t]
+                  [(= (car lst) (cadr lst)) #f]
+                  [else (check (cdr lst))]))
+          #t "all ids unique")))))
+
+;; =========================================================================
 ;; Summary
 ;; =========================================================================
 (newline)

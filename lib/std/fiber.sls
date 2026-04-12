@@ -25,11 +25,51 @@
     fiber-yield
     fiber-sleep
     fiber-self
+    fiber-id
 
     fiber?
     fiber-state
     fiber-name
     fiber-done?
+
+    ;; Cancellation
+    fiber-cancel!
+    fiber-cancelled?
+    fiber-check-cancelled!
+    &fiber-cancelled
+    make-fiber-cancelled
+    fiber-cancelled-condition?
+    cancelled-fiber-id
+
+    ;; Fiber-local storage
+    make-fiber-parameter
+    fiber-parameterize
+
+    ;; Join / error propagation
+    fiber-join
+    &fiber-timeout
+    make-fiber-timeout
+    fiber-timeout-condition?
+    timeout-fiber-id
+
+    ;; Link (Erlang-style crash propagation)
+    fiber-link!
+    fiber-unlink!
+    &fiber-linked-crash
+    make-fiber-linked-crash
+    fiber-linked-crash?
+    linked-crash-source
+    linked-crash-condition
+
+    ;; Channel select
+    fiber-select
+
+    ;; Timeouts
+    fiber-timeout
+
+    ;; Structured concurrency
+    with-fiber-group
+    fiber-group-spawn
 
     make-fiber-channel
     fiber-channel?
@@ -44,7 +84,24 @@
 
     with-fibers)
 
-  (import (chezscheme))
+  (import (chezscheme) (std misc cpu))
+
+  ;; =========================================================================
+  ;; Condition types
+  ;; =========================================================================
+
+  (define-condition-type &fiber-cancelled &serious
+    make-fiber-cancelled fiber-cancelled-condition?
+    (fiber-id cancelled-fiber-id))
+
+  (define-condition-type &fiber-timeout &serious
+    make-fiber-timeout fiber-timeout-condition?
+    (fiber-id timeout-fiber-id))
+
+  (define-condition-type &fiber-linked-crash &serious
+    make-fiber-linked-crash fiber-linked-crash?
+    (source-fiber-id linked-crash-source)
+    (original-condition linked-crash-condition))
 
   ;; =========================================================================
   ;; Fiber record
@@ -59,14 +116,74 @@
       (mutable result)
       (mutable fiber-rt)        ;; back-pointer to fiber-runtime
       (mutable gate)            ;; #f or box: 'yield|'sleep|'channel -> 'done
-      (immutable mx))           ;; per-fiber mutex for park/wake coordination
+      (immutable mx)            ;; per-fiber mutex for park/wake coordination
+      (mutable cancelled)       ;; boolean — cooperative cancellation flag
+      (mutable join-waiters)    ;; list of fibers waiting for this fiber to complete
+      (mutable linked-fibers)   ;; list of fibers linked for crash propagation
+      (mutable pending-crash))  ;; #f or &fiber-linked-crash condition to deliver
     (protocol
       (lambda (new)
         (lambda (id thunk name rt)
-          (new id 'ready thunk name (void) rt #f (make-mutex))))))
+          (new id 'ready thunk name (void) rt #f (make-mutex)
+               #f '() '() #f)))))
 
   (define (fiber-done? f)
     (eq? (fiber-state f) 'done))
+
+  ;; =========================================================================
+  ;; Fiber-local storage
+  ;; =========================================================================
+
+  ;; Global registry of all live fiber-parameters for cleanup on fiber death.
+  (define *fiber-parameters* '())
+  (define *fiber-parameters-mx* (make-mutex))
+
+  (define (register-fiber-parameter! fp)
+    (mutex-acquire *fiber-parameters-mx*)
+    (set! *fiber-parameters* (cons fp *fiber-parameters*))
+    (mutex-release *fiber-parameters-mx*))
+
+  (define (cleanup-fiber-parameters! fid)
+    (mutex-acquire *fiber-parameters-mx*)
+    (for-each (lambda (fp) (fp fid #t)) *fiber-parameters*)
+    (mutex-release *fiber-parameters-mx*))
+
+  (define (make-fiber-parameter default)
+    (let ([store (make-eq-hashtable)]
+          [mx (make-mutex)])
+      (define fp
+        (case-lambda
+          [()    ;; read
+           (let ([f (current-fiber)])
+             (if f
+               (begin (mutex-acquire mx)
+                      (let ([v (hashtable-ref store (fiber-id f) default)])
+                        (mutex-release mx) v))
+               default))]
+          [(val) ;; write
+           (let ([f (current-fiber)])
+             (unless f (error 'fiber-parameter "not in a fiber"))
+             (mutex-acquire mx)
+             (hashtable-set! store (fiber-id f) val)
+             (mutex-release mx))]
+          [(fid cleanup?) ;; internal: cleanup by fiber id
+           (when cleanup?
+             (mutex-acquire mx)
+             (hashtable-delete! store fid)
+             (mutex-release mx))]))
+      (register-fiber-parameter! fp)
+      fp))
+
+  (define-syntax fiber-parameterize
+    (syntax-rules ()
+      [(_ () body ...)
+       (begin body ...)]
+      [(_ ([fp val] rest ...) body ...)
+       (let ([old (fp)])
+         (dynamic-wind
+           (lambda () (fp val))
+           (lambda () (fiber-parameterize (rest ...) body ...))
+           (lambda () (fp old))))]))
 
   ;; =========================================================================
   ;; Run queue
@@ -218,9 +335,6 @@
                     (make-mutex) (make-condition)
                     (max 100 fuel))]))))
 
-  (define (cpu-count)
-    (if (threaded?) 4 1))
-
   (define (fiber-runtime-fiber-count rt)
     (- (fiber-runtime-total-fibers rt)
        (fiber-runtime-done-fibers rt)))
@@ -282,9 +396,79 @@
   (define (spin-until-gate gate)
     (let loop () (unless (eq? (unbox gate) 'done) (loop))))
 
+  ;; =========================================================================
+  ;; Cancellation
+  ;; =========================================================================
+
+  (define (fiber-cancelled? f)
+    (fiber-cancelled f))
+
+  (define fiber-cancel!
+    (case-lambda
+      [(f)
+       (let ([fmx (fiber-mx f)])
+         (mutex-acquire fmx)
+         (unless (fiber-cancelled f)
+           (fiber-cancelled-set! f #t))
+         (cond
+           [(eq? (fiber-state f) 'parked)
+            (let ([gate (fiber-gate f)])
+              (when (and gate (box? gate))
+                (set-box! gate 'done))
+              (fiber-state-set! f 'ready)
+              (mutex-release fmx)
+              (rq-enqueue! (fiber-runtime-run-queue (fiber-fiber-rt f)) f))]
+           [else
+            ;; Running or ready — flag is set, will be checked at next
+            ;; cancellation point (yield/sleep/channel)
+            (mutex-release fmx)]))]
+      [(f timeout-ms)
+       ;; Cooperative cancel, then force-abandon after timeout
+       (fiber-cancel! f)
+       (fork-thread
+         (lambda ()
+           (sleep (make-time 'time-duration
+                             (* (fxmod timeout-ms 1000) 1000000)
+                             (fxquotient timeout-ms 1000)))
+           (unless (fiber-done? f)
+             ;; Force: mark done without running further
+             (let ([fmx (fiber-mx f)]
+                   [rt (fiber-fiber-rt f)]
+                   [forced? #f])
+               (mutex-acquire fmx)
+               (unless (eq? (fiber-state f) 'done)
+                 (fiber-state-set! f 'done)
+                 (fiber-result-set! f
+                   (make-fiber-cancelled (fiber-id f)))
+                 (fiber-continuation-set! f #f)
+                 (fiber-gate-set! f #f)
+                 (set! forced? #t))
+               (mutex-release fmx)
+               (when forced?
+                 (fiber-done-hooks! f rt))))))]))
+
+  (define (fiber-check-cancelled!)
+    (let ([f (current-fiber)])
+      (when (and f (fiber-cancelled f))
+        (raise (make-fiber-cancelled (fiber-id f))))))
+
+  ;; Check cancellation + linked crash at cancellation points
+  (define (check-cancellation-point! f)
+    (when (fiber-cancelled f)
+      (raise (make-fiber-cancelled (fiber-id f))))
+    (let ([crash (fiber-pending-crash f)])
+      (when crash
+        (fiber-pending-crash-set! f #f)
+        (raise crash))))
+
+  ;; =========================================================================
+  ;; Yield / Sleep
+  ;; =========================================================================
+
   (define (fiber-yield)
     (let ([f (current-fiber)])
       (unless f (error 'fiber-yield "not running inside a fiber"))
+      (check-cancellation-point! f)
       (let ([gate (box 'yield)])
         (fiber-gate-set! f gate)
         ;; Force immediate preemption
@@ -298,6 +482,7 @@
           [rt (current-fiber-runtime)])
       (unless (and f rt)
         (error 'fiber-sleep "not running inside a fiber"))
+      (check-cancellation-point! f)
       (let ([gate (box 'sleep)])
         (fiber-gate-set! f gate)
         ;; Register timer
@@ -311,6 +496,7 @@
         (set-timer 1)
         (spin-until-gate gate)
         (fiber-gate-set! f #f)
+        (check-cancellation-point! f)
         (void))))
 
   ;; =========================================================================
@@ -331,21 +517,12 @@
   ;; Core: run-fiber!
   ;; =========================================================================
 
-  (define (mark-fiber-done! rt)
-    (mutex-acquire (fiber-runtime-done-mutex rt))
-    (fiber-runtime-done-fibers-set! rt
-      (fx+ (fiber-runtime-done-fibers rt) 1))
-    (when (fx= (fiber-runtime-done-fibers rt)
-               (fiber-runtime-total-fibers rt))
-      (condition-broadcast (fiber-runtime-all-done rt)))
-    (mutex-release (fiber-runtime-done-mutex rt)))
-
   (define (handle-expire rt f remaining result)
     (fiber-state-set! f 'done)
     (fiber-result-set! f result)
     (fiber-continuation-set! f #f)
     (fiber-gate-set! f #f)
-    (mark-fiber-done! rt))
+    (fiber-done-hooks! f rt))
 
   (define (handle-complete rt f new-engine)
     ;; Engine fuel exhausted — fiber was preempted.
@@ -396,6 +573,51 @@
          ;; Fiber still in engine — gate is set, will exit spin on resume
          (mutex-release fmx)])))
 
+  ;; Post-completion hooks: wake join-waiters, propagate linked crashes,
+  ;; clean up fiber-parameters. Called after fiber state is 'done and
+  ;; result is set. Must be called OUTSIDE the fiber's mx.
+  (define (fiber-done-hooks! f rt)
+    ;; Wake join-waiters
+    (let ([waiters (fiber-join-waiters f)])
+      (fiber-join-waiters-set! f '())
+      (for-each (lambda (w)
+                  (fiber-result-set! w (fiber-result f))
+                  (wake-fiber! w))
+                waiters))
+    ;; Crash propagation to linked fibers
+    (let ([result (fiber-result f)])
+      (when (condition? result)
+        (let ([crash-cond (make-fiber-linked-crash (fiber-id f) result)])
+          (for-each (lambda (linked)
+                      (unless (fiber-done? linked)
+                        (fiber-pending-crash-set! linked crash-cond)
+                        ;; If parked, wake it so it can check the crash
+                        (let ([fmx (fiber-mx linked)]
+                              [need-enqueue? #f])
+                          (mutex-acquire fmx)
+                          (when (eq? (fiber-state linked) 'parked)
+                            (let ([gate (fiber-gate linked)])
+                              (when (and gate (box? gate))
+                                (set-box! gate 'done)))
+                            (fiber-state-set! linked 'ready)
+                            (set! need-enqueue? #t))
+                          (mutex-release fmx)
+                          (when need-enqueue?
+                            (rq-enqueue! (fiber-runtime-run-queue
+                                           (fiber-fiber-rt linked))
+                                         linked)))))
+                    (fiber-linked-fibers f)))))
+    ;; Fiber-parameter cleanup
+    (cleanup-fiber-parameters! (fiber-id f))
+    ;; Decrement runtime counter
+    (mutex-acquire (fiber-runtime-done-mutex rt))
+    (fiber-runtime-done-fibers-set! rt
+      (fx+ (fiber-runtime-done-fibers rt) 1))
+    (when (fx= (fiber-runtime-done-fibers rt)
+               (fiber-runtime-total-fibers rt))
+      (condition-broadcast (fiber-runtime-all-done rt)))
+    (mutex-release (fiber-runtime-done-mutex rt)))
+
   (define (run-fiber! rt f fuel)
     (let ([cont (fiber-continuation f)])
       (current-fiber-runtime rt)
@@ -438,7 +660,7 @@
                 (fiber-result-set! f exn)
                 (fiber-continuation-set! f #f)
                 (fiber-gate-set! f #f)
-                (mark-fiber-done! rt)])
+                (fiber-done-hooks! f rt)])
                 (run-fiber! rt f fuel))))
           (loop)))))
 
@@ -519,6 +741,8 @@
       (fiber-channel-tail-set! ch count)))
 
   (define (fiber-channel-send ch val)
+    (let ([f (current-fiber)])
+      (when f (check-cancellation-point! f)))
     (let ([mx (fiber-channel-mutex ch)])
       (mutex-acquire mx)
       (when (fiber-channel-closed? ch)
@@ -557,6 +781,8 @@
            (fiber-gate-set! f #f))])))
 
   (define (fiber-channel-recv ch)
+    (let ([f (current-fiber)])
+      (when f (check-cancellation-point! f)))
     (let ([mx (fiber-channel-mutex ch)])
       (mutex-acquire mx)
       (cond
@@ -663,5 +889,350 @@
         (mutex-release mx)
         (for-each wake-fiber! waiters)
         (for-each (lambda (entry) (wake-fiber! (car entry))) senders))))
+
+  ;; =========================================================================
+  ;; Fiber join — block until fiber completes, return result or re-raise
+  ;; =========================================================================
+
+  (define fiber-join
+    (case-lambda
+      [(f) (fiber-join f #f)]
+      [(f timeout-ms)
+       (let ([caller (current-fiber)])
+         (unless caller (error 'fiber-join "not running inside a fiber"))
+         (cond
+           [(fiber-done? f)
+            (let ([r (fiber-result f)])
+              (if (condition? r) (raise r) r))]
+           [else
+            (let ([fmx (fiber-mx f)]
+                  [gate (box 'channel)])
+              (when timeout-ms
+                (let* ([rt (current-fiber-runtime)]
+                       [now (current-time 'time-utc)]
+                       [deadline (add-duration now
+                                   (make-time 'time-duration
+                                              (* (fxmod timeout-ms 1000) 1000000)
+                                              (fxquotient timeout-ms 1000)))])
+                  (tq-add! (fiber-runtime-timer-queue rt) deadline caller)))
+              (mutex-acquire fmx)
+              (cond
+                [(eq? (fiber-state f) 'done)
+                 (mutex-release fmx)
+                 (let ([r (fiber-result f)])
+                   (if (condition? r) (raise r) r))]
+                [else
+                 (fiber-join-waiters-set! f
+                   (cons caller (fiber-join-waiters f)))
+                 (fiber-gate-set! caller gate)
+                 (fiber-result-set! caller (void))
+                 (mutex-release fmx)
+                 (set-timer 1)
+                 (spin-until-gate gate)
+                 (fiber-gate-set! caller #f)
+                 (let ([r (fiber-result caller)])
+                   (cond
+                     [(and timeout-ms (eq? r (void)) (not (fiber-done? f)))
+                      (mutex-acquire fmx)
+                      (fiber-join-waiters-set! f
+                        (remq caller (fiber-join-waiters f)))
+                      (mutex-release fmx)
+                      (raise (make-fiber-timeout (fiber-id f)))]
+                     [(condition? r) (raise r)]
+                     [else r]))]))]))]))
+
+  ;; =========================================================================
+  ;; Fiber link — Erlang-style crash propagation
+  ;; =========================================================================
+
+  (define (fiber-link! f)
+    (let ([caller (current-fiber)])
+      (unless caller (error 'fiber-link! "not running inside a fiber"))
+      (let ([fmx (fiber-mx f)])
+        (mutex-acquire fmx)
+        (cond
+          ;; Already done with error — deliver crash immediately
+          [(and (fiber-done? f) (condition? (fiber-result f)))
+           (mutex-release fmx)
+           (raise (make-fiber-linked-crash (fiber-id f) (fiber-result f)))]
+          [else
+           (fiber-linked-fibers-set! f
+             (cons caller (fiber-linked-fibers f)))
+           (mutex-release fmx)]))))
+
+  (define (fiber-unlink! f)
+    (let ([caller (current-fiber)])
+      (when caller
+        (let ([fmx (fiber-mx f)])
+          (mutex-acquire fmx)
+          (fiber-linked-fibers-set! f
+            (remq caller (fiber-linked-fibers f)))
+          (mutex-release fmx)))))
+
+  ;; =========================================================================
+  ;; Fiber-channel select — auxiliary syntax and macros
+  ;; =========================================================================
+
+  ;; =========================================================================
+  ;; Fiber-channel select — wait on multiple channels
+  ;; =========================================================================
+  ;;
+  ;; (fiber-select clause ...)
+  ;; Clause forms:
+  ;;   [ch val => body ...]            — recv from ch, bind val
+  ;;   [ch :send expr => body ...]     — send expr to ch
+  ;;   [:timeout ms => body ...]       — timeout in milliseconds
+  ;;   [:default => body ...]          — non-blocking fallback
+
+  (define-syntax fiber-select
+    (lambda (x)
+      (define (keyword? id sym)
+        (and (identifier? id)
+             (eq? (syntax->datum id) sym)))
+      (define (parse-clauses clauses)
+        ;; Returns (recvs sends timeout default) as syntax objects
+        (let loop ([cls clauses] [recvs '()] [sends '()] [tout #f] [dflt #f])
+          (if (null? cls)
+            (values (reverse recvs) (reverse sends) tout dflt)
+            (syntax-case (car cls) (=>)
+              [(kw => body ...)
+               (keyword? #'kw ':default)
+               (loop (cdr cls) recvs sends tout #'(body ...))]
+              [(kw ms => body ...)
+               (keyword? #'kw ':timeout)
+               (loop (cdr cls) recvs sends #'(ms body ...) dflt)]
+              [(ch kw expr => body ...)
+               (keyword? #'kw ':send)
+               (loop (cdr cls) recvs (cons #'(ch expr body ...) sends) tout dflt)]
+              [(ch val => body ...)
+               (loop (cdr cls) (cons #'(ch val body ...) recvs) sends tout dflt)]))))
+      (syntax-case x ()
+        [(_ clause ...)
+         (let-values ([(recvs sends tout dflt) (parse-clauses #'(clause ...))])
+           (with-syntax
+             ([recv-specs
+               (if (null? recvs) #''()
+                 (let loop ([rs recvs])
+                   (if (null? rs) #''()
+                     (syntax-case (car rs) ()
+                       [(ch val body ...)
+                        #`(cons (cons ch (lambda (val) body ...))
+                                #,(loop (cdr rs)))]))))]
+              [send-specs
+               (if (null? sends) #''()
+                 (let loop ([ss sends])
+                   (if (null? ss) #''()
+                     (syntax-case (car ss) ()
+                       [(ch expr body ...)
+                        #`(cons (cons* ch expr (lambda () body ...))
+                                #,(loop (cdr ss)))]))))]
+              [timeout-spec
+               (if tout
+                 (syntax-case tout ()
+                   [(ms body ...)
+                    #'(cons ms (lambda () body ...))])
+                 #'#f)]
+              [default-spec
+               (if dflt
+                 (syntax-case dflt ()
+                   [(body ...)
+                    #'(lambda () body ...)])
+                 #'#f)])
+             #'(fiber-select-impl recv-specs send-specs timeout-spec default-spec)))])))
+
+
+  ;; Runtime implementation of fiber-select
+  (define (fiber-select-impl recv-specs send-specs timeout-spec default-spec)
+    (define (try-recv specs)
+      (cond
+        [(null? specs) #f]
+        [else
+         (let* ([spec (car specs)]
+                [ch (car spec)]
+                [handler (cdr spec)])
+           (let-values ([(val ok) (fiber-channel-try-recv ch)])
+             (if ok
+               (cons 'ok (handler val))
+               (try-recv (cdr specs)))))]))
+    (define (try-send specs)
+      (cond
+        [(null? specs) #f]
+        [else
+         (let* ([spec (car specs)]
+                [ch (car spec)]
+                [val (cadr spec)]
+                [handler (cddr spec)])
+           (if (fiber-channel-try-send ch val)
+             (cons 'ok (handler))
+             (try-send (cdr specs))))]))
+    (define (block-on-channels f)
+      (let ([gate (box 'channel)])
+        (fiber-gate-set! f gate)
+        (fiber-result-set! f (void))
+        ;; Register timeout if present
+        (when timeout-spec
+          (let* ([rt (current-fiber-runtime)]
+                 [ms (car timeout-spec)]
+                 [now (current-time 'time-utc)]
+                 [deadline (add-duration now
+                             (make-time 'time-duration
+                                        (* (fxmod ms 1000) 1000000)
+                                        (fxquotient ms 1000)))])
+            (tq-add! (fiber-runtime-timer-queue rt) deadline f)))
+        ;; Register on recv channels
+        (for-each (lambda (spec)
+                    (let ([ch (car spec)]
+                          [mx (fiber-channel-mutex (car spec))])
+                      (mutex-acquire mx)
+                      (fiber-channel-recv-waiters-set! ch
+                        (append (fiber-channel-recv-waiters ch) (list f)))
+                      (mutex-release mx)))
+                  recv-specs)
+        ;; Park the fiber
+        (set-timer 1)
+        (spin-until-gate gate)
+        (fiber-gate-set! f #f)
+        ;; Remove from all recv waiter lists
+        (for-each (lambda (spec)
+                    (let ([ch (car spec)]
+                          [mx (fiber-channel-mutex (car spec))])
+                      (mutex-acquire mx)
+                      (fiber-channel-recv-waiters-set! ch
+                        (remq f (fiber-channel-recv-waiters ch)))
+                      (mutex-release mx)))
+                  recv-specs)
+        (check-cancellation-point! f)
+        ;; Determine what woke us
+        (let ([result (fiber-result f)])
+          (cond
+            [(not (eq? result (void)))
+             (if (pair? recv-specs)
+               ((cdr (car recv-specs)) result)
+               result)]
+            [timeout-spec
+             ((cdr timeout-spec))]
+            [else (select-loop)]))))
+    (define (select-loop)
+      (let ([hit (try-recv recv-specs)])
+        (cond
+          [hit (cdr hit)]
+          [else
+           (let ([hit2 (try-send send-specs)])
+             (cond
+               [hit2 (cdr hit2)]
+               [default-spec (default-spec)]
+               [else
+                (let ([f (current-fiber)])
+                  (unless f (error 'fiber-select "blocking select requires fiber context"))
+                  (block-on-channels f))]))])))
+    ;; Entry point
+    (let ([f (current-fiber)])
+      (when f (check-cancellation-point! f)))
+    (select-loop))
+
+  ;; =========================================================================
+  ;; Fiber timeout — channel that fires after N milliseconds
+  ;; =========================================================================
+
+  (define (fiber-timeout ms)
+    (let ([ch (make-fiber-channel 1)])
+      (fiber-spawn* (lambda ()
+        (fiber-sleep ms)
+        (fiber-channel-try-send ch (void))))
+      ch))
+
+  ;; =========================================================================
+  ;; Structured concurrency — with-fiber-group
+  ;; =========================================================================
+
+  (define-record-type fiber-group
+    (fields
+      (mutable fibers)           ;; list of child fibers
+      (mutable first-exn)        ;; first exception, or #f
+      (mutable group-cancelled?) ;; has group been cancelled?
+      (immutable group-mutex)
+      (immutable all-done-cv)    ;; condition variable
+      (mutable done-count)
+      (mutable total-count))
+    (protocol
+      (lambda (new)
+        (lambda ()
+          (new '() #f #f (make-mutex) (make-condition) 0 0)))))
+
+  (define (fiber-group-spawn group thunk)
+    (let ([rt (current-fiber-runtime)])
+      (unless rt (error 'fiber-group-spawn "no active fiber runtime"))
+      (let ([f (fiber-spawn rt
+                 (lambda ()
+                   (guard (exn [#t
+                     ;; Record first exception and cancel siblings
+                     (let ([gmx (fiber-group-group-mutex group)])
+                       (mutex-acquire gmx)
+                       (unless (fiber-group-first-exn group)
+                         (fiber-group-first-exn-set! group exn))
+                       (mutex-release gmx))
+                     ;; Cancel all siblings
+                     (for-each (lambda (sib)
+                                 (unless (fiber-done? sib)
+                                   (fiber-cancel! sib)))
+                               (fiber-group-fibers group))
+                     (raise exn)])
+                   (thunk))))])
+        ;; Track child in group
+        (let ([gmx (fiber-group-group-mutex group)])
+          (mutex-acquire gmx)
+          (fiber-group-fibers-set! group
+            (cons f (fiber-group-fibers group)))
+          (fiber-group-total-count-set! group
+            (fx+ (fiber-group-total-count group) 1))
+          (mutex-release gmx))
+        f)))
+
+  (define (%fiber-group-wait group)
+    ;; Wait for all children in the group to complete.
+    ;; Uses fiber-join to block on each non-done child.
+    (let wait ()
+      (let ([pending #f])
+        (let ([gmx (fiber-group-group-mutex group)])
+          (mutex-acquire gmx)
+          (let find ([fibs (fiber-group-fibers group)])
+            (cond
+              [(null? fibs) (void)]
+              [(fiber-done? (car fibs)) (find (cdr fibs))]
+              [else (set! pending (car fibs))]))
+          (mutex-release gmx))
+        (when pending
+          (guard (e [#t (void)])  ;; ignore join errors; error captured in group
+            (fiber-join pending))
+          (wait)))))
+
+  (define-syntax with-fiber-group
+    (syntax-rules ()
+      [(_ proc)
+       (let ([group (make-fiber-group)])
+         ;; NOTE: Cannot use dynamic-wind here because engine preemption
+         ;; (via set-timer in fiber-join/yield/sleep) triggers dynamic-wind
+         ;; cleanup handlers, which would cancel children prematurely.
+         ;; Instead, use guard for error cleanup.
+         (guard (exn
+                  [#t
+                   ;; Cancel any still-running children on error
+                   (for-each (lambda (f)
+                               (unless (fiber-done? f)
+                                 (fiber-cancel! f)))
+                             (fiber-group-fibers group))
+                   (raise exn)])
+           (proc group)
+           ;; Wait for all children to complete
+           (%fiber-group-wait group)
+           ;; Re-raise first exception if any
+           (let ([exn (fiber-group-first-exn group)])
+             (when exn
+               ;; Cancel any stragglers before re-raising
+               (for-each (lambda (f)
+                           (unless (fiber-done? f)
+                             (fiber-cancel! f)))
+                         (fiber-group-fibers group))
+               (raise exn)))))]))
 
 ) ;; end library
