@@ -10,7 +10,9 @@
     epoll-wait
     EPOLLIN EPOLLOUT EPOLLERR EPOLLHUP
     EPOLLET EPOLLONESHOT EPOLLRDHUP EPOLLPRI
-    EPOLL_CTL_ADD EPOLL_CTL_MOD EPOLL_CTL_DEL)
+    EPOLL_CTL_ADD EPOLL_CTL_MOD EPOLL_CTL_DEL
+    ;; eventfd for poller wakeup
+    eventfd-create eventfd-signal eventfd-drain)
 
   (import (chezscheme))
 
@@ -81,5 +83,27 @@
               (let ([fd (bytevector-s32-native-ref buf offset)]
                     [events (bytevector-u32-native-ref buf (+ offset 4))])
                 (loop (+ i 1) (cons (cons fd events) acc)))))))))
+
+  ;; --- eventfd for poller wakeup ---
+
+  (define c-eventfd-create
+    (foreign-procedure "jerboa_eventfd_create" () int))
+  (define c-eventfd-signal
+    (foreign-procedure "jerboa_eventfd_signal" (int) int))
+  (define c-eventfd-drain
+    (foreign-procedure "jerboa_eventfd_drain" (int) int))
+
+  (define (eventfd-create)
+    (let ([fd (c-eventfd-create)])
+      (when (< fd 0) (error 'eventfd-create "eventfd() failed"))
+      fd))
+
+  (define (eventfd-signal fd)
+    (c-eventfd-signal fd)
+    (void))
+
+  (define (eventfd-drain fd)
+    (c-eventfd-drain fd)
+    (void))
 
   ) ;; end library

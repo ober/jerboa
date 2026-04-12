@@ -82,7 +82,12 @@
     current-fiber-runtime
     current-fiber
 
-    with-fibers)
+    with-fibers
+
+    ;; Low-level primitives for I/O integration (used by std net io)
+    wake-fiber!
+    fiber-gate-set!
+    spin-until-gate)
 
   (import (chezscheme) (std misc cpu))
 

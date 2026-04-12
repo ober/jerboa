@@ -93,3 +93,43 @@ pub extern "C" fn jerboa_epoll_close(epfd: i32) -> i32 {
         rc
     })
 }
+
+// ---------- eventfd for poller wakeup ----------
+
+#[no_mangle]
+pub extern "C" fn jerboa_eventfd_create() -> i32 {
+    ffi_wrap(|| {
+        let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+        if fd < 0 {
+            crate::panic::set_last_error(format!(
+                "eventfd: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        fd
+    })
+}
+
+/// Write 1 to an eventfd to wake a blocked epoll_wait.
+#[no_mangle]
+pub extern "C" fn jerboa_eventfd_signal(fd: i32) -> i32 {
+    ffi_wrap(|| {
+        let val: u64 = 1;
+        let rc = unsafe {
+            libc::write(fd, &val as *const u64 as *const libc::c_void, 8)
+        };
+        if rc < 0 { -1 } else { 0 }
+    })
+}
+
+/// Read and clear an eventfd (drain the counter).
+#[no_mangle]
+pub extern "C" fn jerboa_eventfd_drain(fd: i32) -> i32 {
+    ffi_wrap(|| {
+        let mut val: u64 = 0;
+        let rc = unsafe {
+            libc::read(fd, &mut val as *mut u64 as *mut libc::c_void, 8)
+        };
+        if rc < 0 { -1 } else { 0 }
+    })
+}
