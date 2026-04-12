@@ -96,7 +96,7 @@
     fiber-gate-set!
     spin-until-gate)
 
-  (import (chezscheme) (std misc cpu))
+  (import (chezscheme) (std misc cpu) (std actor deque))
 
   ;; =========================================================================
   ;; Condition types
@@ -198,70 +198,28 @@
            (lambda () (fp old))))]))
 
   ;; =========================================================================
-  ;; Run queue
+  ;; Work-stealing run queues (per-worker deques)
   ;; =========================================================================
+  ;;
+  ;; Each worker owns a work-stealing deque from (std actor deque).
+  ;; Owner pushes/pops LIFO (cache-hot). Idle workers steal FIFO.
+  ;; A global condition variable wakes sleeping workers when work arrives.
 
-  (define-record-type run-queue
-    (fields
-      (mutable head)
-      (mutable tail)
-      (mutable count)
-      (immutable mutex)
-      (immutable not-empty))
-    (protocol
-      (lambda (new)
-        (lambda ()
-          (new '() '() 0 (make-mutex) (make-condition))))))
+  ;; Thread-local: which worker index this thread is (0..N-1), or #f
+  (define current-worker-id (make-thread-parameter #f))
 
-  (define (rq-enqueue! rq fiber)
-    (mutex-acquire (run-queue-mutex rq))
-    (run-queue-tail-set! rq (cons fiber (run-queue-tail rq)))
-    (run-queue-count-set! rq (fx+ (run-queue-count rq) 1))
-    (condition-signal (run-queue-not-empty rq))
-    (mutex-release (run-queue-mutex rq)))
-
-  (define (rq-dequeue! rq timeout-ms)
-    (mutex-acquire (run-queue-mutex rq))
-    (let loop ()
-      (cond
-        [(pair? (run-queue-head rq))
-         (let ([f (car (run-queue-head rq))])
-           (run-queue-head-set! rq (cdr (run-queue-head rq)))
-           (run-queue-count-set! rq (fx- (run-queue-count rq) 1))
-           (mutex-release (run-queue-mutex rq))
-           f)]
-        [(pair? (run-queue-tail rq))
-         (run-queue-head-set! rq (reverse (run-queue-tail rq)))
-         (run-queue-tail-set! rq '())
-         (loop)]
-        [timeout-ms
-         (condition-wait (run-queue-not-empty rq)
-                         (run-queue-mutex rq)
-                         (make-time 'time-duration
-                                    (* (fxmod timeout-ms 1000) 1000000)
-                                    (fxquotient timeout-ms 1000)))
-         (cond
-           [(pair? (run-queue-head rq))
-            (let ([f (car (run-queue-head rq))])
-              (run-queue-head-set! rq (cdr (run-queue-head rq)))
-              (run-queue-count-set! rq (fx- (run-queue-count rq) 1))
-              (mutex-release (run-queue-mutex rq))
-              f)]
-           [(pair? (run-queue-tail rq))
-            (run-queue-head-set! rq (reverse (run-queue-tail rq)))
-            (run-queue-tail-set! rq '())
-            (loop)]
-           [else
-            (mutex-release (run-queue-mutex rq))
-            #f])]
-        [else
-         (mutex-release (run-queue-mutex rq))
-         #f])))
-
-  (define (rq-wake-all! rq)
-    (mutex-acquire (run-queue-mutex rq))
-    (condition-broadcast (run-queue-not-empty rq))
-    (mutex-release (run-queue-mutex rq)))
+  ;; Enqueue a fiber to the runtime's work-stealing deques.
+  ;; Fast path: from a worker thread → push to own deque (no contention).
+  ;; Slow path: from outside or wake-fiber! → push to random worker's deque.
+  (define (rt-enqueue! rt f)
+    (let ([workers (fiber-runtime-workers rt)]
+          [wid (current-worker-id)])
+      (if (and wid (fx< wid (vector-length workers)))
+        ;; Fast path: push to own deque
+        (deque-push-bottom! (vector-ref workers wid) f)
+        ;; Slow path (poller/external): random worker's deque
+        (let ([n (vector-length workers)])
+          (deque-push-bottom! (vector-ref workers (random n)) f)))))
 
   ;; =========================================================================
   ;; Timer queue
@@ -314,7 +272,7 @@
 
   (define-record-type fiber-runtime
     (fields
-      (immutable run-queue)
+      (immutable workers)        ;; vector of work-deque (one per worker)
       (immutable timer-queue)
       (mutable worker-threads)
       (immutable nworkers)
@@ -328,24 +286,31 @@
       (immutable fuel))
     (protocol
       (lambda (new)
+        (define (make-worker-deques n)
+          (let ([v (make-vector n)])
+            (do ([i 0 (fx+ i 1)]) ((fx= i n) v)
+              (vector-set! v i (make-work-deque)))))
         (case-lambda
-          [()  (new (make-run-queue) (make-timer-queue)
-                    '() (max 1 (- (cpu-count) 1))
-                    #f 0 (make-mutex) 0 0
-                    (make-mutex) (make-condition)
-                    10000)]
+          [()  (let ([n (max 1 (- (cpu-count) 1))])
+                 (new (make-worker-deques n) (make-timer-queue)
+                      '() n
+                      #f 0 (make-mutex) 0 0
+                      (make-mutex) (make-condition)
+                      10000))]
           [(nworkers)
-               (new (make-run-queue) (make-timer-queue)
-                    '() (max 1 nworkers)
-                    #f 0 (make-mutex) 0 0
-                    (make-mutex) (make-condition)
-                    10000)]
+               (let ([n (max 1 nworkers)])
+                 (new (make-worker-deques n) (make-timer-queue)
+                      '() n
+                      #f 0 (make-mutex) 0 0
+                      (make-mutex) (make-condition)
+                      10000))]
           [(nworkers fuel)
-               (new (make-run-queue) (make-timer-queue)
-                    '() (max 1 nworkers)
-                    #f 0 (make-mutex) 0 0
-                    (make-mutex) (make-condition)
-                    (max 100 fuel))]))))
+               (let ([n (max 1 nworkers)])
+                 (new (make-worker-deques n) (make-timer-queue)
+                      '() n
+                      #f 0 (make-mutex) 0 0
+                      (make-mutex) (make-condition)
+                      (max 100 fuel)))]))))
 
   (define (fiber-runtime-fiber-count rt)
     (- (fiber-runtime-total-fibers rt)
@@ -380,7 +345,7 @@
          (fiber-runtime-total-fibers-set! rt
            (fx+ (fiber-runtime-total-fibers rt) 1))
          (mutex-release (fiber-runtime-done-mutex rt))
-         (rq-enqueue! (fiber-runtime-run-queue rt) f)
+         (rt-enqueue! rt f)
          f)]))
 
   (define (fiber-spawn* thunk . name-opt)
@@ -429,7 +394,7 @@
                 (set-box! gate 'done))
               (fiber-state-set! f 'ready)
               (mutex-release fmx)
-              (rq-enqueue! (fiber-runtime-run-queue (fiber-fiber-rt f)) f))]
+              (rt-enqueue! (fiber-fiber-rt f) f))]
            [else
             ;; Running or ready — flag is set, will be checked at next
             ;; cancellation point (yield/sleep/channel)
@@ -540,19 +505,18 @@
     ;; Engine fuel exhausted — fiber was preempted.
     ;; Use per-fiber mutex to coordinate with wake-fiber!.
     (let ([gate (fiber-gate f)]
-          [fmx (fiber-mx f)]
-          [rq (fiber-runtime-run-queue rt)])
+          [fmx (fiber-mx f)])
       (fiber-continuation-set! f (make-engine-resumer new-engine))
       (cond
-        ;; No gate — normal preemption, re-enqueue
+        ;; No gate — normal preemption, re-enqueue to own deque
         [(not gate)
          (fiber-state-set! f 'ready)
-         (rq-enqueue! rq f)]
+         (rt-enqueue! rt f)]
         ;; Cooperative yield — open gate, re-enqueue
         [(eq? (unbox gate) 'yield)
          (set-box! gate 'done)
          (fiber-state-set! f 'ready)
-         (rq-enqueue! rq f)]
+         (rt-enqueue! rt f)]
         ;; Blocked (sleep/channel) — check if already woken
         [else
          (mutex-acquire fmx)
@@ -561,7 +525,7 @@
            [(eq? (unbox gate) 'done)
             (fiber-state-set! f 'ready)
             (mutex-release fmx)
-            (rq-enqueue! rq f)]
+            (rt-enqueue! rt f)]
            ;; Not yet woken — park the fiber
            [else
             (fiber-state-set! f 'parked)
@@ -580,7 +544,7 @@
          ;; Fiber is parked — re-enqueue
          (fiber-state-set! f 'ready)
          (mutex-release fmx)
-         (rq-enqueue! (fiber-runtime-run-queue (fiber-fiber-rt f)) f)]
+         (rt-enqueue! (fiber-fiber-rt f) f)]
         [else
          ;; Fiber still in engine — gate is set, will exit spin on resume
          (mutex-release fmx)])))
@@ -615,8 +579,7 @@
                             (set! need-enqueue? #t))
                           (mutex-release fmx)
                           (when need-enqueue?
-                            (rq-enqueue! (fiber-runtime-run-queue
-                                           (fiber-fiber-rt linked))
+                            (rt-enqueue! (fiber-fiber-rt linked)
                                          linked)))))
                     (fiber-linked-fibers f)))))
     ;; Fiber-parameter cleanup
@@ -659,22 +622,50 @@
                      (current-time 'time-utc))])
       (for-each wake-fiber! expired)))
 
-  (define (worker-loop rt)
-    (let ([rq (fiber-runtime-run-queue rt)]
-          [fuel (fiber-runtime-fuel rt)])
+  (define (worker-loop rt wid)
+    (current-worker-id wid)
+    (let ([workers (fiber-runtime-workers rt)]
+          [n (fiber-runtime-nworkers rt)]
+          [fuel (fiber-runtime-fuel rt)]
+          [my-deque (vector-ref (fiber-runtime-workers rt) wid)])
+
+      ;; Try to find work: own deque first, then steal from others.
+      ;; Returns a fiber or #f.
+      (define (find-work)
+        ;; Use steal-top (FIFO) for own deque to maintain fair scheduling.
+        ;; LIFO (pop-bottom) would starve older fibers under load.
+        (let-values ([(f ok) (deque-steal-top! my-deque)])
+          (if ok f
+            (let try-steal ([attempts 0])
+              (cond
+                [(fx>= attempts n) #f]
+                [else
+                 (let* ([victim-idx (fxmod (fx+ wid attempts 1) n)]
+                        [victim-deque (vector-ref workers victim-idx)])
+                   (let-values ([(stolen ok) (deque-steal-top! victim-deque)])
+                     (if ok stolen (try-steal (fx+ attempts 1)))))])))))
+
       (let loop ()
         (when (fiber-runtime-running? rt)
           (check-timers! rt)
-          (let ([f (rq-dequeue! rq 5)])
-            (when f
-              (guard (exn [#t
-                (fiber-state-set! f 'done)
-                (fiber-result-set! f exn)
-                (fiber-continuation-set! f #f)
-                (fiber-gate-set! f #f)
-                (fiber-done-hooks! f rt)])
-                (run-fiber! rt f fuel))))
-          (loop)))))
+          (let ([f (find-work)])
+            (cond
+              [f (run-one! rt f fuel) (loop)]
+              [else
+               ;; No work found — brief sleep then retry.
+               ;; 1ms is short enough for responsiveness, long enough
+               ;; to avoid busy-spinning.
+               (sleep (make-time 'time-duration 1000000 0))
+               (loop)]))))))
+
+  (define (run-one! rt f fuel)
+    (guard (exn [#t
+      (fiber-state-set! f 'done)
+      (fiber-result-set! f exn)
+      (fiber-continuation-set! f #f)
+      (fiber-gate-set! f #f)
+      (fiber-done-hooks! f rt)])
+      (run-fiber! rt f fuel)))
 
   ;; =========================================================================
   ;; Runtime start/stop
@@ -683,11 +674,12 @@
   (define (fiber-runtime-run! rt)
     (fiber-runtime-running?-set! rt #t)
     (let ([threads
-           (let build ([i (fiber-runtime-nworkers rt)] [acc '()])
-             (if (fx= i 0) acc
-               (build (fx- i 1)
-                 (cons (fork-thread (lambda () (worker-loop rt)))
-                       acc))))])
+           (let build ([i 0] [acc '()])
+             (if (fx= i (fiber-runtime-nworkers rt)) acc
+               (let ([wid i])
+                 (build (fx+ i 1)
+                   (cons (fork-thread (lambda () (worker-loop rt wid)))
+                         acc)))))])
       (fiber-runtime-worker-threads-set! rt threads)
       (mutex-acquire (fiber-runtime-done-mutex rt))
       (let wait ()
@@ -701,7 +693,8 @@
 
   (define (fiber-runtime-stop! rt)
     (fiber-runtime-running?-set! rt #f)
-    (rq-wake-all! (fiber-runtime-run-queue rt))
+    ;; Workers will exit their loop on next iteration when running? = #f.
+    ;; Brief sleep to let them drain.
     (sleep (make-time 'time-duration 50000000 0)))
 
   ;; =========================================================================

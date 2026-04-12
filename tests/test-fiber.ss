@@ -52,16 +52,19 @@
 ;; =========================================================================
 (test "fiber-yield allows other fibers to run"
   (lambda ()
-    (let ([log '()])
+    ;; Use a mutex-protected log — with work-stealing, fibers may
+    ;; truly run in parallel on different OS threads.
+    (let ([log '()]
+          [mx (make-mutex)])
       (with-fibers
         (fiber-spawn* (lambda ()
-          (set! log (cons 'a1 log))
+          (with-mutex mx (set! log (cons 'a1 log)))
           (fiber-yield)
-          (set! log (cons 'a2 log))))
+          (with-mutex mx (set! log (cons 'a2 log)))))
         (fiber-spawn* (lambda ()
-          (set! log (cons 'b1 log))
+          (with-mutex mx (set! log (cons 'b1 log)))
           (fiber-yield)
-          (set! log (cons 'b2 log)))))
+          (with-mutex mx (set! log (cons 'b2 log))))))
       ;; Both fibers should have completed both phases
       (assert-equal (length log) 4 "all 4 events should fire")
       (assert-equal (not (memq 'a1 log)) #f "a1 should be in log")
