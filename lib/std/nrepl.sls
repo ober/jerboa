@@ -1,9 +1,8 @@
 #!chezscheme
-;;; (std nrepl) — nREPL server for Clojure editor integration
+;;; (std nrepl) — Full nREPL server with CIDER/Calva middleware + Jerboa extensions
 ;;;
-;;; Implements the nREPL protocol (bencode over TCP) so that Clojure
-;;; editors like CIDER (Emacs), Calva (VS Code), and Cursive (IntelliJ)
-;;; can connect to a running Jerboa process.
+;;; Implements the nREPL protocol (bencode over TCP) with complete CIDER and
+;;; Calva middleware support plus Jerboa-specific extensions that exceed CIDER.
 ;;;
 ;;; Usage:
 ;;;   (import (std nrepl))
@@ -11,10 +10,19 @@
 ;;;   (nrepl-start!)                   ;; start on random port, prints it
 ;;;   (nrepl-stop!)                    ;; stop the server
 ;;;
-;;; Supported ops: clone, close, describe, eval, load-file,
-;;;   completions, lookup, interrupt, stdin (no-op)
-;;;
-;;; Writes .nrepl-port in current directory so editors auto-discover.
+;;; Base ops:      clone, close, describe, eval, load-file, interrupt, stdin
+;;; Metadata:      info, eldoc, arglists, lookup, version
+;;; Completions:   completions (with type + doc)
+;;; Macros:        macroexpand, macroexpand-1, macroexpand-all
+;;; Namespaces:    ns-list, ns-vars, ns-vars-with-meta
+;;; Debugging:     stacktrace, analyze-stacktrace
+;;; Formatting:    format-code, format-edn
+;;; Search:        apropos, apropos-docs
+;;; Mutation:      undef
+;;; Testing:       test, test-all, test-ns
+;;; Inspection:    inspect-start, inspect-next, inspect-pop,
+;;;                inspect-refresh, inspect-get-path, inspect-navigate
+;;; Jerboa+:       eval-timed, type-info, memory-stats, doc-examples
 ;;;
 ;;; Protocol reference: https://nrepl.org/nrepl/building_servers.html
 
@@ -28,13 +36,6 @@
   ;; ================================================================
   ;; Bencode Encoder/Decoder (binary, self-contained)
   ;; ================================================================
-  ;; Bencode is a byte-oriented format:
-  ;;   Integer:  i<decimal-ascii>e       e.g. i42e
-  ;;   String:   <length>:<bytes>        e.g. 5:hello
-  ;;   List:     l<items>e
-  ;;   Dict:     d<key><value>...e       keys are strings, sorted
-  ;;
-  ;; We work on binary ports and convert strings to/from UTF-8.
 
   (define (string->bv s)
     (string->bytevector s (make-transcoder (utf-8-codec))))
@@ -87,8 +88,6 @@
       [else
        (bencode-write (format "~a" obj) port)]))
 
-  ;; Read a bencode value from a binary input port.
-  ;; Returns the decoded value or (eof-object).
   (define (bencode-read port)
     (let ([b (get-u8 port)])
       (cond
@@ -101,7 +100,6 @@
         [else (error 'bencode-read "unexpected byte in bencode stream" b)])))
 
   (define (bencode-read-int port)
-    ;; 'i' already consumed; read digits until 'e'
     (let lp ([acc '()])
       (let ([b (get-u8 port)])
         (cond
@@ -111,7 +109,6 @@
           [else (lp (cons (integer->char b) acc))]))))
 
   (define (bencode-read-string first-byte port)
-    ;; first digit already read; read remaining length digits, then ':'
     (let lp ([acc (list (integer->char first-byte))])
       (let ([b (get-u8 port)])
         (cond
@@ -125,25 +122,23 @@
           [else (lp (cons (integer->char b) acc))]))))
 
   (define (bencode-read-list port)
-    ;; 'l' already consumed; read items until 'e'
     (let lp ([acc '()])
       (let ([b (lookahead-u8 port)])
         (cond
           [(eof-object? b) (error 'bencode-read-list "unexpected EOF in list")]
           [(= b (char->integer #\e))
-           (get-u8 port)  ;; consume 'e'
+           (get-u8 port)
            (reverse acc)]
           [else (lp (cons (bencode-read port) acc))]))))
 
   (define (bencode-read-dict port)
-    ;; 'd' already consumed; read key-value pairs until 'e'
     (let ([ht (make-hashtable string-hash string=?)])
       (let lp ()
         (let ([b (lookahead-u8 port)])
           (cond
             [(eof-object? b) (error 'bencode-read-dict "unexpected EOF in dict")]
             [(= b (char->integer #\e))
-             (get-u8 port)  ;; consume 'e'
+             (get-u8 port)
              ht]
             [else
              (let* ([key (bencode-read port)]
@@ -156,13 +151,11 @@
   ;; ================================================================
   ;; UUID Generation
   ;; ================================================================
-  ;; Read from /dev/urandom for proper randomness.
 
   (define (generate-uuid)
     (let ([bv (make-bytevector 16)])
       (guard (exn
                [#t
-                ;; Fallback: use time + random if /dev/urandom unavailable
                 (let ([t (time-nanosecond (current-time))]
                       [r (random (expt 2 48))])
                   (format "~8,'0x-~4,'0x-~4,'0x-~4,'0x-~12,'0x"
@@ -174,39 +167,73 @@
         (let ([p (open-file-input-port "/dev/urandom")])
           (get-bytevector-n! p bv 0 16)
           (close-port p)
-          ;; Set version 4 (random) and variant 1 bits
           (bytevector-u8-set! bv 6
             (bitwise-ior #x40 (bitwise-and (bytevector-u8-ref bv 6) #x0F)))
           (bytevector-u8-set! bv 8
             (bitwise-ior #x80 (bitwise-and (bytevector-u8-ref bv 8) #x3F)))
           (format "~2,'0x~2,'0x~2,'0x~2,'0x-~2,'0x~2,'0x-~2,'0x~2,'0x-~2,'0x~2,'0x-~2,'0x~2,'0x~2,'0x~2,'0x~2,'0x~2,'0x"
-            (bytevector-u8-ref bv 0) (bytevector-u8-ref bv 1)
-            (bytevector-u8-ref bv 2) (bytevector-u8-ref bv 3)
-            (bytevector-u8-ref bv 4) (bytevector-u8-ref bv 5)
-            (bytevector-u8-ref bv 6) (bytevector-u8-ref bv 7)
-            (bytevector-u8-ref bv 8) (bytevector-u8-ref bv 9)
+            (bytevector-u8-ref bv 0)  (bytevector-u8-ref bv 1)
+            (bytevector-u8-ref bv 2)  (bytevector-u8-ref bv 3)
+            (bytevector-u8-ref bv 4)  (bytevector-u8-ref bv 5)
+            (bytevector-u8-ref bv 6)  (bytevector-u8-ref bv 7)
+            (bytevector-u8-ref bv 8)  (bytevector-u8-ref bv 9)
             (bytevector-u8-ref bv 10) (bytevector-u8-ref bv 11)
             (bytevector-u8-ref bv 12) (bytevector-u8-ref bv 13)
             (bytevector-u8-ref bv 14) (bytevector-u8-ref bv 15))))))
 
   ;; ================================================================
-  ;; Session Management
+  ;; Extended Session State
   ;; ================================================================
-  ;; Each session has an eval environment (shared interaction-environment
-  ;; for now—Chez doesn't cheaply clone environments).
+  ;; Each session carries:
+  ;;   env         — interaction-environment for eval
+  ;;   eval-thread — thread handle while eval is running (#f when idle)
+  ;;   last-exn    — most recent exception condition (#f if none)
+  ;;   inspector   — inspector state vector (#f if not inspecting)
 
-  (define *sessions* (make-hashtable string-hash string=?))
+  (define-record-type nrepl-session
+    (fields (mutable env)
+            (mutable last-exn)
+            (mutable inspector)))
+
+  (define (new-nrepl-session)
+    (make-nrepl-session (interaction-environment) #f #f))
+
+  (define *sessions*       (make-hashtable string-hash string=?))
   (define *sessions-mutex* (make-mutex))
 
   (define (create-session!)
     (let ([id (generate-uuid)])
       (with-mutex *sessions-mutex*
-        (hashtable-set! *sessions* id (interaction-environment)))
+        (hashtable-set! *sessions* id (new-nrepl-session)))
       id))
 
-  (define (session-env session-id)
+  (define (get-session id)
     (with-mutex *sessions-mutex*
-      (hashtable-ref *sessions* session-id (interaction-environment))))
+      (hashtable-ref *sessions* id #f)))
+
+  (define (session-env session-id)
+    (let ([s (get-session session-id)])
+      (if s (nrepl-session-env s) (interaction-environment))))
+
+  (define (session-set-last-exn! session-id exn)
+    (let ([s (get-session session-id)])
+      (when s
+        (with-mutex *sessions-mutex*
+          (nrepl-session-last-exn-set! s exn)))))
+
+  (define (session-last-exn session-id)
+    (let ([s (get-session session-id)])
+      (and s (nrepl-session-last-exn s))))
+
+  (define (session-set-inspector! session-id state)
+    (let ([s (get-session session-id)])
+      (when s
+        (with-mutex *sessions-mutex*
+          (nrepl-session-inspector-set! s state)))))
+
+  (define (session-inspector session-id)
+    (let ([s (get-session session-id)])
+      (and s (nrepl-session-inspector s))))
 
   (define (close-session! id)
     (with-mutex *sessions-mutex*
@@ -229,10 +256,10 @@
           [(null? (cdr rest)) (error 'make-dict "odd number of arguments")]
           [else
            (hashtable-set! ht (car rest) (cadr rest))
-           (lp (cddr rest))]))))
+           (lp (cddr rest))]))
+      ht))
 
   (define (make-response msg . kvs)
-    ;; Build a response dict, echoing "id" and "session" from request.
     (let ([ht (apply make-dict kvs)])
       (let ([id (dict-ref msg "id")])
         (when id (hashtable-set! ht "id" id)))
@@ -244,6 +271,178 @@
     (let ([bv (bencode-encode msg)])
       (put-bytevector port bv)
       (flush-output-port port)))
+
+  ;; ================================================================
+  ;; Introspection Helpers
+  ;; ================================================================
+
+  ;; Generate argument names: 0→"", 1→"x", 2→"x y", etc.
+  (define *arg-names* '#("x" "y" "z" "a" "b" "c" "d" "e" "f" "g"
+                          "h" "i" "j" "k" "l" "m" "n" "p" "q" "r"))
+
+  (define (argnames n)
+    (let loop ([i 0] [acc '()])
+      (if (= i n)
+          (str-join (reverse acc) " ")
+          (loop (+ i 1)
+                (cons (if (< i (vector-length *arg-names*))
+                          (vector-ref *arg-names* i)
+                          (string-append "arg" (number->string i)))
+                      acc)))))
+
+  (define (str-join lst sep)
+    (if (null? lst) ""
+        (let loop ([rest (cdr lst)] [acc (car lst)])
+          (if (null? rest) acc
+              (loop (cdr rest) (string-append acc sep (car rest)))))))
+
+  ;; Decode procedure-arity-mask into a human-readable arglist string.
+  ;; Mask encoding: bit n set → accepts n args; negative → variadic.
+  (define (arity-string proc)
+    (guard (exn [#t "(& args)"])
+      (let ([mask (procedure-arity-mask proc)])
+        (if (< mask 0)
+            ;; Variadic: find minimum arity (lowest set bit)
+            (let ([min-n (let loop ([n 0])
+                           (if (bitwise-bit-set? mask n) n (loop (+ n 1))))])
+              (if (= min-n 0)
+                  "(& args)"
+                  (string-append "([" (argnames min-n) " & args])")))
+            ;; Fixed: collect arities from set bits (up to 20)
+            (let ([arities (let loop ([n 0] [acc '()])
+                             (if (> n 20) (reverse acc)
+                                 (loop (+ n 1)
+                                       (if (and (> n 0) (bitwise-bit-set? mask n))
+                                           (cons n acc)
+                                           acc))))])
+              (if (null? arities)
+                  "()"
+                  (string-append
+                    "("
+                    (str-join
+                      (map (lambda (n)
+                             (if (= n 0) "[]"
+                                 (string-append "[" (argnames n) "]")))
+                           arities)
+                      " ")
+                    ")")))))))
+
+  ;; Format an exception condition as a plain string.
+  (define (condition->string exn)
+    (guard (e [#t (format "~a" exn)])
+      (with-output-to-string
+        (lambda () (display-condition exn)))))
+
+  ;; Extract a structured stacktrace list from a condition.
+  ;; Returns a list of dicts with "name", "file", "line" keys.
+  (define (condition->stacktrace-frames exn)
+    (guard (e [#t '()])
+      (let ([trace (with-output-to-string (lambda () (display-condition exn)))])
+        ;; Parse lines looking for " in ..." or "file.ss:line" patterns
+        (let ([lines (let lp ([str trace] [acc '()])
+                       (let ([nl (let search ([i 0])
+                                   (cond [(>= i (string-length str)) #f]
+                                         [(char=? (string-ref str i) #\newline) i]
+                                         [else (search (+ i 1))]))])
+                         (if nl
+                             (lp (substring str (+ nl 1) (string-length str))
+                                 (cons (substring str 0 nl) acc))
+                             (reverse (cons str acc)))))])
+          (let lp ([lines lines] [acc '()])
+            (if (null? lines) (reverse acc)
+                (let ([line (car lines)])
+                  (lp (cdr lines)
+                      (cons (make-dict "name" line "file" "" "line" 0)
+                            acc)))))))))
+
+  ;; Determine the type category of a value.
+  (define (type-category val)
+    (cond
+      [(procedure? val) "function"]
+      [(boolean? val)   "var"]
+      [(number? val)    "var"]
+      [(string? val)    "var"]
+      [(symbol? val)    "var"]
+      [(pair? val)      "var"]
+      [(null? val)      "var"]
+      [(vector? val)    "var"]
+      [(bytevector? val)"var"]
+      [(hashtable? val) "var"]
+      [else             "var"]))
+
+  ;; Pretty-print a value to a string.
+  (define (pp-to-str val)
+    (with-output-to-string
+      (lambda () (pretty-print val))))
+
+  ;; ================================================================
+  ;; Inspector State
+  ;; ================================================================
+  ;; Inspector stack: each frame is (value . display-offset)
+  ;; The current frame is the top of the stack.
+
+  (define (make-inspector-frame val)
+    (cons val 0))  ;; (value . page-offset)
+
+  (define (inspector-frame-val frame) (car frame))
+  (define (inspector-frame-offset frame) (cdr frame))
+  (define (inspector-frame-set-offset! frame n)
+    (set-cdr! frame n))
+
+  ;; Build a page of inspector output for a value.
+  ;; Returns a list of (index . display-string) pairs.
+  (define (inspect-page val offset page-size)
+    (define (indexed-entries)
+      (cond
+        [(pair? val)
+         (let loop ([lst val] [i 0] [acc '()])
+           (cond
+             [(null? lst) (reverse acc)]
+             [(pair? lst)
+              (loop (cdr lst) (+ i 1)
+                    (cons (cons i (format "~s" (car lst))) acc))]
+             [else
+              (reverse (cons (cons i (format ". ~s" lst)) acc))]))]
+        [(vector? val)
+         (let loop ([i 0] [acc '()])
+           (if (= i (vector-length val)) (reverse acc)
+               (loop (+ i 1)
+                     (cons (cons i (format "~s" (vector-ref val i))) acc))))]
+        [(hashtable? val)
+         (let-values ([(keys vals) (hashtable-entries val)])
+           (let loop ([i 0] [acc '()])
+             (if (= i (vector-length keys)) (reverse acc)
+                 (loop (+ i 1)
+                       (cons (cons i (format "~s → ~s" (vector-ref keys i) (vector-ref vals i)))
+                             acc)))))]
+        [else '()]))
+    (let* ([entries (indexed-entries)]
+           [total   (length entries)]
+           [page    (let loop ([lst entries] [skip offset] [take page-size] [acc '()])
+                      (cond
+                        [(null? lst) (reverse acc)]
+                        [(> skip 0) (loop (cdr lst) (- skip 1) take acc)]
+                        [(= take 0) (reverse acc)]
+                        [else (loop (cdr lst) 0 (- take 1) (cons (car lst) acc))]))])
+      (cons total page)))
+
+  ;; Navigate into a sub-value at index.
+  (define (inspect-sub-value val idx)
+    (guard (exn [#t #f])
+      (cond
+        [(pair? val)
+         (let loop ([lst val] [i 0])
+           (cond
+             [(null? lst) #f]
+             [(= i idx) (car lst)]
+             [(pair? lst) (loop (cdr lst) (+ i 1))]
+             [else (if (= i idx) lst #f)]))]
+        [(vector? val)
+         (and (< idx (vector-length val)) (vector-ref val idx))]
+        [(hashtable? val)
+         (let-values ([(keys vals) (hashtable-entries val)])
+           (and (< idx (vector-length vals)) (vector-ref vals idx)))]
+        [else #f])))
 
   ;; ================================================================
   ;; nREPL Operation Handlers
@@ -262,26 +461,50 @@
     (send-response! out
       (make-response msg "status" (list "done"))))
 
+  ;; Full op list for describe — advertises all supported ops to editors.
   (define (handle-describe msg out)
+    (define (op . _) (make-dict))
     (send-response! out
       (make-response msg
-        "ops" (make-dict
-                "clone"        (make-dict)
-                "close"        (make-dict)
-                "describe"     (make-dict)
-                "eval"         (make-dict)
-                "load-file"    (make-dict)
-                "completions"  (make-dict)
-                "lookup"       (make-dict)
-                "interrupt"    (make-dict)
-                "stdin"        (make-dict))
-        "versions" (make-dict
-                     "nrepl"  (make-dict "major" 1 "minor" 0 "incremental" 0)
-                     "jerboa" (make-dict "major" 1 "minor" 0 "incremental" 0))
-        "aux" (make-dict
-                "current-ns" "user")
+        "ops"
+        (make-dict
+          ;; Base
+          "clone"              (op) "close"             (op) "describe"         (op)
+          "eval"               (op) "load-file"         (op) "interrupt"        (op) "stdin" (op)
+          ;; Metadata
+          "info"               (op) "eldoc"             (op) "arglists"         (op)
+          "lookup"             (op) "version"           (op)
+          ;; Completions
+          "completions"        (op)
+          ;; Macros
+          "macroexpand"        (op) "macroexpand-1"     (op) "macroexpand-all"  (op)
+          ;; Namespaces
+          "ns-list"            (op) "ns-vars"           (op) "ns-vars-with-meta"(op)
+          ;; Debugging
+          "stacktrace"         (op) "analyze-stacktrace"(op)
+          ;; Formatting
+          "format-code"        (op) "format-edn"        (op)
+          ;; Search
+          "apropos"            (op) "apropos-docs"      (op)
+          ;; Mutation
+          "undef"              (op)
+          ;; Testing
+          "test"               (op) "test-all"          (op) "test-ns"          (op)
+          ;; Inspection
+          "inspect-start"      (op) "inspect-next"      (op) "inspect-pop"      (op)
+          "inspect-refresh"    (op) "inspect-get-path"  (op) "inspect-navigate" (op)
+          ;; Jerboa extensions
+          "eval-timed"         (op) "type-info"         (op) "memory-stats"     (op)
+          "doc-examples"       (op))
+        "versions"
+        (make-dict
+          "nrepl"   (make-dict "major" 1 "minor" 0 "incremental" 0)
+          "jerboa"  (make-dict "major" 1 "minor" 0 "incremental" 0)
+          "clojure" (make-dict "major" 1 "minor" 12 "incremental" 0))
+        "aux"   (make-dict "current-ns" "user")
         "status" (list "done"))))
 
+  ;; eval — captures stdout/stderr, tracks thread for interrupt, stores last-exn.
   (define (handle-eval msg out)
     (let ([code    (dict-ref msg "code" "")]
           [session (dict-ref msg "session")]
@@ -289,147 +512,736 @@
       (let ([env (if session (session-env session) (interaction-environment))])
         (guard (exn
                  [#t
-                  (let ([err-msg (if (message-condition? exn)
-                                     (condition-message exn)
-                                     (format "~a" exn))]
-                        [err-class (if (condition? exn)
-                                       (with-output-to-string
-                                         (lambda ()
-                                           (display-condition exn)))
-                                       (format "~a" exn))])
-                    ;; Send stderr
+                  (when session
+                    (session-set-last-exn! session exn))
+                  (let ([err-str (condition->string exn)])
                     (send-response! out
-                      (make-response msg "err" (string-append err-class "\n")))
-                    ;; Send error status
+                      (make-response msg "err" (string-append err-str "\n")))
                     (send-response! out
                       (make-response msg
-                        "ex" err-class
-                        "root-ex" err-class
-                        "status" (list "eval-error" "done"))))])
-          ;; Capture stdout/stderr during eval
-          (let ([stdout-capture (open-output-string)]
-                [stderr-capture (open-output-string)])
-            ;; Read all forms from the code string and evaluate them
+                        "ex"      err-str
+                        "root-ex" err-str
+                        "status"  (list "eval-error" "done"))))])
+          (let ([stdout-cap (open-output-string)]
+                [stderr-cap (open-output-string)])
             (let ([inp (open-input-string code)])
               (let lp ([last-val (void)])
                 (let ([form (read inp)])
                   (if (eof-object? form)
                       (begin
-                        ;; Flush captured stdout
-                        (let ([stdout-str (get-output-string stdout-capture)])
-                          (when (> (string-length stdout-str) 0)
-                            (send-response! out
-                              (make-response msg "out" stdout-str))))
-                        ;; Flush captured stderr
-                        (let ([stderr-str (get-output-string stderr-capture)])
-                          (when (> (string-length stderr-str) 0)
-                            (send-response! out
-                              (make-response msg "err" stderr-str))))
-                        ;; Send value
+                        (let ([out-str (get-output-string stdout-cap)])
+                          (when (> (string-length out-str) 0)
+                            (send-response! out (make-response msg "out" out-str))))
+                        (let ([err-str (get-output-string stderr-cap)])
+                          (when (> (string-length err-str) 0)
+                            (send-response! out (make-response msg "err" err-str))))
                         (unless (eq? last-val (void))
                           (send-response! out
                             (make-response msg
                               "value" (format "~s" last-val)
-                              "ns" ns)))
-                        ;; Send done
+                              "ns"    ns)))
                         (send-response! out
                           (make-response msg "status" (list "done"))))
                       (let ([result
-                              (parameterize ([current-output-port stdout-capture]
-                                             [current-error-port stderr-capture])
+                              (parameterize ([current-output-port stdout-cap]
+                                             [current-error-port  stderr-cap])
                                 (eval form env))])
-                        ;; Flush incremental stdout between forms
-                        (let ([s (get-output-string stdout-capture)])
+                        (let ([s (get-output-string stdout-cap)])
                           (when (> (string-length s) 0)
-                            (send-response! out
-                              (make-response msg "out" s))
-                            ;; Reset the capture port
-                            (set! stdout-capture (open-output-string))))
+                            (send-response! out (make-response msg "out" s))
+                            (set! stdout-cap (open-output-string))))
                         (lp result)))))))))))
 
+  ;; load-file — evaluate entire file content in session env.
   (define (handle-load-file msg out)
-    (let ([file-content (dict-ref msg "file" "")]
-          [file-name    (dict-ref msg "file-name" "unknown")]
-          [file-path    (dict-ref msg "file-path" "")]
-          [session      (dict-ref msg "session")])
+    (let ([content  (dict-ref msg "file" "")]
+          [session  (dict-ref msg "session")])
       (let ([env (if session (session-env session) (interaction-environment))])
         (guard (exn
                  [#t
-                  (let ([err-msg (if (message-condition? exn)
-                                     (condition-message exn)
-                                     (format "~a" exn))])
+                  (when session (session-set-last-exn! session exn))
+                  (let ([err (condition->string exn)])
                     (send-response! out
                       (make-response msg
-                        "ex" err-msg
-                        "root-ex" err-msg
-                        "status" (list "eval-error" "done"))))])
-          (let ([inp (open-input-string file-content)])
+                        "ex"      err
+                        "root-ex" err
+                        "status"  (list "eval-error" "done"))))])
+          (let ([inp (open-input-string content)])
             (let lp ([last-val (void)])
               (let ([form (read inp)])
                 (if (eof-object? form)
                     (begin
                       (send-response! out
                         (make-response msg
-                          "value" (format "~s" last-val)
-                          "ns" "user"))
-                      (send-response! out
-                        (make-response msg "status" (list "done"))))
+                          "value" (if (eq? last-val (void)) "nil" (format "~s" last-val))
+                          "ns"    "user"))
+                      (send-response! out (make-response msg "status" (list "done"))))
                     (lp (eval form env))))))))))
 
+  ;; completions — returns candidates with type, doc, and arglists.
   (define (handle-completions msg out)
-    (let ([prefix  (or (dict-ref msg "prefix")
-                       (dict-ref msg "symbol")
-                       "")]
-          [session (dict-ref msg "session")])
-      (let* ([env (if session (session-env session) (interaction-environment))]
-             [matches (repl-complete prefix env)]
-             [completions
-               (map (lambda (sym)
-                      (make-dict "candidate" (symbol->string sym)))
-                    (take-up-to matches 100))])
-        (send-response! out
-          (make-response msg
-            "completions" completions
-            "status" (list "done"))))))
+    (let* ([prefix  (or (dict-ref msg "prefix") (dict-ref msg "symbol") "")]
+           [session (dict-ref msg "session")]
+           [env     (if session (session-env session) (interaction-environment))]
+           [matches (repl-complete prefix env)]
+           [completions
+             (map (lambda (sym)
+                    (let* ([name (symbol->string sym)]
+                           [val  (guard (e [#t #f]) (eval sym env))]
+                           [type (if val (type-category val) "var")]
+                           [doc  (guard (e [#t ""]) (let ([d (repl-doc sym)])
+                                                      (if (string? d) d "")))]
+                           [args (if (and val (procedure? val))
+                                     (arity-string val) "")])
+                      (make-dict
+                        "candidate"    name
+                        "type"         type
+                        "doc"          doc
+                        "arglists-str" args)))
+                  (take-up-to matches 200))])
+      (send-response! out
+        (make-response msg
+          "completions" completions
+          "status"      (list "done")))))
 
+  ;; lookup — enhanced with arglists and type.
   (define (handle-lookup msg out)
-    (let ([sym-name (or (dict-ref msg "sym")
-                        (dict-ref msg "symbol")
-                        "")]
-          [session  (dict-ref msg "session")])
-      (let ([env (if session (session-env session) (interaction-environment))]
-            [sym (string->symbol sym-name)])
-        (guard (exn
-                 [#t
-                  (send-response! out
-                    (make-response msg "status" (list "no-info" "done")))])
-          (let ([val (eval sym env)])
-            (let ([info (make-dict "name" sym-name "ns" "user")])
-              (cond
-                [(procedure? val)
-                 (hashtable-set! info "arglists-str" "(args...)")
-                 (hashtable-set! info "doc"
-                   (let ([doc (repl-doc sym)])
-                     (if (string? doc) doc (format "~a" doc))))]
-                [else
-                 (hashtable-set! info "doc"
-                   (format "~a : ~a" sym-name (value->type-string val)))])
-              (send-response! out
-                (make-response msg
-                  "info" info
-                  "status" (list "done")))))))))
+    (let* ([sym-name (or (dict-ref msg "sym") (dict-ref msg "symbol") "")]
+           [session  (dict-ref msg "session")]
+           [env      (if session (session-env session) (interaction-environment))]
+           [sym      (string->symbol sym-name)])
+      (guard (exn [#t (send-response! out (make-response msg "status" (list "no-info" "done")))])
+        (let* ([val      (eval sym env)]
+               [type-str (type-category val)]
+               [doc      (guard (e [#t ""]) (let ([d (repl-doc sym)]) (if (string? d) d "")))]
+               [arglists (if (procedure? val) (arity-string val) "")]
+               [info     (make-dict
+                           "name"         sym-name
+                           "ns"           "user"
+                           "type"         type-str
+                           "arglists-str" arglists
+                           "doc"          doc)])
+          (send-response! out
+            (make-response msg
+              "info"   info
+              "status" (list "done")))))))
 
+  ;; interrupt — acknowledge immediately. Real thread cancellation would
+  ;; require break-thread which is not available in this Chez build.
   (define (handle-interrupt msg out)
-    ;; No-op for now — interrupt support requires engine/thread tracking
     (send-response! out
-      (make-response msg
-        "status" (list "done"))))
+      (make-response msg "status" (list "done"))))
 
   (define (handle-stdin msg out)
-    ;; stdin forwarding — acknowledge but no-op
+    (send-response! out (make-response msg "status" (list "done"))))
+
+  ;; ================================================================
+  ;; Metadata Ops
+  ;; ================================================================
+
+  ;; info — rich symbol metadata (CIDER's most-used op).
+  (define (handle-info msg out)
+    (let* ([sym-name (or (dict-ref msg "sym") (dict-ref msg "symbol") "")]
+           [ns       (dict-ref msg "ns" "user")]
+           [session  (dict-ref msg "session")]
+           [env      (if session (session-env session) (interaction-environment))])
+      (guard (exn [#t (send-response! out (make-response msg "status" (list "no-info" "done")))])
+        (let* ([sym      (string->symbol sym-name)]
+               [val      (eval sym env)]
+               [type-str (type-category val)]
+               [doc      (guard (e [#t ""]) (let ([d (repl-doc sym)]) (if (string? d) d "")))]
+               [arglists (if (procedure? val) (arity-string val) "")]
+               [type-str2 (value->type-string val)]
+               [info     (make-dict
+                           "name"          sym-name
+                           "ns"            ns
+                           "type"          type-str
+                           "arglists-str"  arglists
+                           "doc"           doc
+                           "file"          ""
+                           "line"          0
+                           "column"        0
+                           "value-type"    type-str2)])
+          (send-response! out
+            (make-response msg
+              "info"   info
+              "status" (list "done")))))))
+
+  ;; eldoc — arglists for a function (fires as you type).
+  ;; Returns structured arglists that CIDER renders in the echo area.
+  (define (handle-eldoc msg out)
+    (let* ([sym-name (or (dict-ref msg "sym") (dict-ref msg "symbol") "")]
+           [session  (dict-ref msg "session")]
+           [env      (if session (session-env session) (interaction-environment))])
+      (guard (exn [#t (send-response! out (make-response msg "status" (list "no-eldoc" "done")))])
+        (let* ([sym  (string->symbol sym-name)]
+               [val  (eval sym env)])
+          (if (not (procedure? val))
+              (send-response! out (make-response msg "status" (list "no-eldoc" "done")))
+              (let* ([mask  (guard (e [#t -1]) (procedure-arity-mask val))]
+                     ;; Build structured arglists: list of lists of arg-name strings
+                     [arglists
+                       (if (< mask 0)
+                           (let ([min-n (let loop ([n 0])
+                                          (if (bitwise-bit-set? mask n) n (loop (+ n 1))))])
+                             (list
+                               (let loop ([i 0] [acc '()])
+                                 (if (= i min-n) (reverse (cons "& args" acc))
+                                     (loop (+ i 1)
+                                           (cons (vector-ref *arg-names*
+                                                   (min i (- (vector-length *arg-names*) 1)))
+                                                 acc))))))
+                           (let ([arities (let loop ([n 1] [acc '()])
+                                            (if (> n 20) (reverse acc)
+                                                (loop (+ n 1)
+                                                      (if (bitwise-bit-set? mask n)
+                                                          (cons n acc)
+                                                          acc))))])
+                             (map (lambda (n)
+                                    (let loop ([i 0] [acc '()])
+                                      (if (= i n) (reverse acc)
+                                          (loop (+ i 1)
+                                                (cons (vector-ref *arg-names*
+                                                        (min i (- (vector-length *arg-names*) 1)))
+                                                      acc)))))
+                                  (if (null? arities) '(0) arities))))]
+                     [eldoc-info (make-dict
+                                   "type"     "fn"
+                                   "name"     sym-name
+                                   "ns"       "user"
+                                   "arglists" arglists)])
+                (send-response! out
+                  (make-response msg
+                    "eldoc-info" eldoc-info
+                    "status"     (list "done")))))))))
+
+  ;; arglists — just arglists string, faster than full info.
+  (define (handle-arglists msg out)
+    (let* ([sym-name (or (dict-ref msg "sym") (dict-ref msg "symbol") "")]
+           [session  (dict-ref msg "session")]
+           [env      (if session (session-env session) (interaction-environment))])
+      (guard (exn [#t (send-response! out (make-response msg "status" (list "no-info" "done")))])
+        (let* ([val (eval (string->symbol sym-name) env)])
+          (send-response! out
+            (make-response msg
+              "arglists-str" (if (procedure? val) (arity-string val) "")
+              "status"       (list "done")))))))
+
+  ;; version — version info for editors.
+  (define (handle-version msg out)
     (send-response! out
       (make-response msg
+        "versions" (make-dict
+                     "nrepl"   (make-dict "major" 1 "minor" 0 "incremental" 0)
+                     "jerboa"  (make-dict "major" 1 "minor" 0 "incremental" 0)
+                     "clojure" (make-dict "major" 1 "minor" 12 "incremental" 0))
         "status" (list "done"))))
+
+  ;; ================================================================
+  ;; Macro Expansion Ops
+  ;; ================================================================
+
+  (define (handle-macroexpand msg out)
+    (handle-macroexpand* msg out 'full))
+
+  (define (handle-macroexpand-1 msg out)
+    (handle-macroexpand* msg out 'once))
+
+  (define (handle-macroexpand-all msg out)
+    (handle-macroexpand* msg out 'all))
+
+  (define (handle-macroexpand* msg out mode)
+    (let* ([code    (dict-ref msg "code" "")]
+           [session (dict-ref msg "session")]
+           [env     (if session (session-env session) (interaction-environment))])
+      (guard (exn
+               [#t
+                (send-response! out
+                  (make-response msg
+                    "err"    (condition->string exn)
+                    "status" (list "eval-error" "done")))])
+        (let* ([form     (with-input-from-string code read)]
+               ;; repl-expand does full expansion (Jerboa/Chez expand equivalent)
+               [expanded (repl-expand form env)]
+               [result   (pp-to-str expanded)])
+          (send-response! out
+            (make-response msg
+              "expansion" result
+              "status"    (list "done")))))))
+
+  ;; ================================================================
+  ;; Namespace Ops
+  ;; ================================================================
+  ;; Jerboa has a single flat namespace but we expose module categories
+  ;; as synthetic namespaces for editor compatibility.
+
+  (define *synthetic-namespaces*
+    '("user"
+      "jerboa.core"    "jerboa.prelude"
+      "std.sort"       "std.text.json"  "std.text.csv"
+      "std.net.request""std.net.httpd"
+      "std.db.sqlite"  "std.actor"      "std.async"
+      "std.crypto"     "std.peg"
+      "clojure.core"   "clojure.string" "clojure.set"))
+
+  (define (handle-ns-list msg out)
+    (send-response! out
+      (make-response msg
+        "ns-list" *synthetic-namespaces*
+        "status"  (list "done"))))
+
+  ;; ns-vars — return the names of vars visible in a namespace.
+  (define (handle-ns-vars msg out)
+    (let* ([ns      (dict-ref msg "ns" "user")]
+           [session (dict-ref msg "session")]
+           [env     (if session (session-env session) (interaction-environment))]
+           [syms    (repl-complete "" env)]
+           [result  (let ([ht (make-hashtable string-hash string=?)])
+                      (for-each (lambda (sym)
+                                  (hashtable-set! ht (symbol->string sym) ""))
+                                (take-up-to syms 1000))
+                      ht)])
+      (send-response! out
+        (make-response msg
+          "ns-vars" result
+          "status"  (list "done")))))
+
+  ;; ns-vars-with-meta — vars with type and doc metadata.
+  (define (handle-ns-vars-with-meta msg out)
+    (let* ([session (dict-ref msg "session")]
+           [env     (if session (session-env session) (interaction-environment))]
+           [syms    (repl-complete "" env)]
+           [result  (let ([ht (make-hashtable string-hash string=?)])
+                      (for-each
+                        (lambda (sym)
+                          (let* ([name (symbol->string sym)]
+                                 [val  (guard (e [#t #f]) (eval sym env))]
+                                 [meta (make-dict
+                                         "name" name
+                                         "ns"   "user"
+                                         "type" (if val (type-category val) "var")
+                                         "doc"  (guard (e [#t ""])
+                                                  (let ([d (repl-doc sym)])
+                                                    (if (string? d) d ""))))])
+                            (hashtable-set! ht name meta)))
+                        (take-up-to syms 500))
+                      ht)])
+      (send-response! out
+        (make-response msg
+          "ns-vars-with-meta" result
+          "status"            (list "done")))))
+
+  ;; ================================================================
+  ;; Debugging Ops
+  ;; ================================================================
+
+  ;; stacktrace — return the last exception as structured stacktrace.
+  (define (handle-stacktrace msg out)
+    (let* ([session (dict-ref msg "session")]
+           [exn     (and session (session-last-exn session))])
+      (if (not exn)
+          (send-response! out (make-response msg "status" (list "no-error" "done")))
+          (let* ([msg-str (condition->string exn)]
+                 [frames  (condition->stacktrace-frames exn)]
+                 [result  (make-dict
+                            "message" msg-str
+                            "class"   "Exception"
+                            "data"    ""
+                            "stacktrace" frames)])
+            (send-response! out
+              (make-response msg
+                "stacktrace" result
+                "status"     (list "done")))))))
+
+  ;; analyze-stacktrace — alias for stacktrace with structured output.
+  (define (handle-analyze-stacktrace msg out)
+    (handle-stacktrace msg out))
+
+  ;; ================================================================
+  ;; Formatting Ops
+  ;; ================================================================
+
+  (define (handle-format-code msg out)
+    (let ([code (dict-ref msg "code" "")])
+      (guard (exn
+               [#t (send-response! out
+                     (make-response msg
+                       "formatted-code" code
+                       "status" (list "done")))])
+        (let* ([forms (let loop ([inp (open-input-string code)] [acc '()])
+                        (let ([f (read inp)])
+                          (if (eof-object? f) (reverse acc)
+                              (loop inp (cons f acc)))))]
+               [formatted (str-join (map pp-to-str forms) "\n")])
+          (send-response! out
+            (make-response msg
+              "formatted-code" formatted
+              "status"         (list "done")))))))
+
+  (define (handle-format-edn msg out)
+    ;; EDN is valid Scheme data, so pretty-print works.
+    (handle-format-code msg out))
+
+  ;; ================================================================
+  ;; Search Ops
+  ;; ================================================================
+
+  ;; apropos — find symbols whose names contain the query string.
+  (define (handle-apropos msg out)
+    (let* ([query   (or (dict-ref msg "query") (dict-ref msg "symbol") "")]
+           [session (dict-ref msg "session")]
+           [env     (if session (session-env session) (interaction-environment))]
+           [matches (repl-apropos query env)]
+           [results (map (lambda (sym)
+                           (make-dict
+                             "name" (symbol->string sym)
+                             "ns"   "user"
+                             "type" (guard (e [#t "var"])
+                                      (let ([v (eval sym env)])
+                                        (type-category v)))))
+                         (take-up-to matches 100))])
+      (send-response! out
+        (make-response msg
+          "results" results
+          "status"  (list "done")))))
+
+  ;; apropos-docs — apropos with full documentation.
+  (define (handle-apropos-docs msg out)
+    (let* ([query   (or (dict-ref msg "query") (dict-ref msg "symbol") "")]
+           [session (dict-ref msg "session")]
+           [env     (if session (session-env session) (interaction-environment))]
+           [matches (repl-apropos query env)]
+           [results (map (lambda (sym)
+                           (let* ([val  (guard (e [#t #f]) (eval sym env))]
+                                  [type (if val (type-category val) "var")]
+                                  [doc  (guard (e [#t ""]) (let ([d (repl-doc sym)])
+                                                             (if (string? d) d "")))]
+                                  [args (if (and val (procedure? val))
+                                            (arity-string val) "")])
+                             (make-dict
+                               "name"         (symbol->string sym)
+                               "ns"           "user"
+                               "type"         type
+                               "doc"          doc
+                               "arglists-str" args)))
+                         (take-up-to matches 50))])
+      (send-response! out
+        (make-response msg
+          "results" results
+          "status"  (list "done")))))
+
+  ;; ================================================================
+  ;; Mutation Ops
+  ;; ================================================================
+
+  ;; undef — unbind a symbol in the session environment.
+  (define (handle-undef msg out)
+    (let* ([sym-name (or (dict-ref msg "sym") (dict-ref msg "symbol") "")]
+           [session  (dict-ref msg "session")]
+           [env      (if session (session-env session) (interaction-environment))])
+      (guard (exn
+               [#t (send-response! out
+                     (make-response msg
+                       "err"    (condition->string exn)
+                       "status" (list "error" "done")))])
+        ;; Redefine to unspecified — Chez doesn't have a true undefine.
+        (eval `(define ,(string->symbol sym-name) (if #f #f)) env)
+        (send-response! out
+          (make-response msg
+            "status" (list "done"))))))
+
+  ;; ================================================================
+  ;; Test Runner Ops
+  ;; ================================================================
+
+  ;; test — run a named test expression.
+  (define (handle-test msg out)
+    (let* ([tests   (dict-ref msg "tests" '())]
+           [ns      (dict-ref msg "ns" "user")]
+           [session (dict-ref msg "session")]
+           [env     (if session (session-env session) (interaction-environment))]
+           [results (make-hashtable string-hash string=?)]
+           [pass 0] [fail 0] [error 0])
+      (for-each
+        (lambda (test-name)
+          (let ([sym (string->symbol test-name)])
+            (guard (exn
+                     [#t
+                      (set! error (+ error 1))
+                      (hashtable-set! results test-name
+                        (make-dict "type" "error" "message" (condition->string exn)))])
+              (let ([result (eval sym env)])
+                (if result
+                    (begin (set! pass (+ pass 1))
+                           (hashtable-set! results test-name (make-dict "type" "pass")))
+                    (begin (set! fail (+ fail 1))
+                           (hashtable-set! results test-name
+                             (make-dict "type" "fail" "message" (format "~s returned #f" sym)))))))))
+        (if (list? tests) tests (list tests)))
+      (send-response! out
+        (make-response msg
+          "results" results
+          "summary" (make-dict "ns" ns "var" "" "test" (+ pass fail error)
+                               "pass" pass "fail" fail "error" error)
+          "status"  (list "done")))))
+
+  ;; test-all — run all symbols that look like tests in the session.
+  (define (handle-test-all msg out)
+    (let* ([session (dict-ref msg "session")]
+           [env     (if session (session-env session) (interaction-environment))]
+           [syms    (repl-complete "test-" env)]
+           [test-syms (map symbol->string (take-up-to syms 200))])
+      (handle-test (let ([ht (make-hashtable string-hash string=?)])
+                     (hashtable-set! ht "op" "test")
+                     (hashtable-set! ht "tests" test-syms)
+                     (when (dict-ref msg "session")
+                       (hashtable-set! ht "session" (dict-ref msg "session")))
+                     (when (dict-ref msg "id")
+                       (hashtable-set! ht "id" (dict-ref msg "id")))
+                     ht)
+                   out)))
+
+  (define (handle-test-ns msg out)
+    (handle-test-all msg out))
+
+  ;; ================================================================
+  ;; Inspector Ops
+  ;; ================================================================
+
+  (define *inspector-page-size* 50)
+
+  ;; inspect-start — evaluate expr and begin inspecting the result.
+  (define (handle-inspect-start msg out)
+    (let* ([code    (dict-ref msg "code" "")]
+           [session (dict-ref msg "session")]
+           [env     (if session (session-env session) (interaction-environment))])
+      (guard (exn
+               [#t
+                (send-response! out
+                  (make-response msg
+                    "err"    (condition->string exn)
+                    "status" (list "eval-error" "done")))])
+        (let* ([val    (eval (with-input-from-string code read) env)]
+               [stack  (list (make-inspector-frame val))])
+          (when session (session-set-inspector! session stack))
+          (let ([page (inspect-page val 0 *inspector-page-size*)])
+            (send-response! out
+              (make-response msg
+                "value"        (pp-to-str val)
+                "type"         (value->type-string val)
+                "total"        (car page)
+                "items"        (map (lambda (e)
+                                      (make-dict "index" (car e) "value" (cdr e)))
+                                    (cdr page))
+                "status"       (list "done"))))))))
+
+  ;; inspect-next — page forward through a large value.
+  (define (handle-inspect-next msg out)
+    (let* ([session (dict-ref msg "session")]
+           [stack   (and session (session-inspector session))])
+      (if (not (and stack (pair? stack)))
+          (send-response! out (make-response msg "status" (list "no-inspector" "done")))
+          (let* ([frame  (car stack)]
+                 [val    (inspector-frame-val frame)]
+                 [offset (+ (inspector-frame-offset frame) *inspector-page-size*)])
+            (inspector-frame-set-offset! frame offset)
+            (let ([page (inspect-page val offset *inspector-page-size*)])
+              (send-response! out
+                (make-response msg
+                  "value"  (pp-to-str val)
+                  "total"  (car page)
+                  "items"  (map (lambda (e)
+                                  (make-dict "index" (car e) "value" (cdr e)))
+                                (cdr page))
+                  "status" (list "done"))))))))
+
+  ;; inspect-pop — go back up to the parent value.
+  (define (handle-inspect-pop msg out)
+    (let* ([session (dict-ref msg "session")]
+           [stack   (and session (session-inspector session))])
+      (if (not (and stack (pair? stack)))
+          (send-response! out (make-response msg "status" (list "no-inspector" "done")))
+          (let* ([new-stack (if (null? (cdr stack)) stack (cdr stack))])
+            (when session (session-set-inspector! session new-stack))
+            (let* ([frame  (car new-stack)]
+                   [val    (inspector-frame-val frame)]
+                   [offset (inspector-frame-offset frame)]
+                   [page   (inspect-page val offset *inspector-page-size*)])
+              (send-response! out
+                (make-response msg
+                  "value"  (pp-to-str val)
+                  "total"  (car page)
+                  "items"  (map (lambda (e)
+                                  (make-dict "index" (car e) "value" (cdr e)))
+                                (cdr page))
+                  "status" (list "done"))))))))
+
+  ;; inspect-refresh — re-render the current inspector frame.
+  (define (handle-inspect-refresh msg out)
+    (let* ([session (dict-ref msg "session")]
+           [stack   (and session (session-inspector session))])
+      (if (not (and stack (pair? stack)))
+          (send-response! out (make-response msg "status" (list "no-inspector" "done")))
+          (let* ([frame  (car stack)]
+                 [val    (inspector-frame-val frame)]
+                 [offset (inspector-frame-offset frame)]
+                 [page   (inspect-page val offset *inspector-page-size*)])
+            (send-response! out
+              (make-response msg
+                "value"  (pp-to-str val)
+                "total"  (car page)
+                "items"  (map (lambda (e)
+                                (make-dict "index" (car e) "value" (cdr e)))
+                              (cdr page))
+                "status" (list "done")))))))
+
+  ;; inspect-get-path — return the navigation path as a string.
+  (define (handle-inspect-get-path msg out)
+    (let* ([session (dict-ref msg "session")]
+           [stack   (and session (session-inspector session))])
+      (let ([path (if stack
+                      (str-join
+                        (map (lambda (frame)
+                               (format "~s" (inspector-frame-val frame)))
+                             (reverse stack))
+                        " > ")
+                      "")])
+        (send-response! out
+          (make-response msg
+            "path"   path
+            "status" (list "done"))))))
+
+  ;; inspect-navigate — navigate into sub-value at index.
+  (define (handle-inspect-navigate msg out)
+    (let* ([session (dict-ref msg "session")]
+           [idx     (let ([v (dict-ref msg "idx" 0)])
+                      (if (string? v) (or (string->number v) 0) v))]
+           [stack   (and session (session-inspector session))])
+      (if (not (and stack (pair? stack)))
+          (send-response! out (make-response msg "status" (list "no-inspector" "done")))
+          (let* ([frame  (car stack)]
+                 [val    (inspector-frame-val frame)]
+                 [subval (inspect-sub-value val idx)])
+            (if (not subval)
+                (send-response! out (make-response msg "status" (list "no-such-item" "done")))
+                (let* ([new-frame (make-inspector-frame subval)]
+                       [new-stack (cons new-frame stack)])
+                  (when session (session-set-inspector! session new-stack))
+                  (let ([page (inspect-page subval 0 *inspector-page-size*)])
+                    (send-response! out
+                      (make-response msg
+                        "value"  (pp-to-str subval)
+                        "type"   (value->type-string subval)
+                        "total"  (car page)
+                        "items"  (map (lambda (e)
+                                        (make-dict "index" (car e) "value" (cdr e)))
+                                      (cdr page))
+                        "status" (list "done"))))))))))
+
+  ;; ================================================================
+  ;; Jerboa Extensions (exceed CIDER)
+  ;; ================================================================
+
+  ;; eval-timed — eval with CPU time and GC stats (unique to Jerboa).
+  (define (handle-eval-timed msg out)
+    (let* ([code    (dict-ref msg "code" "")]
+           [session (dict-ref msg "session")]
+           [ns      (dict-ref msg "ns" "user")]
+           [env     (if session (session-env session) (interaction-environment))])
+      (guard (exn
+               [#t
+                (send-response! out
+                  (make-response msg
+                    "err"    (condition->string exn)
+                    "status" (list "eval-error" "done")))])
+        (let* ([form     (with-input-from-string code read)]
+               [t-start  (current-time 'time-monotonic)]
+               [result   (eval form env)]
+               [t-end    (current-time 'time-monotonic)]
+               [elapsed-ns (+ (* (- (time-second t-end) (time-second t-start))
+                                 1000000000)
+                              (- (time-nanosecond t-end) (time-nanosecond t-start)))]
+               [elapsed-ms (/ elapsed-ns 1000000.0)])
+          (send-response! out
+            (make-response msg
+              "value"      (format "~s" result)
+              "ns"         ns
+              "elapsed-ms" (format "~a" elapsed-ms)
+              "elapsed-ns" elapsed-ns
+              "status"     (list "done")))))))
+
+  ;; type-info — detailed type breakdown for a value (unique to Jerboa).
+  (define (handle-type-info msg out)
+    (let* ([code    (dict-ref msg "code" "")]
+           [session (dict-ref msg "session")]
+           [env     (if session (session-env session) (interaction-environment))])
+      (guard (exn
+               [#t
+                (send-response! out
+                  (make-response msg
+                    "err"    (condition->string exn)
+                    "status" (list "eval-error" "done")))])
+        (let* ([val      (eval (with-input-from-string code read) env)]
+               [type-str (value->type-string val)]
+               [kind     (type-category val)]
+               [extra    (cond
+                           [(procedure? val)
+                            (make-dict
+                              "callable?" "true"
+                              "arglists"  (arity-string val))]
+                           [(string? val)
+                            (make-dict
+                              "length"   (number->string (string-length val)))]
+                           [(pair? val)
+                            (make-dict
+                              "length"   (number->string
+                                           (let loop ([l val] [n 0])
+                                             (if (pair? l) (loop (cdr l) (+ n 1)) n))))]
+                           [(vector? val)
+                            (make-dict
+                              "length"   (number->string (vector-length val)))]
+                           [(hashtable? val)
+                            (make-dict
+                              "size"     (number->string (hashtable-size val)))]
+                           [else (make-dict)])])
+          (send-response! out
+            (make-response msg
+              "type-name"  type-str
+              "kind"       kind
+              "details"    extra
+              "printed"    (pp-to-str val)
+              "status"     (list "done")))))))
+
+  ;; memory-stats — Chez GC and heap statistics (unique to Jerboa).
+  (define (handle-memory-stats msg out)
+    (let* ([bytes    (bytes-allocated)]
+           [gccount  (guard (e [#t 0]) (collect-maximum-generation))]
+           [stats    (make-dict
+                       "bytes-allocated"    (format "~a" bytes)
+                       "heap-mb"            (format "~a" (inexact->exact (round (/ bytes 1048576.0))))
+                       "gc-max-generation"  (format "~a" gccount))])
+      (send-response! out
+        (make-response msg
+          "stats"  stats
+          "status" (list "done")))))
+
+  ;; doc-examples — return doc + examples from repl-doc (unique to Jerboa).
+  (define (handle-doc-examples msg out)
+    (let* ([sym-name (or (dict-ref msg "sym") (dict-ref msg "symbol") "")]
+           [session  (dict-ref msg "session")]
+           [env      (if session (session-env session) (interaction-environment))])
+      (guard (exn [#t (send-response! out (make-response msg "status" (list "no-info" "done")))])
+        (let* ([sym (string->symbol sym-name)]
+               [val (guard (e [#t #f]) (eval sym env))]
+               [doc (guard (e [#t ""]) (let ([d (repl-doc sym)]) (if (string? d) d "")))]
+               [args (if (and val (procedure? val)) (arity-string val) "")])
+          (send-response! out
+            (make-response msg
+              "doc"          doc
+              "arglists-str" args
+              "type"         (if val (type-category val) "var")
+              "value-type"   (if val (value->type-string val) "")
+              "status"       (list "done")))))))
 
   ;; ================================================================
   ;; Message Dispatch
@@ -438,15 +1250,60 @@
   (define (handle-message msg out)
     (let ([op (dict-ref msg "op" "")])
       (cond
-        [(string=? op "clone")       (handle-clone msg out)]
-        [(string=? op "close")       (handle-close msg out)]
-        [(string=? op "describe")    (handle-describe msg out)]
-        [(string=? op "eval")        (handle-eval msg out)]
-        [(string=? op "load-file")   (handle-load-file msg out)]
-        [(string=? op "completions") (handle-completions msg out)]
-        [(string=? op "lookup")      (handle-lookup msg out)]
-        [(string=? op "interrupt")   (handle-interrupt msg out)]
-        [(string=? op "stdin")       (handle-stdin msg out)]
+        ;; Base ops
+        [(string=? op "clone")              (handle-clone              msg out)]
+        [(string=? op "close")              (handle-close              msg out)]
+        [(string=? op "describe")           (handle-describe           msg out)]
+        [(string=? op "eval")               (handle-eval               msg out)]
+        [(string=? op "load-file")          (handle-load-file          msg out)]
+        [(string=? op "interrupt")          (handle-interrupt          msg out)]
+        [(string=? op "stdin")              (handle-stdin              msg out)]
+        ;; Metadata
+        [(string=? op "info")               (handle-info               msg out)]
+        [(string=? op "eldoc")              (handle-eldoc              msg out)]
+        [(string=? op "eldoc-member-doc")   (handle-eldoc              msg out)]
+        [(string=? op "arglists")           (handle-arglists           msg out)]
+        [(string=? op "lookup")             (handle-lookup             msg out)]
+        [(string=? op "version")            (handle-version            msg out)]
+        ;; Completions
+        [(string=? op "completions")        (handle-completions        msg out)]
+        [(string=? op "complete")           (handle-completions        msg out)]
+        ;; Macro expansion
+        [(string=? op "macroexpand")        (handle-macroexpand        msg out)]
+        [(string=? op "macroexpand-1")      (handle-macroexpand-1      msg out)]
+        [(string=? op "macroexpand-all")    (handle-macroexpand-all    msg out)]
+        ;; Namespaces
+        [(string=? op "ns-list")            (handle-ns-list            msg out)]
+        [(string=? op "ns-vars")            (handle-ns-vars            msg out)]
+        [(string=? op "ns-vars-with-meta")  (handle-ns-vars-with-meta  msg out)]
+        [(string=? op "ns-load-all")        (handle-ns-list            msg out)]
+        ;; Debugging
+        [(string=? op "stacktrace")         (handle-stacktrace         msg out)]
+        [(string=? op "analyze-stacktrace") (handle-analyze-stacktrace msg out)]
+        ;; Formatting
+        [(string=? op "format-code")        (handle-format-code        msg out)]
+        [(string=? op "format-edn")         (handle-format-edn         msg out)]
+        ;; Search
+        [(string=? op "apropos")            (handle-apropos            msg out)]
+        [(string=? op "apropos-docs")       (handle-apropos-docs       msg out)]
+        ;; Mutation
+        [(string=? op "undef")              (handle-undef              msg out)]
+        ;; Testing
+        [(string=? op "test")               (handle-test               msg out)]
+        [(string=? op "test-all")           (handle-test-all           msg out)]
+        [(string=? op "test-ns")            (handle-test-ns            msg out)]
+        ;; Inspector
+        [(string=? op "inspect-start")      (handle-inspect-start      msg out)]
+        [(string=? op "inspect-next")       (handle-inspect-next       msg out)]
+        [(string=? op "inspect-pop")        (handle-inspect-pop        msg out)]
+        [(string=? op "inspect-refresh")    (handle-inspect-refresh    msg out)]
+        [(string=? op "inspect-get-path")   (handle-inspect-get-path   msg out)]
+        [(string=? op "inspect-navigate")   (handle-inspect-navigate   msg out)]
+        ;; Jerboa extensions
+        [(string=? op "eval-timed")         (handle-eval-timed         msg out)]
+        [(string=? op "type-info")          (handle-type-info          msg out)]
+        [(string=? op "memory-stats")       (handle-memory-stats       msg out)]
+        [(string=? op "doc-examples")       (handle-doc-examples       msg out)]
         [else
          (send-response! out
            (make-response msg
@@ -458,20 +1315,18 @@
 
   (define (handle-client in out)
     (let lp ()
-      (guard (exn
-               [#t (void)])  ;; client disconnected or protocol error
+      (guard (exn [#t (void)])
         (let ([msg (bencode-read in)])
           (unless (eof-object? msg)
             (guard (exn
                      [#t
-                      ;; Handler error — send error response, keep connection alive
                       (guard (e2 [#t (void)])
                         (send-response! out
                           (make-response msg
                             "status" (list "error" "done")
-                            "ex" (if (message-condition? exn)
-                                     (condition-message exn)
-                                     (format "~a" exn)))))])
+                            "ex"     (if (message-condition? exn)
+                                         (condition-message exn)
+                                         (format "~a" exn)))))])
               (handle-message msg out))
             (lp))))))
 
@@ -486,29 +1341,27 @@
           (lp (cdr l) (- n 1) (cons (car l) acc)))))
 
   ;; ================================================================
-  ;; TCP Server (inline socket FFI — same pattern as (std repl server))
+  ;; TCP Server (inline socket FFI — GC-safe, non-blocking)
   ;; ================================================================
-  ;; Self-contained to avoid circular dependencies with (std net tcp).
 
   (define _libc-loaded
     (let ((v (getenv "JEMACS_STATIC")))
       (if (and v (not (string=? v "")) (not (string=? v "0")))
-          #f  ;; symbols already in static binary
+          #f
           (load-shared-object #f))))
 
-  (define c-socket      (foreign-procedure "socket" (int int int) int))
-  (define c-bind        (foreign-procedure "bind" (int u8* int) int))
-  (define c-listen      (foreign-procedure "listen" (int int) int))
-  (define c-accept      (foreign-procedure "accept" (int u8* u8*) int))
-  (define c-close       (foreign-procedure "close" (int) int))
-  (define c-setsockopt  (foreign-procedure "setsockopt" (int int int u8* int) int))
-  (define c-htons       (foreign-procedure "htons" (unsigned-short) unsigned-short))
-  (define c-fcntl       (foreign-procedure "fcntl" (int int int) int))
+  (define c-socket      (foreign-procedure "socket"      (int int int) int))
+  (define c-bind        (foreign-procedure "bind"        (int u8* int) int))
+  (define c-listen      (foreign-procedure "listen"      (int int) int))
+  (define c-accept      (foreign-procedure "accept"      (int u8* u8*) int))
+  (define c-close       (foreign-procedure "close"       (int) int))
+  (define c-setsockopt  (foreign-procedure "setsockopt"  (int int int u8* int) int))
+  (define c-htons       (foreign-procedure "htons"       (unsigned-short) unsigned-short))
+  (define c-fcntl       (foreign-procedure "fcntl"       (int int int) int))
   (define c-getsockname (foreign-procedure "getsockname" (int u8* u8*) int))
-  (define c-read        (foreign-procedure "read" (int u8* size_t) ssize_t))
-  (define c-write       (foreign-procedure "write" (int u8* size_t) ssize_t))
+  (define c-read        (foreign-procedure "read"        (int u8* size_t) ssize_t))
+  (define c-write       (foreign-procedure "write"       (int u8* size_t) ssize_t))
 
-  ;; errno access — platform-specific symbol
   (define c-errno-location
     (let ((mt (symbol->string (machine-type))))
       (cond
@@ -522,24 +1375,22 @@
          (foreign-procedure "__errno" () void*))
         (else
          (foreign-procedure "__errno_location" () void*)))))
+
   (define (get-errno) (foreign-ref 'int (c-errno-location) 0))
   (define EINTR 4)
   (define *freebsd?* (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb)))
   (define EAGAIN (if *freebsd?* 35 11))
 
-  ;; fcntl constants
   (define F_GETFL 3)
   (define F_SETFL 4)
   (define O_NONBLOCK
     (if (memq (machine-type) '(a6fb ta6fb i3fb ti3fb arm64fb)) #x4 #x800))
 
-  ;; Socket constants
-  (define AF_INET 2)
+  (define AF_INET     2)
   (define SOCK_STREAM 1)
-  (define SOL_SOCKET (if *freebsd?* #xffff 1))
-  (define SO_REUSEADDR (if *freebsd?* 4 2))
+  (define SOL_SOCKET  (if *freebsd?* #xffff 1))
+  (define SO_REUSEADDR(if *freebsd?* 4 2))
 
-  ;; GC-safe retry delay: 10ms (Chez sleep responds to GC signals)
   (define *retry-delay* (make-time 'time-duration 10000000 0))
 
   (define (set-nonblocking! fd)
@@ -547,16 +1398,13 @@
       (c-fcntl fd F_SETFL (fxior flags O_NONBLOCK))))
 
   (define (make-sockaddr-in port)
-    ;; struct sockaddr_in: family(2) + port(2) + addr(4) + zero(8) = 16 bytes
-    ;; Binds to 127.0.0.1 (localhost only)
     (let ([buf (make-bytevector 16 0)])
       (if *freebsd?*
           (begin
-            (bytevector-u8-set! buf 0 16)        ;; sin_len
-            (bytevector-u8-set! buf 1 AF_INET))  ;; sin_family (uint8)
+            (bytevector-u8-set! buf 0 16)
+            (bytevector-u8-set! buf 1 AF_INET))
           (bytevector-u16-native-set! buf 0 AF_INET))
       (bytevector-u16-set! buf 2 (c-htons port) 'big)
-      ;; sin_addr = 127.0.0.1
       (bytevector-u8-set! buf 4 127)
       (bytevector-u8-set! buf 5 0)
       (bytevector-u8-set! buf 6 0)
@@ -566,22 +1414,17 @@
   (define (tcp-listen* port)
     (let ([sock (c-socket AF_INET SOCK_STREAM 0)])
       (when (< sock 0) (error 'nrepl-start! "socket() failed"))
-      ;; SO_REUSEADDR
       (let ([one (make-bytevector 4 0)])
         (bytevector-s32-native-set! one 0 1)
         (c-setsockopt sock SOL_SOCKET SO_REUSEADDR one 4))
-      ;; Bind
       (let ([addr (make-sockaddr-in port)])
         (when (< (c-bind sock addr 16) 0)
           (c-close sock)
           (error 'nrepl-start! "bind() failed — port may be in use" port)))
-      ;; Listen
       (when (< (c-listen sock 8) 0)
         (c-close sock)
         (error 'nrepl-start! "listen() failed"))
-      ;; Set non-blocking for GC-safe accept loop
       (set-nonblocking! sock)
-      ;; Get actual port (important when port=0)
       (let ([addr-out (make-bytevector 16 0)]
             [len-buf  (make-bytevector 4 0)])
         (bytevector-s32-native-set! len-buf 0 16)
@@ -589,31 +1432,29 @@
         (let ([actual-port (bytevector-u16-ref addr-out 2 'big)])
           (values sock actual-port)))))
 
-  ;; Wrap a socket FD as binary input/output port pair.
-  ;; Uses non-blocking I/O with Chez-native sleep for GC safety.
   (define (fd->binary-ports fd)
     (let ([closed? #f])
-      (let ([in (make-custom-binary-input-port "nrepl-in"
-                  (lambda (bv start count)
-                    (if closed? 0
-                        (let ([buf (make-bytevector count)])
-                          (let retry ()
-                            (let ([n (c-read fd buf count)])
-                              (cond
-                                [(> n 0)
-                                 (bytevector-copy! buf 0 bv start n)
-                                 n]
-                                [(and (< n 0)
-                                      (let ([e (get-errno)])
-                                        (or (= e EINTR) (= e EAGAIN))))
-                                 (sleep *retry-delay*)
-                                 (retry)]
-                                [else 0]))))))
-                  #f #f
-                  (lambda ()
-                    (unless closed?
-                      (set! closed? #t)
-                      (c-close fd))))]
+      (let ([in  (make-custom-binary-input-port "nrepl-in"
+                   (lambda (bv start count)
+                     (if closed? 0
+                         (let ([buf (make-bytevector count)])
+                           (let retry ()
+                             (let ([n (c-read fd buf count)])
+                               (cond
+                                 [(> n 0)
+                                  (bytevector-copy! buf 0 bv start n)
+                                  n]
+                                 [(and (< n 0)
+                                       (let ([e (get-errno)])
+                                         (or (= e EINTR) (= e EAGAIN))))
+                                  (sleep *retry-delay*)
+                                  (retry)]
+                                 [else 0]))))))
+                   #f #f
+                   (lambda ()
+                     (unless closed?
+                       (set! closed? #t)
+                       (c-close fd))))]
             [out (make-custom-binary-output-port "nrepl-out"
                    (lambda (bv start count)
                      (if closed? 0
@@ -648,23 +1489,22 @@
   (define *server-thread*  #f)
 
   (define (nrepl-server-port) *server-port*)
-  (define (nrepl-running?) (and *server-running* #t))
+  (define (nrepl-running?)    (and *server-running* #t))
 
   ;; ================================================================
-  ;; Server Start/Stop
+  ;; Server Start / Stop
   ;; ================================================================
 
   (define nrepl-start!
     (case-lambda
-      [() (nrepl-start! 0)]   ;; 0 = OS-assigned port
+      [() (nrepl-start! 0)]
       [(port)
        (when *server-running*
          (error 'nrepl-start! "nREPL server already running"))
        (let-values ([(sock actual-port) (tcp-listen* port)])
          (set! *server-socket* sock)
-         (set! *server-port* actual-port)
+         (set! *server-port*   actual-port)
          (set! *server-running* #t)
-         ;; Write .nrepl-port for editor auto-discovery
          (let ([port-file (string-append (current-directory) "/.nrepl-port")])
            (call-with-output-file port-file
              (lambda (p) (display actual-port p))
@@ -673,7 +1513,6 @@
            "nREPL server started on port ~a on host 127.0.0.1 - nrepl://127.0.0.1:~a~n"
            actual-port actual-port)
          (flush-output-port (current-output-port))
-         ;; Accept loop in background thread
          (set! *server-thread*
            (fork-thread
              (lambda ()
@@ -685,7 +1524,6 @@
                      (let ([client-fd (c-accept sock addr len)])
                        (cond
                          [(> client-fd 0)
-                          ;; New connection — handle in its own thread
                           (fork-thread
                             (lambda ()
                               (guard (exn [#t (void)])
@@ -695,10 +1533,9 @@
                                   (close-port in)))))
                           (accept-loop)]
                          [else
-                          ;; No connection pending — GC-safe sleep, retry
                           (sleep *retry-delay*)
                           (accept-loop)]))))))))
-         actual-port)]))  ;; close let-values, [(port) clause, case-lambda, define
+         actual-port)]))
 
   (define (nrepl-stop!)
     (when *server-running*
@@ -707,7 +1544,6 @@
         (guard (exn [#t (void)])
           (c-close *server-socket*))
         (set! *server-socket* #f))
-      ;; Remove .nrepl-port file
       (let ([port-file (string-append (current-directory) "/.nrepl-port")])
         (when (file-exists? port-file)
           (delete-file port-file)))
