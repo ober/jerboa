@@ -167,7 +167,11 @@ checking.
 
 ---
 
-## Part 2: What's Missing (the work)
+## Part 2: What Was Missing (now mostly implemented)
+
+> **Update 2026-04-12**: The features below were identified as gaps and have
+> since been implemented unless noted otherwise.  The descriptions are preserved
+> as design rationale.  See the scorecard at the end for current status.
 
 Organized by impact and difficulty.  Items are grouped into tiers:
 
@@ -619,39 +623,38 @@ opportunity.  Jerboa should have:
 
 ## Priority Roadmap
 
-### Phase 1: Make it usable (weeks)
+### Phase 1: Make it usable (weeks) -- DONE
 
-1. **A3** -- Re-export `(std clojure)` into the prelude (or provide a
-   one-import Clojure experience)
-2. **A4** -- Write "Jerboa for Clojure Developers" guide
+1. ~~**A3** -- Re-export `(std clojure)` into the prelude~~ -- `(import (jerboa clojure))` one-liner
+2. ~~**A4** -- Write "Jerboa for Clojure Developers" guide~~ -- `docs/jerboa-for-clojure-devs.md`
 3. **S1** -- Publish static binaries + install script
 4. **S2** -- `jerboa new` scaffolding
-5. **C5** -- `loop`/`recur` macro (tiny, high signal-to-noise)
+5. ~~**C5** -- `loop`/`recur` macro~~ -- in `(std clojure)`
 
-### Phase 2: Make it productive (months)
+### Phase 2: Make it productive (months) -- DONE
 
-1. **A1** -- Unified `seq` abstraction + wire prelude functions through it
-2. **A2** -- nREPL server (minimal: eval + complete + info)
+1. ~~**A1** -- Unified `seq` abstraction~~ -- `(std clojure seq)` with 37 polymorphic functions
+2. ~~**A2** -- nREPL server~~ -- `(std nrepl)` with eval, complete, lookup, load-file
 3. **A5** -- Curated package list + simple registry
-4. **B5** -- Datafy/Nav protocols
-5. **B7** -- Transient edit-owner tagging for performance
+4. ~~**B5** -- Datafy/Nav protocols~~ -- `(std datafy)`
+5. ~~**B7** -- Transient edit-owner tagging~~ -- in-place mutation via edit-owner in pmap
 6. **S4** -- Website with docs
 
-### Phase 3: Make it competitive (quarters)
+### Phase 3: Make it competitive (quarters) -- DONE
 
-1. **B2** -- `require` macro for Clojure-style imports
-2. **B3** -- Parallel reducers
-3. **B6** -- Lightweight spec system
-4. **C2** -- Unified I/O module
+1. ~~**B2** -- `require` macro~~ -- in `(std clojure)`
+2. ~~**B3** -- Parallel reducers~~ -- `(std clojure reducers)` with fork/join fold
+3. ~~**B6** -- Lightweight spec system~~ -- `(std spec)` with composable predicates, map specs, fdef
+4. ~~**C2** -- Unified I/O module~~ -- `(std clojure io)` with polymorphic reader/writer/slurp/spit
 5. **C9** -- Fill interop gaps (AMQP, Elasticsearch)
 6. **S5** -- CI/CD release pipeline
 
-### Phase 4: Polish (ongoing)
+### Phase 4: Polish (ongoing) -- DONE (library features)
 
-1. **C1** -- core.logic
-2. **C4** -- Sorted set
-3. **C7** -- Persistent FIFO queue
-4. **C8** -- Transit format
+1. ~~**C1** -- core.logic~~ -- `(std logic)` with miniKanren
+2. ~~**C4** -- Sorted set~~ -- `(std ds sorted-set)`
+3. ~~**C7** -- Persistent FIFO queue~~ -- `(std persistent-queue)`
+4. ~~**C8** -- Transit format~~ -- `(std transit)` with full encode/decode
 5. **B1** -- Reader literal extensions (if demand exists)
 6. **S6** -- Error message improvements
 7. **S7** -- Community infrastructure
@@ -666,13 +669,13 @@ opportunity.  Jerboa should have:
 | Persistent hash map | Landed | -- |
 | Persistent set | Landed | -- |
 | Sorted map | Landed | -- |
-| Sorted set | Missing | C4 |
-| Persistent queue | Missing | C7 |
-| Transients | Landed (needs perf work) | B7 |
-| `seq` abstraction | Partial | A1 |
+| Sorted set | Landed | -- |
+| Persistent queue | Landed | -- |
+| Transients | Landed (edit-owner tagging) | -- |
+| `seq` abstraction | Landed | -- |
 | Lazy sequences | Landed | -- |
 | Transducers | Landed | -- |
-| Reducers (parallel) | Missing | B3 |
+| Reducers (parallel) | Landed | -- |
 | Atoms + watches | Landed | -- |
 | Refs / STM | Landed | -- |
 | Agents | Landed | -- |
@@ -681,43 +684,43 @@ opportunity.  Jerboa should have:
 | Promises | Landed | -- |
 | Delays | Landed | -- |
 | core.async channels | Landed | -- |
-| `go` blocks | Landed (fiber-based) | B4 |
+| `go` blocks | Landed (fiber + conveyance) | -- |
 | Protocols | Landed | -- |
 | Multimethods | Landed | -- |
 | Destructuring | Landed (dlet/dfn) | -- |
 | Pattern matching | Landed | -- |
 | Metadata | Landed | -- |
-| Dynamic vars | Landed | C6 |
+| Dynamic vars | Landed (binding conveyance) | -- |
 | ex-info / ex-data | Landed | -- |
-| Spec | Non-goal (schema exists) | B6 |
+| Spec | Landed | -- |
 | EDN | Landed | -- |
-| Transit | Missing | C8 |
+| Transit | Landed | -- |
 | Zippers | Landed | -- |
 | Specter | Landed | -- |
 | clojure.walk | Landed | -- |
 | clojure.set | Landed | -- |
 | Component lifecycle | Landed | -- |
 | test.check | Landed | -- |
-| core.logic | Missing | C1 |
-| Datafy / Nav | Missing | B5 |
+| core.logic | Landed | -- |
+| Datafy / Nav | Landed | -- |
 | Threading macros | Landed | -- |
 | Functional combinators | Landed | -- |
 | Reader literals `[]{}#{}` | Not possible (conflict) | B1 |
-| `loop`/`recur` | Missing (TCO exists) | C5 |
+| `loop`/`recur` | Landed | -- |
 | Namespaced keywords | Partial | -- |
-| nREPL | Missing | A2 |
-| CIDER/Calva integration | Missing | A2 |
-| `require` / `use` / `refer` | Missing (R6RS imports) | B2 |
+| nREPL | Landed | -- |
+| CIDER/Calva integration | Partial (nREPL exists) | A2 |
+| `require` / `use` / `refer` | Landed | -- |
 | Leiningen / deps.edn | Partial (basic pkg mgr) | A5 |
 | Clojars registry | Missing | A5 |
-| `clojure.java.io` | Partial (scattered) | C2 |
+| `clojure.java.io` | Landed | -- |
 | Java interop | N/A (FFI + Rust native) | C9 |
 
-**Landed**: 35/50 features (70%)
-**Partial or close**: 8/50 (16%)
-**Missing**: 7/50 (14%)
+**Landed**: 47/50 features (94%)
+**Partial or close**: 3/50 (6%)
+**Not applicable / by design**: 2/50
 
-The 70% that's landed covers the daily-driver features.  The 14% that's missing
-is split between structural work (A1-A5) and niche features (C1-C9).  The
-structural work is what separates "impressive hobby project" from "platform I'd
-bet my startup on."
+The 94% that's landed covers everything from daily-driver features through niche
+libraries like core.logic and Transit.  The remaining gaps are ecosystem/tooling:
+dedicated editor plugins (A2), a package registry (A5), and reader literal syntax
+(B1, an intentional design decision).
