@@ -119,7 +119,17 @@
     sorted-set-contains? sorted-set-size
     sorted-set-min sorted-set-max
     sorted-set-range sorted-set->list
-    sorted-set-fold)
+    sorted-set-fold
+
+    ;; ---- Lazy sequences (re-exports from (std seq)) ----
+    lazy-cons lazy-first lazy-rest lazy-nil lazy-nil? lazy-seq? lazy-force
+    lazy-map lazy-filter lazy-take lazy-drop lazy-take-while lazy-drop-while
+    lazy-zip lazy-append lazy-flatten lazy-range lazy-iterate lazy-repeat
+    lazy-cycle lazy->list list->lazy lazy-for-each lazy-fold lazy-count
+    lazy-any? lazy-all? lazy-nth lazy-concat lazy-interleave lazy-mapcat
+    lazy-interpose lazy-realize lazy-realized? lazy-partition lazy-chunk
+    ;; Clojure-named wrappers
+    cycle repeat doall dorun realized?)
 
   (import (except (chezscheme)
                   make-hash-table hash-table?
@@ -148,7 +158,13 @@
           (rename (only (std misc memoize) memoize) (memoize clj-memoize))
           (only (std misc list) iterate-n)
           (std pqueue)
-          (std sorted-set))
+          (std sorted-set)
+          (except (std seq) into sequence transduce
+                  ;; Exclude transducer + parallel collection exports
+                  ;; that clash or aren't needed here
+                  map-xf filter-xf take-xf drop-xf take-while-xf
+                  drop-while-xf flat-map-xf dedupe-xf compose-xf
+                  par-map par-filter par-reduce par-for-each))
 
   ;; =========================================================================
   ;; Record-as-map helpers (§4.10)
@@ -691,12 +707,12 @@
          [else (error 'reduce "unsupported collection type" coll)])]))
 
   (define (range . args)
-    ;; (range)             → infinite (we return '() as a placeholder — Jerboa has no lazy)
-    ;; (range end)         → 0..end-1
-    ;; (range start end)   → start..end-1
-    ;; (range start end step)
+    ;; (range)             → infinite lazy range from 0
+    ;; (range end)         → 0..end-1 (eager list)
+    ;; (range start end)   → start..end-1 (eager list)
+    ;; (range start end step) (eager list)
     (case (length args)
-      [(0) (error 'range "infinite range not supported (no lazy sequences)")]
+      [(0) (lazy-range 0 +inf.0 1)]
       [(1)
        (let ([end (car args)])
          (let loop ([i 0] [acc '()])
@@ -1165,21 +1181,27 @@
   ;; memoize — cache f's results by argument list (unbounded).
   (define memoize clj-memoize)
 
-  ;; iterate — (iterate n f x) returns a list of n elements:
-  ;;   (x (f x) (f (f x)) ... )
-  ;; Clojure's (iterate f x) is lazy and infinite; Jerboa's strict form
-  ;; requires the count up front. Equivalent to Clojure's
-  ;; (take n (iterate f x)).
-  (define (iterate n f x) (iterate-n n f x))
+  ;; iterate — two forms:
+  ;;   (iterate f x)   → infinite lazy seq: x, (f x), (f (f x)), ...
+  ;;   (iterate n f x) → eager list of n elements (backwards compat)
+  (define iterate
+    (case-lambda
+      [(f x)   (lazy-iterate f x)]
+      [(n f x) (iterate-n n f x)]))
 
-  ;; repeatedly — (repeatedly n f) calls f n times and returns the list
-  ;; of results.
-  ;;   (repeatedly 3 (lambda () (random 10))) => (3 7 1)
-  (define (repeatedly n f)
-    (let loop ([i 0] [acc '()])
-      (if (>= i n)
-          (reverse acc)
-          (loop (+ i 1) (cons (f) acc)))))
+  ;; repeatedly — two forms:
+  ;;   (repeatedly f)   → infinite lazy seq of calls to (f)
+  ;;   (repeatedly n f) → eager list of n calls to (f)
+  (define repeatedly
+    (case-lambda
+      [(f)
+       (let make-lazy ()
+         (lazy-cons (f) (make-lazy)))]
+      [(n f)
+       (let loop ([i 0] [acc '()])
+         (if (>= i n)
+             (reverse acc)
+             (loop (+ i 1) (cons (f) acc))))]))
 
   ;; =========================================================================
   ;; doto — thread an object through side-effecting calls.
@@ -1504,5 +1526,29 @@
     (and (condition? c)
          (ex-info-condition? c)
          (ex-info-condition-cause c)))
+
+  ;; =========================================================================
+  ;; Lazy sequence convenience wrappers (Clojure-named)
+  ;; =========================================================================
+
+  ;; cycle — infinite lazy repetition of a list's elements
+  (define cycle lazy-cycle)
+
+  ;; repeat — infinite lazy sequence of a single value
+  (define repeat lazy-repeat)
+
+  ;; doall — force all elements, return the realized lazy seq as a list
+  (define (doall seq)
+    (if (lazy-seq? seq)
+      (lazy->list seq)
+      seq))
+
+  ;; dorun — force all elements for side effects, return void
+  (define (dorun seq)
+    (when (lazy-seq? seq)
+      (lazy-for-each (lambda (_) (void)) seq)))
+
+  ;; realized? — check if a lazy seq has been forced
+  (define realized? lazy-realized?)
 
 ) ;; end library
