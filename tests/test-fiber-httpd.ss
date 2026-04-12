@@ -35,7 +35,7 @@
      (unless val (error 'assert msg))]))
 
 ;; Helper: send raw HTTP request over a fiber-aware TCP connection
-;; and read the full response. Reads once (sufficient for small responses).
+;; and read the full response. Accumulates reads until headers + full body.
 (define (http-request-raw fd poller method path body)
   (let* ([body-bv (if body
                     (string->bytevector body (make-transcoder (utf-8-codec)))
@@ -56,14 +56,67 @@
     ;; Send body if present
     (when body-bv
       (fiber-tcp-write fd body-bv (bytevector-length body-bv) poller))
-    ;; Read response — single read for small responses, then done
-    (let ([buf (make-bytevector 16384)])
-      (let ([n (fiber-tcp-read fd buf 16384 poller)])
-        (if (<= n 0) ""
-          (bytevector->string
-            (let ([b (make-bytevector n)])
-              (bytevector-copy! buf 0 b 0 n) b)
-            (make-transcoder (utf-8-codec))))))))
+    ;; Read response — accumulate into a growing buffer
+    (let ([buf (make-bytevector 16384)]
+          [tmp (make-bytevector 4096)])
+      (let loop ([total 0])
+        (let ([n (fiber-tcp-read fd tmp (min 4096 (- 16384 total)) poller)])
+          (cond
+            [(<= n 0)
+             ;; EOF — return accumulated data
+             (bytevector->string
+               (let ([b (make-bytevector total)])
+                 (bytevector-copy! buf 0 b 0 total) b)
+               (make-transcoder (utf-8-codec)))]
+            [else
+             (bytevector-copy! tmp 0 buf total n)
+             (let ([new-total (+ total n)])
+               ;; Check if we have full headers
+               (let ([hdr-end (find-crlf-crlf buf new-total)])
+                 (if hdr-end
+                   ;; Parse Content-Length and check if body is complete
+                   (let ([cl (extract-content-length buf hdr-end)])
+                     (if (>= new-total (+ hdr-end (or cl 0)))
+                       ;; Full response received
+                       (bytevector->string
+                         (let ([b (make-bytevector new-total)])
+                           (bytevector-copy! buf 0 b 0 new-total) b)
+                         (make-transcoder (utf-8-codec)))
+                       (loop new-total)))
+                   (loop new-total))))])))))) ;; keep reading
+
+;; Find \r\n\r\n in bytevector, return offset after it (start of body)
+(define (find-crlf-crlf buf len)
+  (let loop ([i 0])
+    (cond
+      [(> (+ i 3) len) #f]
+      [(and (= (bytevector-u8-ref buf i) 13)
+            (= (bytevector-u8-ref buf (+ i 1)) 10)
+            (= (bytevector-u8-ref buf (+ i 2)) 13)
+            (= (bytevector-u8-ref buf (+ i 3)) 10))
+       (+ i 4)]
+      [else (loop (+ i 1))])))
+
+;; Extract Content-Length value from headers in bytevector
+(define (extract-content-length buf header-end)
+  (let* ([hdr-str (bytevector->string
+                    (let ([b (make-bytevector header-end)])
+                      (bytevector-copy! buf 0 b 0 header-end) b)
+                    (make-transcoder (utf-8-codec)))]
+         [lc (string-downcase hdr-str)])
+    (let ([idx (string-search-helper lc "content-length:" 0)])
+      (if idx
+        (let* ([start (+ idx 15)]  ;; skip "content-length:"
+               [end (string-search-helper hdr-str "\r\n" start)])
+          (and end (string->number (string-trim-ws (substring hdr-str start end)))))
+        0))))
+
+(define (string-trim-ws s)
+  (let ([len (string-length s)])
+    (let ([start (let loop ([i 0])
+                   (if (and (< i len) (char=? (string-ref s i) #\space))
+                     (loop (+ i 1)) i))])
+      (substring s start len))))
 
 ;; Helper: parse response status code from raw response
 (define (response-status-code resp)

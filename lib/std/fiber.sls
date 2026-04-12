@@ -84,6 +84,13 @@
 
     with-fibers
 
+    ;; Semaphore
+    make-fiber-semaphore
+    fiber-semaphore?
+    fiber-semaphore-acquire!
+    fiber-semaphore-release!
+    fiber-semaphore-try-acquire!
+
     ;; Low-level primitives for I/O integration (used by std net io)
     wake-fiber!
     fiber-gate-set!
@@ -1239,5 +1246,78 @@
                              (fiber-cancel! f)))
                          (fiber-group-fibers group))
                (raise exn)))))]))
+
+  ;; =========================================================================
+  ;; Fiber-aware semaphore
+  ;; =========================================================================
+  ;;
+  ;; Counting semaphore that parks fibers instead of blocking OS threads.
+  ;; Used for admission control (max concurrent connections, etc.).
+
+  (define-record-type fiber-semaphore
+    (fields
+      (mutable count)
+      (immutable mutex)
+      (mutable waiters))     ;; list of (fiber . gate) pairs
+    (protocol
+      (lambda (new)
+        (lambda (max-count)
+          (new max-count (make-mutex) '())))))
+
+  ;; Acquire a permit. If none available, park the fiber until one is released.
+  (define (fiber-semaphore-acquire! sem)
+    (let ([mx (fiber-semaphore-mutex sem)])
+      (mutex-acquire mx)
+      (let ([c (fiber-semaphore-count sem)])
+        (cond
+          [(> c 0)
+           ;; Permit available — take it
+           (fiber-semaphore-count-set! sem (- c 1))
+           (mutex-release mx)]
+          [else
+           ;; No permits — park the fiber
+           (let* ([f (fiber-self)]
+                  [gate (box 'channel)])
+             (fiber-semaphore-waiters-set! sem
+               (append (fiber-semaphore-waiters sem) (list (cons f gate))))
+             (mutex-release mx)
+             ;; Park
+             (fiber-gate-set! f gate)
+             (set-timer 1)
+             (spin-until-gate gate)
+             (fiber-gate-set! f #f))]))))
+
+  ;; Release a permit. If fibers are waiting, wake the first one.
+  (define (fiber-semaphore-release! sem)
+    (let ([mx (fiber-semaphore-mutex sem)])
+      (mutex-acquire mx)
+      (let ([waiters (fiber-semaphore-waiters sem)])
+        (cond
+          [(null? waiters)
+           ;; No waiters — increment count
+           (fiber-semaphore-count-set! sem (+ (fiber-semaphore-count sem) 1))
+           (mutex-release mx)]
+          [else
+           ;; Wake the first waiter
+           (let ([entry (car waiters)])
+             (fiber-semaphore-waiters-set! sem (cdr waiters))
+             (mutex-release mx)
+             ;; Open their gate and re-enqueue
+             (set-box! (cdr entry) 'done)
+             (wake-fiber! (car entry)))]))))
+
+  ;; Try to acquire without blocking. Returns #t on success, #f if no permits.
+  (define (fiber-semaphore-try-acquire! sem)
+    (let ([mx (fiber-semaphore-mutex sem)])
+      (mutex-acquire mx)
+      (let ([c (fiber-semaphore-count sem)])
+        (cond
+          [(> c 0)
+           (fiber-semaphore-count-set! sem (- c 1))
+           (mutex-release mx)
+           #t]
+          [else
+           (mutex-release mx)
+           #f]))))
 
 ) ;; end library

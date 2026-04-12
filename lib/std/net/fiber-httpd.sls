@@ -29,6 +29,7 @@
   (export
     ;; Server lifecycle
     fiber-httpd-start
+    fiber-httpd-start*
     fiber-httpd-stop!
     fiber-httpd?
     fiber-httpd-listen-port
@@ -44,7 +45,20 @@
 
     ;; Router
     make-router router-add! router-dispatch
-    route-get route-post route-put route-delete)
+    route-get route-post route-put route-delete
+
+    ;; Metrics / production
+    fiber-httpd-metrics
+    httpd-metrics?
+    httpd-metrics-connections-active
+    httpd-metrics-connections-total
+    httpd-metrics-requests-total
+    httpd-metrics-errors-total
+    httpd-metrics-start-time
+
+    ;; Middleware
+    wrap-health-check
+    wrap-metrics-endpoint)
 
   (import (chezscheme)
           (std fiber)
@@ -332,6 +346,43 @@
   (define (route-put r path handler) (router-add! r "PUT" path handler))
   (define (route-delete r path handler) (router-add! r "DELETE" path handler))
 
+  ;; ========== Metrics ==========
+
+  (define-record-type httpd-metrics
+    (fields
+      (mutable connections-active)   ;; current open connections
+      (mutable connections-total)    ;; total connections accepted
+      (mutable requests-total)       ;; total requests served
+      (mutable errors-total)         ;; total 5xx responses
+      (immutable start-time)         ;; (current-time) at server start
+      (immutable metrics-mutex))
+    (protocol
+      (lambda (new)
+        (lambda ()
+          (new 0 0 0 0 (current-time) (make-mutex))))))
+
+  (define (metrics-inc-active! m)
+    (with-mutex (httpd-metrics-metrics-mutex m)
+      (httpd-metrics-connections-active-set! m
+        (+ (httpd-metrics-connections-active m) 1))
+      (httpd-metrics-connections-total-set! m
+        (+ (httpd-metrics-connections-total m) 1))))
+
+  (define (metrics-dec-active! m)
+    (with-mutex (httpd-metrics-metrics-mutex m)
+      (httpd-metrics-connections-active-set! m
+        (max 0 (- (httpd-metrics-connections-active m) 1)))))
+
+  (define (metrics-inc-requests! m)
+    (with-mutex (httpd-metrics-metrics-mutex m)
+      (httpd-metrics-requests-total-set! m
+        (+ (httpd-metrics-requests-total m) 1))))
+
+  (define (metrics-inc-errors! m)
+    (with-mutex (httpd-metrics-metrics-mutex m)
+      (httpd-metrics-errors-total-set! m
+        (+ (httpd-metrics-errors-total m) 1))))
+
   ;; ========== Server ==========
 
   (define-record-type fiber-httpd
@@ -340,21 +391,29 @@
             (immutable runtime)
             (immutable poller)
             (mutable running?)
-            (mutable accept-fiber))
+            (mutable accept-fiber)
+            (immutable metrics)
+            (immutable max-connections)   ;; #f = unlimited
+            (immutable conn-semaphore))   ;; fiber-semaphore or #f
     (sealed #t))
 
   ;; Connection handler: one fiber per connection, keep-alive loop
-  (define (handle-connection fd poller handler)
+  (define (handle-connection fd poller handler metrics)
     (let loop ()
       (let ([req (read-request fd poller)])
         (when req
+          (metrics-inc-requests! metrics)
           (let ([resp (guard (exn [#t
+                        (metrics-inc-errors! metrics)
                         (respond-text 500
                           (if (message-condition? exn)
                             (condition-message exn)
                             "Internal Server Error"))])
                         (handler req))])
             (when (response? resp)
+              ;; Track 5xx errors
+              (when (>= (response-status resp) 500)
+                (metrics-inc-errors! metrics))
               (write-response fd poller resp)
               ;; Keep-alive: check Connection header
               (let ([conn (request-header req "connection")])
@@ -362,24 +421,42 @@
                   (loop))))))))
     (fiber-tcp-close fd))
 
-  ;; Accept loop
+  ;; Accept loop with optional admission control
   (define (accept-loop listen-fd poller handler server)
-    (guard (exn [#t (void)])  ;; catch cancellation and all errors
-      (let loop ()
-        (when (fiber-httpd-running? server)
-          (let ([client-fd (fiber-tcp-accept listen-fd poller)])
-            (fiber-spawn*
-              (lambda () (handle-connection client-fd poller handler))
-              "http-conn")
-            (loop))))))
+    (let ([metrics (fiber-httpd-metrics server)]
+          [sem (fiber-httpd-conn-semaphore server)])
+      (guard (exn [#t (void)])  ;; catch cancellation and all errors
+        (let loop ()
+          (when (fiber-httpd-running? server)
+            ;; Backpressure: if max-connections set, acquire permit
+            (when sem (fiber-semaphore-acquire! sem))
+            (let ([client-fd (fiber-tcp-accept listen-fd poller)])
+              (metrics-inc-active! metrics)
+              (fiber-spawn*
+                (lambda ()
+                  (guard (exn [#t (void)])  ;; ensure cleanup
+                    (handle-connection client-fd poller handler metrics))
+                  (metrics-dec-active! metrics)
+                  (when sem (fiber-semaphore-release! sem)))
+                "http-conn")
+              (loop)))))))
 
-  ;; Start the server
+  ;; Start server with defaults
   (define (fiber-httpd-start port handler)
+    (fiber-httpd-start* port handler #f))
+
+  ;; Start server with max-connections limit.
+  ;; max-conn: #f = unlimited, integer = max concurrent connections
+  (define (fiber-httpd-start* port handler max-conn)
     (let* ([rt (make-fiber-runtime)]
-           [poller (make-io-poller rt)])
+           [poller (make-io-poller rt)]
+           [metrics (make-httpd-metrics)]
+           [sem (and max-conn (> max-conn 0)
+                     (make-fiber-semaphore max-conn))])
       (io-poller-start! poller)
       (let-values ([(listen-fd listen-port) (fiber-tcp-listen "0.0.0.0" port)])
-        (let ([srv (make-fiber-httpd listen-fd listen-port rt poller #t #f)])
+        (let ([srv (make-fiber-httpd listen-fd listen-port rt poller #t #f
+                     metrics max-conn sem)])
           ;; Spawn accept loop
           (let ([af (fiber-spawn rt
                       (lambda () (accept-loop listen-fd poller handler srv))
@@ -402,5 +479,43 @@
     (io-poller-stop! (fiber-httpd-poller srv))
     ;; Give background thread time to exit
     (sleep (make-time 'time-duration 150000000 0)))
+
+  ;; ========== Middleware helpers ==========
+
+  ;; Wrap a handler to serve /health automatically
+  (define (wrap-health-check handler server)
+    (lambda (req)
+      (if (and (string=? (request-method req) "GET")
+               (string=? (request-path-only req) "/health"))
+        (let ([m (fiber-httpd-metrics server)])
+          (respond-json 200
+            (format "{\"status\":\"ok\",\"connections\":~a,\"requests\":~a}"
+              (httpd-metrics-connections-active m)
+              (httpd-metrics-requests-total m))))
+        (handler req))))
+
+  ;; Wrap a handler to serve /metrics in a simple text format
+  (define (wrap-metrics-endpoint handler server)
+    (lambda (req)
+      (if (and (string=? (request-method req) "GET")
+               (string=? (request-path-only req) "/metrics"))
+        (let* ([m (fiber-httpd-metrics server)]
+               [uptime (let ([now (time-second (current-time))]
+                             [start (time-second (httpd-metrics-start-time m))])
+                         (- now start))])
+          (respond-text 200
+            (format (string-append
+                      "# Jerboa fiber-httpd metrics\n"
+                      "connections_active ~a\n"
+                      "connections_total ~a\n"
+                      "requests_total ~a\n"
+                      "errors_total ~a\n"
+                      "uptime_seconds ~a\n")
+              (httpd-metrics-connections-active m)
+              (httpd-metrics-connections-total m)
+              (httpd-metrics-requests-total m)
+              (httpd-metrics-errors-total m)
+              uptime)))
+        (handler req))))
 
 ) ;; end library
