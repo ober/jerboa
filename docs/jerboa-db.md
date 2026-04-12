@@ -4,7 +4,7 @@
 index storage and DuckDB for analytics.  Single binary, embeddable, distributed,
 with a Datalog query engine and immutable time-travel over all data.
 
-**Status:** 2026-04-12 — Design
+**Status:** 2026-04-12 — Phase 1 complete (in-memory core, 15/15 tests passing)
 
 ---
 
@@ -1446,6 +1446,130 @@ Jerboa has **15 of the required building blocks already built and tested**.  In
 Go or Rust, you'd be starting with 2-3 (bindings to LMDB and DuckDB) and
 building the other 12 from scratch.  That's the difference between a 6-month
 project and a multi-year one.
+
+---
+
+## Implementation Scorecard (2026-04-12)
+
+### What Works (Phase 1 Complete)
+
+| Feature | Status | Notes |
+|---|---|---|
+| Datom model (E-A-V-T-op) | Done | 5-tuple record, 4 comparators, sentinel boundaries |
+| Four covering indices (EAVT/AEVT/AVET/VAET) | Done | In-memory RB-tree backend |
+| Schema registry | Done | Intern, lookup, bootstrap attrs (db/ident through db/noHistory) |
+| Transaction processing | Done | Tempid resolution, auto-retract, upsert, CAS, entity retract |
+| Current-state resolution | Done | Groups by (e,a,v), keeps highest-tx, filters retracted |
+| Datalog query engine | Done | Parse, plan, execute with index selection |
+| Clause reordering | Done | Selectivity scoring, greedy ordering |
+| Recursive rules | Done | Fixed-point evaluation, variable renaming for hygiene |
+| Aggregates (count, sum, avg, min, max) | Done | Registry-based, grouped aggregation |
+| Built-in predicates (>, <, >=, <=, =, !=) | Done | Hashtable dispatch |
+| Pull API | Done | Nesting, wildcards, reverse refs, limits, defaults, cycle detection |
+| Lazy entity maps | Done | On-demand loading, touch for eager materialization |
+| Time-travel (as-of, since, history) | Done | Temporal filters on db-value snapshots |
+| Schema migration | Done | rename, merge, split, add-index, remove-index |
+| Binary encoding (28-byte keys) | Done | Big-endian ints, sortable doubles, FNV-1a hashing |
+| LRU cache | Done | O(1) get/put, hit/miss stats |
+| Test suite | Done | 15 integration tests, all passing |
+
+### Gaps: What's Missing for Datomic Parity
+
+#### P0 — Persistence (Phase 2, biggest gap)
+
+Without persistence, data is lost on exit. The code is ~85% written but untested.
+
+| Gap | Difficulty | Blocker |
+|---|---|---|
+| LMDB index backend | Medium | Needs `(thunderchez lmdb)` FFI wired up |
+| Transaction log durability | Medium | Segment file I/O coded but untested; no fsync |
+| Content-addressed value store | Medium | No deduplication of large strings/bytes |
+| Index rebuild from tx-log replay | Easy | Replay logic exists, never exercised |
+
+#### P1 — Query Engine Completeness (Phase 3, missing edges)
+
+Real-world Datalog queries hit walls without these.
+
+| Gap | Difficulty | Notes |
+|---|---|---|
+| `not` / `not-join` clauses | Hard | Datomic negation — filter out binding sets |
+| `or` / `or-join` clauses | Hard | Datomic disjunction — union of binding sets |
+| Collection binding `[?x ...]` in `:in` | Medium | Pass a set, match any member |
+| Relation binding `[[?x ?y]]` in `:in` | Medium | Pass a relation, join against it |
+| Tuple binding `[?x ?y]` in `:in` | Easy | Destructure a single tuple |
+| Lookup refs in transactions | Medium | `[:person/email "alice@example.com"]` as entity ID |
+| Nested maps in transactions | Medium | Component entities auto-created from nested alists |
+| Missing predicates | Easy | `zero?`, `pos?`, `neg?`, `even?`, `odd?`, `starts-with?`, `ends-with?`, `contains?` |
+| Missing functions | Easy | `subs`, `upper-case`, `lower-case`, `inc`, `dec`, `abs`, `mod`, `get-else`, `missing?`, string `count` |
+| Missing aggregates | Easy | `count-distinct`, `median`, `rand`, `sample`, `distinct` |
+| Query explain | Easy | Dump chosen plan for debugging |
+
+#### P2 — Server Mode (Phase 5, endpoints designed but not wired)
+
+Route handlers and protocol are written; needs HTTP/WebSocket integration.
+
+| Gap | Difficulty | Blocker |
+|---|---|---|
+| HTTP server wire-up | Easy | Needs `(std net fiber-httpd)` integration |
+| WebSocket tx-stream | Medium | Real-time transaction feed for clients |
+| Remote peer client | Easy | HTTP stubs need `(std net request)` |
+| Wire format (EDN/JSON) | Easy | Serialize query results for the wire |
+
+#### P3 — Analytics (Phase 4, scaffold only)
+
+Architecture and SQL strings are designed; needs DuckDB binding.
+
+| Gap | Difficulty | Blocker |
+|---|---|---|
+| DuckDB integration | Medium | Needs `(std db duckdb)` binding |
+| SQL query interface | Medium | Vectorized analytics over datom store |
+| Parquet export/import | Easy | Column subset, time-travel export |
+| CSV import | Easy | Column-to-attribute mapping |
+
+#### P4 — Distribution (Phase 6, scaffold only)
+
+Config records exist; no actual Raft implementation.
+
+| Gap | Difficulty | Blocker |
+|---|---|---|
+| Raft consensus | Hard | Needs `(std raft)` for leader election + log replication |
+| Read replicas | Hard | Full index copies, tail tx-log, apply locally |
+| Consistency levels | Medium | read-committed, read-latest, as-of on any node |
+| Automatic failover | Medium | Client transparent reconnection |
+
+#### P5 — Polish (Phase 7, mostly missing)
+
+| Gap | Difficulty | Notes |
+|---|---|---|
+| CLI tools | Medium | `serve`, `repl`, `import`, `export`, `backup`, `stats` |
+| Backup/restore | Medium | Copy LMDB + tx-log, point-in-time consistency |
+| Prometheus metrics | Easy | datoms_total, tx_duration, query_duration, cache_hit_ratio |
+| Excision (GDPR) | Hard | Permanent data removal from immutable store |
+| Datom garbage collection | Medium | Compaction of retracted datoms |
+| Online reindexing | Medium | Background rebuild with progress tracking |
+
+#### Not in Spec — Datomic Features We Don't Cover Yet
+
+These exist in Datomic but aren't in the design doc at all.
+
+| Feature | Difficulty | Notes |
+|---|---|---|
+| Attribute predicates / entity specs | Medium | `:db/ensure` for schema validation beyond types |
+| Composite tuples | Medium | Auto multi-attribute composite keys |
+| Fulltext search | Hard | Lucene-style indexing over string attributes |
+| `:db/ensure` enforcement | Medium | Entity spec validation at tx time |
+| Datomic Cloud ions | N/A | AWS-specific; out of scope |
+
+### Recommended Priority Order
+
+1. **LMDB persistence** — without it, jerboa-db is a toy
+2. **`not`/`or` clauses** — queries hit a wall without negation/disjunction
+3. **Collection/relation bindings** — needed for parameterized queries with sets
+4. **Missing predicates/functions** — straightforward, unblocks real queries
+5. **Lookup refs** — Datomic users rely on these heavily
+6. **HTTP server wire-up** — makes it usable from any language
+7. **DuckDB analytics** — the differentiator vs. other Datomic clones
+8. **Raft distribution** — last mile for production HA
 
 ---
 
