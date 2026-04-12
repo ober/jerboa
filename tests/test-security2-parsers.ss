@@ -44,7 +44,7 @@
     (error 'assert-equal msg expected actual)))
 
 (define (assert-error msg thunk)
-  (let ((got-error #f))
+  (let ([got-error #f])
     (guard (e [#t (set! got-error #t)])
       (thunk))
     (unless got-error
@@ -57,9 +57,9 @@
 
 (test "base64: valid encode/decode roundtrip"
   (lambda ()
-    (let* ((bv (string->utf8 "Hello, World!"))
-           (encoded (base64-encode bv))
-           (decoded (base64-decode encoded)))
+    (let* ([bv (string->utf8 "Hello, World!")]
+           [encoded (base64-encode bv)]
+           [decoded (base64-decode encoded)])
       (assert-equal "roundtrip" bv decoded))))
 
 (test "base64: invalid character rejected"
@@ -79,7 +79,7 @@
 
 (test "base64: empty string"
   (lambda ()
-    (let ((result (base64-decode "")))
+    (let ([result (base64-decode "")])
       (assert-equal "empty" (make-bytevector 0) result))))
 
 ;;; ============ CSV ============
@@ -87,8 +87,8 @@
 
 (test "csv: normal quoted field"
   (lambda ()
-    (let* ((port (open-input-string "\"hello\",world"))
-           (records (read-csv port)))
+    (let* ([port (open-input-string "\"hello\",world")]
+           [records (read-csv port)])
       (assert-equal "parsed" '(("hello" "world")) records))))
 
 (test "csv: unterminated quote rejected (strict)"
@@ -96,20 +96,20 @@
     (assert-error "should reject unterminated"
       (lambda ()
         (parameterize ((*csv-strict-quotes* #t))
-          (let ((port (open-input-string "\"hello")))
+          (let ([port (open-input-string "\"hello\")])
             (read-csv port)))))))
 
 (test "csv: unterminated quote accepted (permissive)"
   (lambda ()
     (parameterize ((*csv-strict-quotes* #f))
-      (let* ((port (open-input-string "\"hello"))
-             (records (read-csv port)))
+      (let* ([port (open-input-string "\"hello")]
+             [records (read-csv port)])
         (assert-true "got result" (list? records))))))
 
 (test "csv: escaped quotes"
   (lambda ()
-    (let* ((port (open-input-string "\"he\"\"llo\",world"))
-           (records (read-csv port)))
+    (let* ([port (open-input-string "\"he\"\"llo\",world")]
+           [records (read-csv port)])
       (assert-equal "escaped" '(("he\"llo" "world")) records))))
 
 ;;; ============ Hex ============
@@ -117,9 +117,9 @@
 
 (test "hex: valid encode/decode roundtrip"
   (lambda ()
-    (let* ((bv #vu8(1 2 255 0 128))
-           (encoded (hex-encode bv))
-           (decoded (hex-decode encoded)))
+    (let* ([bv #vu8(1 2 255 0 128)]
+           [encoded (hex-encode bv)]
+           [decoded (hex-decode encoded)])
       (assert-equal "roundtrip" bv decoded))))
 
 (test "hex: odd-length rejected"
@@ -139,7 +139,7 @@
 
 (test "hex: empty string"
   (lambda ()
-    (let ((result (hex-decode "")))
+    (let ([result (hex-decode "")])
       (assert-equal "empty" (make-bytevector 0) result))))
 
 ;;; ============ JSON ============
@@ -147,12 +147,12 @@
 
 (test "json: normal parse"
   (lambda ()
-    (let ((obj (string->json-object "{\"key\":\"value\"}")))
+    (let ([obj (string->json-object "{\"key\":\"value\"}")])
       (assert-true "is hashtable" (hashtable? obj)))))
 
 (test "json: array parse"
   (lambda ()
-    (let ((arr (string->json-object "[1,2,3]")))
+    (let ([arr (string->json-object "[1,2,3]")])
       (assert-equal "array" '(1 2 3) arr))))
 
 (test "json: depth limit exceeded"
@@ -169,7 +169,7 @@
 (test "json: depth limit - valid depth passes"
   (lambda ()
     (parameterize ((*json-max-depth* 10))
-      (let ((result (string->json-object "[[1]]")))
+      (let ([result (string->json-object "[[1]]")])
         (assert-true "parsed" (list? result))))))
 
 (test "json: string length limit"
@@ -185,21 +185,21 @@
 
 (test "safe-printf: no directive processing"
   (lambda ()
-    (let ((port (open-output-string)))
+    (let ([port (open-output-string)])
       (parameterize ((current-output-port port))
         (safe-printf "hello ~a world"))
       (assert-equal "literal" "hello ~a world" (get-output-string port)))))
 
 (test "safe-printf: with extra args"
   (lambda ()
-    (let ((port (open-output-string)))
+    (let ([port (open-output-string)])
       (parameterize ((current-output-port port))
         (safe-printf "value: " 42))
       (assert-equal "concat" "value: 42" (get-output-string port)))))
 
 (test "safe-fprintf: to port"
   (lambda ()
-    (let ((port (open-output-string)))
+    (let ([port (open-output-string)])
       (safe-fprintf port "~a test ~s" " extra")
       (assert-equal "literal" "~a test ~s extra" (get-output-string port)))))
 
@@ -208,7 +208,7 @@
 
 (test "reader: normal s-expression"
   (lambda ()
-    (let ((result (jerboa-read-string "(+ 1 2)")))
+    (let ([result (jerboa-read-string "(+ 1 2)")])
       (assert-equal "parsed" '((+ 1 2)) result))))
 
 (test "reader: depth limit exceeded"
@@ -225,7 +225,7 @@
 (test "reader: depth limit - valid depth passes"
   (lambda ()
     (parameterize ((*max-read-depth* 10))
-      (let ((result (jerboa-read-string "((x))")))
+      (let ([result (jerboa-read-string "((x))")])
         (assert-true "parsed" (list? result))))))
 
 (test "reader: block comment depth limit"
@@ -239,7 +239,7 @@
 
 (test "reader: normal block comment"
   (lambda ()
-    (let ((result (jerboa-read-string "#| comment |# 42")))
+    (let ([result (jerboa-read-string "#| comment |# 42")])
       (assert-equal "after comment" '(42) result))))
 
 ;;; ============ XML ============
@@ -247,22 +247,22 @@
 
 (test "xml: normal serialization"
   (lambda ()
-    (let ((port (open-output-string)))
+    (let ([port (open-output-string)])
       (write-xml '(div (p "hello")) port)
       (assert-true "has content" (> (string-length (get-output-string port)) 0)))))
 
 (test "xml: depth limit exceeded"
   (lambda ()
     ;; Build a deeply nested SXML tree
-    (let ((deep-tree
-            (let loop ((depth 0) (inner "leaf"))
+    (let ([deep-tree
+            (let loop ([depth 0] [inner "leaf"])
               (if (>= depth 600)
                 inner
-                (loop (+ depth 1) (list 'div inner))))))
+                (loop (+ depth 1) (list 'div inner))))])
       (assert-error "should reject deep tree"
         (lambda ()
           (parameterize ((*sxml-max-depth* 100))
-            (let ((port (open-output-string)))
+            (let ([port (open-output-string)])
               (write-xml deep-tree port))))))))
 
 ;;; ============ Schema ============
@@ -281,8 +281,8 @@
 
 (test "dns: encode/decode name roundtrip"
   (lambda ()
-    (let* ((encoded (dns-encode-name "www.example.com"))
-           (decoded (dns-decode-name encoded 0)))
+    (let* ([encoded (dns-encode-name "www.example.com")]
+           [decoded (dns-decode-name encoded 0)])
       (assert-equal "name" "www.example.com" (car decoded)))))
 
 (test "dns: decode response too short"
@@ -308,10 +308,10 @@
 
 (test "ws: encode/decode roundtrip"
   (lambda ()
-    (let* ((payload (string->utf8 "hello"))
-           (frame (ws-text-frame payload))
-           (encoded (ws-frame-encode frame))
-           (decoded (ws-frame-decode encoded)))
+    (let* ([payload (string->utf8 "hello")]
+           [frame (ws-text-frame payload)]
+           [encoded (ws-frame-encode frame)]
+           [decoded (ws-frame-decode encoded)])
       (assert-equal "payload" payload (ws-frame-payload decoded)))))
 
 (test "ws: too short for header"
@@ -337,7 +337,7 @@
 
 (test "pregexp: normal match"
   (lambda ()
-    (let ((result (pregexp-match "hello" "hello world")))
+    (let ([result (pregexp-match "hello" "hello world")])
       (assert-true "matched" (and result (string=? (car result) "hello"))))))
 
 (test "pregexp: backtracking limit"
@@ -350,7 +350,7 @@
 
 (test "pregexp: normal pattern within budget"
   (lambda ()
-    (let ((result (pregexp-match "a+" "aaa")))
+    (let ([result (pregexp-match "a+" "aaa")])
       (assert-true "matched" (and result (string=? (car result) "aaa"))))))
 
 ;;; ============ Summary ============

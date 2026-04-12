@@ -234,41 +234,41 @@
 
 ;; 42g. for — side-effecting iteration
 (let ([result '()])
-  (for ((x (in-list '(1 2 3))))
+  (for ([x (in-list '(1 2 3))])
     (set! result (cons (* x x) result)))
   (check result => '(9 4 1)))
 
 ;; 42h. for/collect — collect results
-(check (for/collect ((x (in-list '(1 2 3 4 5))))
+(check (for/collect ([x (in-list '(1 2 3 4 5))])
          (* x x))
        => '(1 4 9 16 25))
 
 ;; 42i. for/collect with two iterators
-(check (for/collect ((x (in-list '(1 2 3)))
-                     (y (in-list '(10 20 30))))
+(check (for/collect ([x (in-list '(1 2 3))]
+                     [y (in-list '(10 20 30))])
          (+ x y))
        => '(11 22 33))
 
 ;; 42j. for/fold — accumulate
-(check (for/fold ((acc 0)) ((x (in-list '(1 2 3 4 5))))
+(check (for/fold ([acc 0]) ([x (in-list '(1 2 3 4 5))])
          (+ acc x))
        => 15)
 
 ;; 42k. for/or — first truthy
-(check (for/or ((x (in-list '(1 2 3 4 5))))
+(check (for/or ([x (in-list '(1 2 3 4 5))])
          (and (> x 3) x))
        => 4)
 
 ;; 42l. for/and — all truthy
-(check (for/and ((x (in-list '(2 4 6 8))))
+(check (for/and ([x (in-list '(2 4 6 8))])
          (even? x))
        => #t)
-(check (for/and ((x (in-list '(2 4 5 8))))
+(check (for/and ([x (in-list '(2 4 5 8))])
          (even? x))
        => #f)
 
 ;; 42m. for with in-range
-(check (for/collect ((i (in-range 5)))
+(check (for/collect ([i (in-range 5)])
          (* i i))
        => '(0 1 4 9 16))
 

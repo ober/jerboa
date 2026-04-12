@@ -126,11 +126,11 @@
 
 (bench "for/collect (range 100)" 10000
   (lambda ()
-    (for/collect ((x (in-range 100))) (* x x))))
+    (for/collect ([x (in-range 100)]) (* x x))))
 
 (bench "for/fold (sum range 100)" 100000
   (lambda ()
-    (for/fold ((sum 0)) ((x (in-range 100))) (+ sum x))))
+    (for/fold ([sum 0]) ([x (in-range 100)]) (+ sum x))))
 
 ;; --- Struct operations ---
 

@@ -60,9 +60,9 @@
 ;; ========== #4 Iterator ==========
 (printf "  #4 iter...~n")
 (import (std iter))
-(check (for/collect ((x (in-range 5))) (* x x)) => '(0 1 4 9 16))
-(check (for/fold ((sum 0)) ((x (in-list '(1 2 3 4)))) (+ sum x)) => 10)
-(check-true (list? (for/collect ((c (in-string "abc"))) c)))
+(check (for/collect ([x (in-range 5)]) (* x x)) => '(0 1 4 9 16))
+(check (for/fold ([sum 0]) ([x (in-list '(1 2 3 4))]) (+ sum x)) => 10)
+(check-true (list? (for/collect ([c (in-string "abc")]) c)))
 
 ;; ========== #5 SRFI-13 ==========
 (printf "  #5 SRFI-13...~n")

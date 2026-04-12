@@ -133,7 +133,7 @@
   => '(("msg" . "hello\nworld")))
 
 (test "empty value"
-  (let ((result (yaml-load-string "key:")))
+  (let ([result (yaml-load-string "key:")])
     (and (pair? result)
          (string=? (caar result) "key")
          (eq? (cdar result) (void))))

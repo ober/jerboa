@@ -225,8 +225,8 @@
 (chk (when-let (x #f) 42) => (void))
 (chk (if-let (x 10) (* x 2) 0) => 20)
 (chk (if-let (x #f) 42 99) => 99)
-(chk (let ((acc 0)) (dotimes (i 4) (set! acc (+ acc i))) acc) => 6)
-(chk (let ((acc 0)) (dotimes (i 0) (set! acc (+ acc 1))) acc) => 0)
+(chk (let ([acc 0]) (dotimes (i 4) (set! acc (+ acc i))) acc) => 6)
+(chk (let ([acc 0]) (dotimes (i 0) (set! acc (+ acc 1))) acc) => 0)
 
 (display "Expanded stdlib tests: ")
 (display pass-count)

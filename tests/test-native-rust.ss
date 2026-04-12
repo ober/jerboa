@@ -37,7 +37,7 @@
     (error 'assert-equal msg expected actual)))
 
 (define (assert-error msg thunk)
-  (let ((got-error #f))
+  (let ([got-error #f])
     (guard (e [#t (set! got-error #t)])
       (thunk))
     (unless got-error

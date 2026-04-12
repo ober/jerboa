@@ -117,5 +117,5 @@
 						   p))) #'(param ...) #'(var ...) )])
 		     #'(let ([var val] ...)
 			 (let ([result (func var ...)])
-			   (let ((var val2) ...)
+			   (let ([var val2] ...)
 			     body ...)))))])))

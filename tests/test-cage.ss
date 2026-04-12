@@ -27,7 +27,7 @@
 (displayln "--- config construction ---")
 
 ;; Basic config
-(let ((cfg (make-cage-config 'root: "/tmp")))
+(let ([cfg (make-cage-config 'root: "/tmp")])
   (assert! (cage-config? cfg))
   (assert! (string=? (cage-config-root cfg) "/tmp"))
   (assert! (null? (cage-config-read-only cfg)))
@@ -39,14 +39,14 @@
   (displayln "  basic config: ok"))
 
 ;; Full config
-(let ((cfg (make-cage-config
+(let ([cfg (make-cage-config
              'root: "/home/user/project"
              'read-only: '("/usr/share/man")
              'read-write: '("/var/data")
              'execute: '("/opt/bin")
              'network: #f
              'system-paths: #f
-             'temp-dir: "/var/tmp")))
+             'temp-dir: "/var/tmp")])
   (assert! (string=? "/home/user/project" (cage-config-root cfg)))
   (assert! (equal? '("/usr/share/man") (cage-config-read-only cfg)))
   (assert! (equal? '("/var/data") (cage-config-read-write cfg)))
@@ -57,7 +57,7 @@
   (displayln "  full config: ok"))
 
 ;; Missing 'root: raises error
-(let ((got-error (not #t)))
+(let ([got-error (not #t)])
   (try
     (make-cage-config 'read-only: '("/tmp"))
     (catch (e) (set! got-error #t)))
@@ -65,7 +65,7 @@
   (displayln "  missing root error: ok"))
 
 ;; Unknown keyword raises error
-(let ((got-error (not #t)))
+(let ([got-error (not #t)])
   (try
     (make-cage-config 'root: "/tmp" 'bogus: 42)
     (catch (e) (set! got-error #t)))
@@ -90,7 +90,7 @@
 
 (when (landlock-available?)
   ;; Create a temp directory for the cage root
-  (let ((cage-dir "/tmp/jerboa-cage-test"))
+  (let ([cage-dir "/tmp/jerboa-cage-test"])
     ;; Setup
     (when (file-exists? cage-dir)
       (system (str "rm -rf " cage-dir)))
@@ -98,7 +98,7 @@
     (write-file-string (str cage-dir "/hello.txt") "hello from cage")
 
     ;; Fork and cage the child
-    (let ((pid (fork-process)))
+    (let ([pid (fork-process)])
       (cond
         ((= pid 0)
          ;; === CHILD ===
@@ -120,7 +120,7 @@
            (assert! (string? (cage-root)))
 
            ;; Can read file inside cage
-           (let ((content (read-file-string (str cage-dir "/hello.txt"))))
+           (let ([content (read-file-string (str cage-dir "/hello.txt"))])
              (assert! (string=? content "hello from cage")))
 
            ;; Can write inside cage
@@ -130,19 +130,19 @@
 
            ;; Cannot read outside cage (e.g. /etc/shadow)
            ;; Landlock should block this — we get a permission error
-           (let ((blocked (not #t)))
+           (let ([blocked (not #t)])
              (guard (exn (#t (set! blocked #t)))
                (read-file-string "/etc/shadow"))
              (assert! blocked))
 
            ;; Cannot write outside cage
-           (let ((blocked (not #t)))
+           (let ([blocked (not #t)])
              (guard (exn (#t (set! blocked #t)))
                (write-file-string "/etc/jerboa-cage-escape" "nope"))
              (assert! blocked))
 
            ;; Can still use /tmp (temp-dir)
-           (let ((tmp-file "/tmp/jerboa-cage-tmp-test"))
+           (let ([tmp-file "/tmp/jerboa-cage-tmp-test"])
              (write-file-string tmp-file "tmp works")
              (assert! (string=? (read-file-string tmp-file) "tmp works"))
              (delete-file tmp-file))
@@ -152,9 +152,9 @@
 
         (else
          ;; === PARENT ===
-         (let-values (((wpid status) (waitpid pid)))
-           (let ((exit-code (bitwise-arithmetic-shift-right
-                              (bitwise-and status #xFF00) 8)))
+         (let-values ([(wpid status) (waitpid pid)])
+           (let ([exit-code (bitwise-arithmetic-shift-right
+                              (bitwise-and status #xFF00) 8)])
              (if (= exit-code 0)
                (displayln "  cage! fork test: ok")
                (begin
@@ -173,7 +173,7 @@
 
 (when (capsicum-available?)
   ;; Create a temp directory for the cage root
-  (let ((cage-dir "/tmp/jerboa-cage-test-fb"))
+  (let ([cage-dir "/tmp/jerboa-cage-test-fb"])
     ;; Setup
     (when (file-exists? cage-dir)
       (system (str "rm -rf " cage-dir)))
@@ -181,7 +181,7 @@
     (write-file-string (str cage-dir "/hello.txt") "hello from capsicum cage")
 
     ;; Fork and cage the child
-    (let ((pid (fork-process)))
+    (let ([pid (fork-process)])
       (cond
         ((= pid 0)
          ;; === CHILD ===
@@ -206,7 +206,7 @@
            (assert! (capsicum-in-capability-mode?))
 
            ;; Cannot open new files from global namespace (cap_enter blocks this)
-           (let ((blocked (not #t)))
+           (let ([blocked (not #t)])
              (guard (exn (#t (set! blocked #t)))
                (open-input-file "/etc/passwd"))
              (assert! blocked))
@@ -216,9 +216,9 @@
 
         (else
          ;; === PARENT ===
-         (let-values (((wpid status) (waitpid pid)))
-           (let ((exit-code (bitwise-arithmetic-shift-right
-                              (bitwise-and status #xFF00) 8)))
+         (let-values ([(wpid status) (waitpid pid)])
+           (let ([exit-code (bitwise-arithmetic-shift-right
+                              (bitwise-and status #xFF00) 8)])
              (if (= exit-code 0)
                (displayln "  capsicum cage! fork test: ok")
                (begin
@@ -236,19 +236,19 @@
 (displayln "--- double cage prevention ---")
 
 (when (landlock-available?)
-  (let ((pid (fork-process)))
+  (let ([pid (fork-process)])
     (cond
       ((= pid 0)
        (guard (exn
                 (#t (display "CHILD ERROR: ")
                     (display-condition exn) (newline)
                     (exit 1)))
-         (let ((cage-dir "/tmp/jerboa-cage-test2"))
+         (let ([cage-dir "/tmp/jerboa-cage-test2"])
            (when (file-exists? cage-dir) (system (str "rm -rf " cage-dir)))
            (mkdir cage-dir)
            (cage! (make-cage-config 'root: cage-dir 'temp-dir: "/tmp"))
            ;; Second cage! should raise
-           (let ((got-error (not #t)))
+           (let ([got-error (not #t)])
              (try
                (cage! (make-cage-config 'root: cage-dir 'temp-dir: "/tmp"))
                (catch (e) (set! got-error #t)))
@@ -257,9 +257,9 @@
              (system (str "rm -rf " cage-dir))
              (exit 0)))))
       (else
-       (let-values (((wpid status) (waitpid pid)))
-         (let ((exit-code (bitwise-arithmetic-shift-right
-                            (bitwise-and status #xFF00) 8)))
+       (let-values ([(wpid status) (waitpid pid)])
+         (let ([exit-code (bitwise-arithmetic-shift-right
+                            (bitwise-and status #xFF00) 8)])
            (if (= exit-code 0)
              (displayln "  double cage test: ok")
              (begin
@@ -271,19 +271,19 @@
 
 ;; FreeBSD double-cage prevention
 (when (capsicum-available?)
-  (let ((pid (fork-process)))
+  (let ([pid (fork-process)])
     (cond
       ((= pid 0)
        (guard (exn
                 (#t (display "CHILD ERROR: ")
                     (display-condition exn) (newline)
                     (exit 1)))
-         (let ((cage-dir "/tmp/jerboa-cage-test2-fb"))
+         (let ([cage-dir "/tmp/jerboa-cage-test2-fb"])
            (when (file-exists? cage-dir) (system (str "rm -rf " cage-dir)))
            (mkdir cage-dir)
            (cage! (make-cage-config 'root: cage-dir 'temp-dir: "/tmp"))
            ;; Second cage! should raise
-           (let ((got-error (not #t)))
+           (let ([got-error (not #t)])
              (try
                (cage! (make-cage-config 'root: cage-dir 'temp-dir: "/tmp"))
                (catch (e) (set! got-error #t)))
@@ -291,9 +291,9 @@
              (displayln "  FreeBSD double cage blocked: ok")
              (exit 0)))))
       (else
-       (let-values (((wpid status) (waitpid pid)))
-         (let ((exit-code (bitwise-arithmetic-shift-right
-                            (bitwise-and status #xFF00) 8)))
+       (let-values ([(wpid status) (waitpid pid)])
+         (let ([exit-code (bitwise-arithmetic-shift-right
+                            (bitwise-and status #xFF00) 8)])
            (if (= exit-code 0)
              (displayln "  FreeBSD double cage test: ok")
              (begin

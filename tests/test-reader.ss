@@ -9,8 +9,8 @@
 (define-syntax check
   (syntax-rules (=>)
     [(_ expr => expected)
-     (let ((result expr)
-           (exp expected))
+     (let ([result expr]
+           [exp expected])
        (if (equal? result exp)
          (set! pass-count (+ pass-count 1))
          (begin
@@ -72,7 +72,7 @@
 
 ;;; Keywords
 (check (symbol? (read1 "name:")) => #t)
-(check (let ((s (symbol->string (read1 "name:"))))
+(check (let ([s (symbol->string (read1 "name:"))])
          (and (>= (string-length s) 2)
               (string=? (substring s 0 2) "#:")))
        => #t)
@@ -122,7 +122,7 @@
 (check (jerboa-read-string "(a) (b)") => '((a) (b)))
 
 ;;; Source locations (when path is provided)
-(let ((result (car (jerboa-read-string "hello" "test.ss"))))
+(let ([result (car (jerboa-read-string "hello" "test.ss"))])
   (check (annotated-datum? result) => #t)
   (check (annotated-datum-value result) => 'hello)
   (check (source-location-path (annotated-datum-source result)) => "test.ss")

@@ -13,8 +13,8 @@
 (define-syntax check
   (syntax-rules (=>)
     [(_ expr => expected)
-     (let ((result expr)
-           (exp expected))
+     (let ([result expr]
+           [exp expected])
        (if (equal? result exp)
          (set! pass-count (+ pass-count 1))
          (begin
@@ -30,7 +30,7 @@
 (define-syntax check-pred
   (syntax-rules ()
     [(_ pred expr)
-     (let ((result expr))
+     (let ([result expr])
        (if (pred result)
          (set! pass-count (+ pass-count 1))
          (begin
