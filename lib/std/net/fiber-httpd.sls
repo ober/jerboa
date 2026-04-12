@@ -339,7 +339,8 @@
             (immutable listen-port)
             (immutable runtime)
             (immutable poller)
-            (mutable running?))
+            (mutable running?)
+            (mutable accept-fiber))
     (sealed #t))
 
   ;; Connection handler: one fiber per connection, keep-alive loop
@@ -362,14 +363,15 @@
     (fiber-tcp-close fd))
 
   ;; Accept loop
-  (define (accept-loop listen-fd poller handler)
-    (let loop ()
-      (guard (exn [#t (void)])  ;; stop on error (e.g., fd closed)
-        (let ([client-fd (fiber-tcp-accept listen-fd poller)])
-          (fiber-spawn*
-            (lambda () (handle-connection client-fd poller handler))
-            "http-conn")
-          (loop)))))
+  (define (accept-loop listen-fd poller handler server)
+    (guard (exn [#t (void)])  ;; catch cancellation and all errors
+      (let loop ()
+        (when (fiber-httpd-running? server)
+          (let ([client-fd (fiber-tcp-accept listen-fd poller)])
+            (fiber-spawn*
+              (lambda () (handle-connection client-fd poller handler))
+              "http-conn")
+            (loop))))))
 
   ;; Start the server
   (define (fiber-httpd-start port handler)
@@ -377,19 +379,28 @@
            [poller (make-io-poller rt)])
       (io-poller-start! poller)
       (let-values ([(listen-fd listen-port) (fiber-tcp-listen "0.0.0.0" port)])
-        (let ([srv (make-fiber-httpd listen-fd listen-port rt poller #t)])
+        (let ([srv (make-fiber-httpd listen-fd listen-port rt poller #t #f)])
           ;; Spawn accept loop
-          (fiber-spawn rt
-            (lambda () (accept-loop listen-fd poller handler))
-            "httpd-accept")
+          (let ([af (fiber-spawn rt
+                      (lambda () (accept-loop listen-fd poller handler srv))
+                      "httpd-accept")])
+            (fiber-httpd-accept-fiber-set! srv af))
           ;; Run in background thread so caller gets the server handle back
           (fork-thread (lambda () (fiber-runtime-run! rt)))
           srv))))
 
   (define (fiber-httpd-stop! srv)
     (fiber-httpd-running?-set! srv #f)
+    ;; Cancel the accept fiber — this wakes it from its parked state
+    (let ([af (fiber-httpd-accept-fiber srv)])
+      (when af (fiber-cancel! af)))
+    ;; Close listen fd
     (fiber-tcp-close (fiber-httpd-listen-fd srv))
+    ;; Stop runtime — marks running? = #f and wakes run queue
+    (fiber-runtime-stop! (fiber-httpd-runtime srv))
+    ;; Stop poller — shuts down the poller thread
     (io-poller-stop! (fiber-httpd-poller srv))
-    (fiber-runtime-stop! (fiber-httpd-runtime srv)))
+    ;; Give background thread time to exit
+    (sleep (make-time 'time-duration 150000000 0)))
 
 ) ;; end library

@@ -35,7 +35,7 @@
      (unless val (error 'assert msg))]))
 
 ;; Helper: send raw HTTP request over a fiber-aware TCP connection
-;; and read the full response.
+;; and read the full response. Reads once (sufficient for small responses).
 (define (http-request-raw fd poller method path body)
   (let* ([body-bv (if body
                     (string->bytevector body (make-transcoder (utf-8-codec)))
@@ -56,19 +56,14 @@
     ;; Send body if present
     (when body-bv
       (fiber-tcp-write fd body-bv (bytevector-length body-bv) poller))
-    ;; Read response
+    ;; Read response — single read for small responses, then done
     (let ([buf (make-bytevector 16384)])
-      (let loop ([total 0])
-        (let ([n (fiber-tcp-read fd buf (- 16384 total) poller)])
-          (cond
-            [(<= n 0)
-             ;; EOF — return what we have
-             (bytevector->string
-               (let ([b (make-bytevector total)])
-                 (bytevector-copy! buf 0 b 0 total) b)
-               (make-transcoder (utf-8-codec)))]
-            [else
-             (loop (+ total n))]))))))
+      (let ([n (fiber-tcp-read fd buf 16384 poller)])
+        (if (<= n 0) ""
+          (bytevector->string
+            (let ([b (make-bytevector n)])
+              (bytevector-copy! buf 0 b 0 n) b)
+            (make-transcoder (utf-8-codec))))))))
 
 ;; Helper: parse response status code from raw response
 (define (response-status-code resp)
