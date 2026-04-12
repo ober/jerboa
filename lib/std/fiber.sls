@@ -78,6 +78,7 @@
     fiber-channel-try-send
     fiber-channel-try-recv
     fiber-channel-close
+    fiber-channel-closed?
 
     current-fiber-runtime
     current-fiber
