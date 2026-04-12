@@ -46,6 +46,7 @@
     ;; Router
     make-router router-add! router-dispatch
     route-get route-post route-put route-delete
+    route-param current-route-params
 
     ;; Metrics / production
     fiber-httpd-metrics
@@ -290,12 +291,14 @@
 
   (define (status-text code)
     (case code
-      [(200) "OK"] [(201) "Created"] [(204) "No Content"]
+      [(200) "OK"] [(201) "Created"] [(202) "Accepted"]
+      [(204) "No Content"]
       [(301) "Moved Permanently"] [(302) "Found"] [(304) "Not Modified"]
       [(400) "Bad Request"] [(401) "Unauthorized"] [(403) "Forbidden"]
       [(404) "Not Found"] [(405) "Method Not Allowed"]
+      [(409) "Conflict"]
       [(500) "Internal Server Error"] [(502) "Bad Gateway"]
-      [(503) "Service Unavailable"]
+      [(503) "Service Unavailable"] [(504) "Gateway Timeout"]
       [else "Unknown"]))
 
   (define (write-response fd poller resp)
@@ -339,10 +342,47 @@
     (router-routes-set! r
       (cons (list method path handler) (router-routes r))))
 
-  ;; Simple prefix/exact matching with :param support
-  (define (path-match? pattern path)
-    (or (string=? pattern path)
-        (string=? pattern "*")))
+  ;; Path parameter matching: /hooks/:type matches /hooks/payment
+  ;; Returns alist of (name . value) on match, #f on mismatch.
+
+  (define (split-path-segments p)
+    (let ([segs (split-on-slash p)])
+      (if (and (not (null? segs)) (string=? (car segs) ""))
+        (cdr segs) segs)))
+
+  (define (split-on-slash s)
+    (let loop ([i 0] [start 0] [acc '()])
+      (cond
+        [(= i (string-length s))
+         (reverse (cons (substring s start i) acc))]
+        [(char=? (string-ref s i) #\/)
+         (loop (+ i 1) (+ i 1) (cons (substring s start i) acc))]
+        [else (loop (+ i 1) start acc)])))
+
+  (define (match-path-pattern pattern path)
+    (if (string=? pattern "*")
+      '()
+      (let ([pat-segs (split-path-segments pattern)]
+            [path-segs (split-path-segments path)])
+        (and (= (length pat-segs) (length path-segs))
+             (let loop ([ps pat-segs] [xs path-segs] [params '()])
+               (cond
+                 [(null? ps) (reverse params)]
+                 [(and (> (string-length (car ps)) 0)
+                       (char=? (string-ref (car ps) 0) #\:))
+                  (loop (cdr ps) (cdr xs)
+                    (cons (cons (substring (car ps) 1 (string-length (car ps)))
+                                (car xs))
+                          params))]
+                 [(string=? (car ps) (car xs))
+                  (loop (cdr ps) (cdr xs) params)]
+                 [else #f]))))))
+
+  (define current-route-params (make-parameter '()))
+
+  (define (route-param req name)
+    (let ([entry (assoc name (current-route-params))])
+      (and entry (cdr entry))))
 
   (define (router-dispatch r req)
     (let ([method (request-method req)]
@@ -350,10 +390,12 @@
       (let loop ([routes (router-routes r)])
         (if (null? routes)
           (respond-text 404 "Not Found")
-          (let ([route (car routes)])
-            (if (and (string=? (car route) method)
-                     (path-match? (cadr route) path))
-              ((caddr route) req)
+          (let* ([route (car routes)]
+                 [params (and (string=? (car route) method)
+                              (match-path-pattern (cadr route) path))])
+            (if params
+              (parameterize ([current-route-params params])
+                ((caddr route) req))
               (loop (cdr routes))))))))
 
   ;; Convenience route adders
