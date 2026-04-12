@@ -73,6 +73,9 @@
     hash-set set set?
     disj
     union intersection difference subset? superset?
+    ;; ---- Set relational ops (clojure.set) ----
+    set-select set-project set-rename set-index set-join
+    map-invert
 
     ;; ---- Constructors (aliases) ----
     hash-map vec list* vector*
@@ -1078,6 +1081,121 @@
       [else (persistent-set-subset? s1 s2)]))
 
   (define (superset? s1 s2) (subset? s2 s1))
+
+  ;; =========================================================================
+  ;; Set relational operations (clojure.set)
+  ;;
+  ;; These operate on "relations" — sets of maps (persistent sets of
+  ;; persistent maps). Like Clojure, they provide a tiny relational
+  ;; algebra over in-memory data.
+  ;; =========================================================================
+
+  ;; set-select — return subset where (pred map) is true
+  ;; Like clojure.set/select: (select even? #{1 2 3 4}) => #{2 4}
+  (define (set-select pred rel)
+    (let ([result pset-empty])
+      (for-each (lambda (item)
+                  (when (pred item)
+                    (set! result (persistent-set-add result item))))
+                (persistent-set->list rel))
+      result))
+
+  ;; set-project — project a relation onto a subset of keys
+  ;; Like clojure.set/project: return set of maps with only given keys
+  (define (set-project rel ks)
+    (let ([result pset-empty])
+      (for-each (lambda (m)
+                  (let ([projected (select-keys m ks)])
+                    (set! result (persistent-set-add result projected))))
+                (persistent-set->list rel))
+      result))
+
+  ;; set-rename — rename keys in all maps of a relation
+  ;; kmap: alist or pmap of old-key → new-key
+  (define (set-rename rel kmap)
+    (let ([pairs (cond
+                   [(persistent-map? kmap) (persistent-map->list kmap)]
+                   [(list? kmap) kmap]
+                   [else (error 'set-rename "kmap must be a map or alist" kmap)])]
+          [result pset-empty])
+      (for-each (lambda (m)
+                  (let ([new-m (fold-left
+                                 (lambda (acc pair)
+                                   (let ([old-k (car pair)] [new-k (cdr pair)])
+                                     (if (contains? acc old-k)
+                                       (assoc (dissoc acc old-k) new-k (get acc old-k))
+                                       acc)))
+                                 m pairs)])
+                    (set! result (persistent-set-add result new-m))))
+                (persistent-set->list rel))
+      result))
+
+  ;; set-index — index a relation by a set of keys
+  ;; Returns a Chez hashtable (using =?/hash for key equality)
+  ;; mapping key-map → set of matching rows.
+  ;; Note: uses a mutable hashtable because persistent maps can't be
+  ;; used as keys in other persistent maps (equal? doesn't work on them).
+  (define (set-index rel ks)
+    (let ([ht (make-hashtable hash =?)])
+      (for-each
+        (lambda (m)
+          (let ([key-map (select-keys m ks)])
+            (let ([existing (hashtable-ref ht key-map #f)])
+              (hashtable-set! ht key-map
+                (if existing
+                  (persistent-set-add existing m)
+                  (persistent-set-add pset-empty m))))))
+        (persistent-set->list rel))
+      ht))
+
+  ;; set-join — natural join of two relations
+  ;; Joins on shared keys. Like clojure.set/join.
+  (define set-join
+    (case-lambda
+      [(rel1 rel2)
+       ;; Natural join: find shared keys from first elements
+       (if (or (zero? (persistent-set-size rel1))
+               (zero? (persistent-set-size rel2)))
+         pset-empty
+         (let* ([m1 (car (persistent-set->list rel1))]
+                [m2 (car (persistent-set->list rel2))]
+                [k1 (keys m1)]
+                [k2 (keys m2)]
+                [shared (filter (lambda (k) (contains? m2 k)) k1)]
+                [idx (set-index rel2 shared)]
+                [result pset-empty])
+           (for-each
+             (lambda (row1)
+               (let* ([key-map (select-keys row1 shared)]
+                      [matches (hashtable-ref idx key-map #f)])
+                 (when matches
+                   (for-each
+                     (lambda (row2)
+                       (set! result
+                         (persistent-set-add result (merge row1 row2))))
+                     (persistent-set->list matches)))))
+             (persistent-set->list rel1))
+           result))]
+      [(rel1 rel2 km)
+       ;; Join with key mapping: km maps keys in rel1 to keys in rel2
+       (let* ([pairs (cond
+                       [(persistent-map? km) (persistent-map->list km)]
+                       [(list? km) km]
+                       [else (error 'set-join "km must be a map or alist" km)])]
+              [renamed (set-rename rel2
+                         (map (lambda (p) (cons (cdr p) (car p))) pairs))])
+         (set-join rel1 renamed))]))
+
+  ;; map-invert — swap keys and values in a map
+  (define (map-invert m)
+    (let ([entries (cond
+                     [(persistent-map? m) (persistent-map->list m)]
+                     [(and (pair? m) (pair? (car m))) m]
+                     [else (error 'map-invert "not a map" m)])])
+      (fold-left (lambda (acc pair)
+                   (assoc acc (cdr pair) (car pair)))
+                 pmap-empty
+                 entries)))
 
   ;; =========================================================================
   ;; Map-convenience stragglers — Clojure's `merge-with`, `zipmap`,
