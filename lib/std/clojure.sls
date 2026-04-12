@@ -55,12 +55,15 @@
 
     ;; ---- Sugar macros ----
     doto
+    loop recur
+    require
 
     ;; ---- Destructuring (Clojure-style) ----
     dlet dfn
 
     ;; ---- Dynamic vars (Clojure-style binding) ----
     def-dynamic binding
+    bound-fn capture-dynamic-bindings apply-dynamic-bindings
 
     ;; ---- Structured exceptions (ex-info / ex-data) ----
     ex-info ex-info? ex-data ex-message ex-cause
@@ -215,10 +218,10 @@
       (define (walk-rtd r tail)
         (let* ([names (record-type-field-names r)]
                [n (vector-length names)])
-          (let loop ([i (- n 1)] [out tail])
+          (let lp ([i (- n 1)] [out tail])
             (if (< i 0)
                 out
-                (loop (- i 1)
+                (lp (- i 1)
                       (cons (cons (vector-ref names i)
                                   (record-accessor r i))
                             out))))))
@@ -242,12 +245,12 @@
              [else
               (let* ([names (record-type-field-names r)]
                      [n (vector-length names)])
-                (let loop ([i 0])
+                (let lp ([i 0])
                   (cond
                     [(= i n) (walk (record-type-parent r))]
                     [(eq? (vector-ref names i) name)
                      ((record-accessor r i) rec)]
-                    [else (loop (+ i 1))])))]))])))
+                    [else (lp (+ i 1))])))]))])))
 
   ;; Check whether a record has a field with the given name.
   (define (%record-has-field? rec key)
@@ -259,11 +262,11 @@
                [else
                 (let* ([names (record-type-field-names r)]
                        [n (vector-length names)])
-                  (let loop ([i 0])
+                  (let lp ([i 0])
                     (cond
                       [(= i n) (walk (record-type-parent r))]
                       [(eq? (vector-ref names i) name) #t]
-                      [else (loop (+ i 1))])))])))))
+                      [else (lp (+ i 1))])))])))))
 
   ;; Ordered list of a record's field name symbols (parent first).
   (define (%record-keys rec)
@@ -280,11 +283,11 @@
   ;; Field name symbols become the map keys; values become the
   ;; map values. Inherited fields are included.
   (define (%record->pmap rec)
-    (let loop ([fields (%record-fields-all rec)] [m pmap-empty])
+    (let lp ([fields (%record-fields-all rec)] [m pmap-empty])
       (if (null? fields)
           m
           (let ([pair (car fields)])
-            (loop (cdr fields)
+            (lp (cdr fields)
                   (persistent-map-set m (car pair) ((cdr pair) rec)))))))
 
   ;; =========================================================================
@@ -393,34 +396,34 @@
   (define (assoc coll key val . more)
     (cond
       [(persistent-map? coll)
-       (let loop ([m (persistent-map-set coll key val)] [rest more])
+       (let lp ([m (persistent-map-set coll key val)] [rest more])
          (cond
            [(null? rest) m]
            [(null? (cdr rest))
             (error 'assoc "odd number of key/value arguments" more)]
            [else
-            (loop (persistent-map-set m (car rest) (cadr rest))
+            (lp (persistent-map-set m (car rest) (cadr rest))
                   (cddr rest))]))]
       [(concurrent-hash? coll)
        (concurrent-hash-put! coll key val)
-       (let loop ([rest more])
+       (let lp ([rest more])
          (cond
            [(null? rest) coll]
            [(null? (cdr rest))
             (error 'assoc "odd number of key/value arguments" more)]
            [else
             (concurrent-hash-put! coll (car rest) (cadr rest))
-            (loop (cddr rest))]))]
+            (lp (cddr rest))]))]
       [(hash-table? coll)
        (hash-put! coll key val)
-       (let loop ([rest more])
+       (let lp ([rest more])
          (cond
            [(null? rest) coll]
            [(null? (cdr rest))
             (error 'assoc "odd number of key/value arguments" more)]
            [else
             (hash-put! coll (car rest) (cadr rest))
-            (loop (cddr rest))]))]
+            (lp (cddr rest))]))]
       ;; Plain user record — escape to a persistent map containing
       ;; all the record's fields plus the new bindings. This loses
       ;; the record type information but matches Clojure's documented
@@ -436,10 +439,10 @@
   (define (dissoc coll . ks)
     (cond
       [(persistent-map? coll)
-       (let loop ([m coll] [rest ks])
+       (let lp ([m coll] [rest ks])
          (if (null? rest)
              m
-             (loop (persistent-map-delete m (car rest)) (cdr rest))))]
+             (lp (persistent-map-delete m (car rest)) (cdr rest))))]
       [(concurrent-hash? coll)
        (for-each (lambda (k) (concurrent-hash-remove! coll k)) ks)
        coll]
@@ -469,17 +472,17 @@
     ;; Return a new map containing only the given keys
     (cond
       [(persistent-map? coll)
-       (let loop ([m pmap-empty] [rest ks])
+       (let lp ([m pmap-empty] [rest ks])
          (if (null? rest)
              m
              (let ([k (car rest)])
                (if (persistent-map-has? coll k)
-                   (loop (persistent-map-set m k (persistent-map-ref coll k))
+                   (lp (persistent-map-set m k (persistent-map-ref coll k))
                          (cdr rest))
-                   (loop m (cdr rest))))))]
+                   (lp m (cdr rest))))))]
       [else
        ;; Fall back to generic via assoc
-       (let loop ([acc (cond [(concurrent-hash? coll) (make-concurrent-hash)]
+       (let lp ([acc (cond [(concurrent-hash? coll) (make-concurrent-hash)]
                              [else (make-hash-table)])]
                   [rest ks])
          (if (null? rest)
@@ -487,7 +490,7 @@
              (let ([k (car rest)])
                (when (contains? coll k)
                  (assoc acc k (get coll k)))
-               (loop acc (cdr rest)))))]))
+               (lp acc (cdr rest)))))]))
 
   ;; =========================================================================
   ;; Keys and vals (polymorphic)
@@ -520,10 +523,10 @@
       [(null? maps) #f]                ;; Clojure returns nil for no args
       [(null? (cdr maps)) (car maps)]
       [(persistent-map? (car maps))
-       (let loop ([acc (car maps)] [rest (cdr maps)])
+       (let lp ([acc (car maps)] [rest (cdr maps)])
          (if (null? rest)
              acc
-             (loop (persistent-map-merge acc (car rest)) (cdr rest))))]
+             (lp (persistent-map-merge acc (car rest)) (cdr rest))))]
       [(concurrent-hash? (car maps))
        (let ([base (car maps)])
          (for-each (lambda (m) (concurrent-hash-merge! base m)) (cdr maps))
@@ -572,8 +575,8 @@
        (let ([n (vector-length coll)])
          (if (zero? n)
              '()
-             (let loop ([i (- n 1)] [acc '()])
-               (if (= i 0) acc (loop (- i 1) (cons (vector-ref coll i) acc))))))]
+             (let lp ([i (- n 1)] [acc '()])
+               (if (= i 0) acc (lp (- i 1) (cons (vector-ref coll i) acc))))))]
       [else (error 'rest "unsupported collection type" coll)]))
 
   (define (next coll)
@@ -588,8 +591,8 @@
     (cond
       [(null? coll) #f]
       [(pair? coll)
-       (let loop ([c coll])
-         (if (null? (cdr c)) (car c) (loop (cdr c))))]
+       (let lp ([c coll])
+         (if (null? (cdr c)) (car c) (lp (cdr c))))]
       [(sorted-set? coll) (sorted-set-max coll)]
       [(vector? coll)
        (let ([n (vector-length coll)])
@@ -608,45 +611,45 @@
        ;; Empty coll is assumed to be a list — prepend
        (if (null? xs) '() (apply conj (list (car xs)) (cdr xs)))]
       [(pair? coll)
-       (let loop ([c coll] [rest xs])
-         (if (null? rest) c (loop (cons (car rest) c) (cdr rest))))]
+       (let lp ([c coll] [rest xs])
+         (if (null? rest) c (lp (cons (car rest) c) (cdr rest))))]
       [(vector? coll)
        ;; Build a new vector
        (list->vector (append (vector->list coll) xs))]
       [(persistent-vector? coll)
-       (let loop ([v coll] [rest xs])
+       (let lp ([v coll] [rest xs])
          (if (null? rest) v
-             (loop (persistent-vector-append v (car rest)) (cdr rest))))]
+             (lp (persistent-vector-append v (car rest)) (cdr rest))))]
       [(pqueue? coll)
        ;; NOTE: pqueue? is srfi-134's ideque predicate, which is a
        ;; superset of "queue" — any ideque passed in is treated as a
        ;; queue. This branch must precede the persistent-map? check
        ;; because ideques are records distinct from pmap, but we want
        ;; the polymorphism to be unambiguous.
-       (let loop ([q coll] [rest xs])
+       (let lp ([q coll] [rest xs])
          (if (null? rest) q
-             (loop (pqueue-conj q (car rest)) (cdr rest))))]
+             (lp (pqueue-conj q (car rest)) (cdr rest))))]
       [(persistent-map? coll)
        ;; Expect (k . v) pairs or (list k v)
-       (let loop ([m coll] [rest xs])
+       (let lp ([m coll] [rest xs])
          (if (null? rest)
              m
              (let ([entry (car rest)])
                (cond
                  [(pair? entry)
-                  (loop (persistent-map-set m (car entry)
+                  (lp (persistent-map-set m (car entry)
                            (if (pair? (cdr entry)) (cadr entry) (cdr entry)))
                         (cdr rest))]
                  [else
                   (error 'conj "cannot conj non-pair onto map" entry)]))))]
       [(persistent-set? coll)
-       (let loop ([s coll] [rest xs])
+       (let lp ([s coll] [rest xs])
          (if (null? rest) s
-             (loop (persistent-set-add s (car rest)) (cdr rest))))]
+             (lp (persistent-set-add s (car rest)) (cdr rest))))]
       [(sorted-set? coll)
-       (let loop ([s coll] [rest xs])
+       (let lp ([s coll] [rest xs])
          (if (null? rest) s
-             (loop (sorted-set-add s (car rest)) (cdr rest))))]
+             (lp (sorted-set-add s (car rest)) (cdr rest))))]
       [else (error 'conj "unsupported collection type" coll)]))
 
   ;; =========================================================================
@@ -705,12 +708,12 @@
        (cond
          [(null? coll) init]
          [(pair? coll)
-          (let loop ([acc init] [c coll])
-            (if (null? c) acc (loop (f acc (car c)) (cdr c))))]
+          (let lp ([acc init] [c coll])
+            (if (null? c) acc (lp (f acc (car c)) (cdr c))))]
          [(vector? coll)
           (let ([n (vector-length coll)])
-            (let loop ([acc init] [i 0])
-              (if (= i n) acc (loop (f acc (vector-ref coll i)) (+ i 1)))))]
+            (let lp ([acc init] [i 0])
+              (if (= i n) acc (lp (f acc (vector-ref coll i)) (+ i 1)))))]
          [(persistent-map? coll)
           (persistent-map-fold (lambda (acc k v) (f acc (cons k v))) init coll)]
          [else (error 'reduce "unsupported collection type" coll)])]))
@@ -724,19 +727,19 @@
       [(0) (lazy-range 0 +inf.0 1)]
       [(1)
        (let ([end (car args)])
-         (let loop ([i 0] [acc '()])
-           (if (>= i end) (reverse acc) (loop (+ i 1) (cons i acc)))))]
+         (let lp ([i 0] [acc '()])
+           (if (>= i end) (reverse acc) (lp (+ i 1) (cons i acc)))))]
       [(2)
        (let ([start (car args)] [end (cadr args)])
-         (let loop ([i start] [acc '()])
-           (if (>= i end) (reverse acc) (loop (+ i 1) (cons i acc)))))]
+         (let lp ([i start] [acc '()])
+           (if (>= i end) (reverse acc) (lp (+ i 1) (cons i acc)))))]
       [(3)
        (let ([start (car args)] [end (cadr args)] [step (caddr args)])
          (if (positive? step)
-             (let loop ([i start] [acc '()])
-               (if (>= i end) (reverse acc) (loop (+ i step) (cons i acc))))
-             (let loop ([i start] [acc '()])
-               (if (<= i end) (reverse acc) (loop (+ i step) (cons i acc))))))]
+             (let lp ([i start] [acc '()])
+               (if (>= i end) (reverse acc) (lp (+ i step) (cons i acc))))
+             (let lp ([i start] [acc '()])
+               (if (<= i end) (reverse acc) (lp (+ i step) (cons i acc))))))]
       [else (error 'range "too many arguments" args)]))
 
   ;; =========================================================================
@@ -826,10 +829,10 @@
            [else (equal? a b)]))]
       [(a b . more)
        (and (=? a b)
-            (let loop ([x b] [rest more])
+            (let lp ([x b] [rest more])
               (cond
                 [(null? rest) #t]
-                [else (and (=? x (car rest)) (loop (car rest) (cdr rest)))])))]))
+                [else (and (=? x (car rest)) (lp (car rest) (cdr rest)))])))]))
 
   (define (hash x)
     ;; Polymorphic structural hash, consistent with =?.
@@ -911,14 +914,14 @@
          [else (error 'assoc! "expected a transient map" t)])]
       [(t key val . more)
        (assoc! t key val)
-       (let loop ([rest more])
+       (let lp ([rest more])
          (cond
            [(null? rest) t]
            [(null? (cdr rest))
             (error 'assoc! "odd number of key/value arguments")]
            [else
             (assoc! t (car rest) (cadr rest))
-            (loop (cddr rest))]))]))
+            (lp (cddr rest))]))]))
 
   (define (dissoc! t . ks)
     (cond
@@ -1005,13 +1008,13 @@
   (define (disj s . items)
     (cond
       [(persistent-set? s)
-       (let loop ([cur s] [rest items])
+       (let lp ([cur s] [rest items])
          (if (null? rest) cur
-             (loop (persistent-set-remove cur (car rest)) (cdr rest))))]
+             (lp (persistent-set-remove cur (car rest)) (cdr rest))))]
       [(sorted-set? s)
-       (let loop ([cur s] [rest items])
+       (let lp ([cur s] [rest items])
          (if (null? rest) cur
-             (loop (sorted-set-remove cur (car rest)) (cdr rest))))]
+             (lp (sorted-set-remove cur (car rest)) (cdr rest))))]
       [else (error 'disj "expected a set" s)]))
 
   ;; Clojure's clojure.set/ operations
@@ -1027,50 +1030,50 @@
       [(null? sets) pset-empty]
       [(null? (cdr sets)) (car sets)]
       [(sorted-set? (car sets))
-       (let loop ([acc (car sets)] [rest (cdr sets)])
+       (let lp ([acc (car sets)] [rest (cdr sets)])
          (if (null? rest) acc
-             (loop (sorted-set-fold (car rest)
+             (lp (sorted-set-fold (car rest)
                      (lambda (x a) (sorted-set-add a x))
                      acc)
                    (cdr rest))))]
       [else
-       (let loop ([acc (car sets)] [rest (cdr sets)])
+       (let lp ([acc (car sets)] [rest (cdr sets)])
          (if (null? rest) acc
-             (loop (persistent-set-union acc (car rest)) (cdr rest))))]))
+             (lp (persistent-set-union acc (car rest)) (cdr rest))))]))
 
   (define (intersection . sets)
     (cond
       [(null? sets) pset-empty]
       [(null? (cdr sets)) (car sets)]
       [(sorted-set? (car sets))
-       (let loop ([acc (car sets)] [rest (cdr sets)])
+       (let lp ([acc (car sets)] [rest (cdr sets)])
          (if (null? rest) acc
              (let ([other (car rest)])
-               (loop (sorted-set-fold acc
+               (lp (sorted-set-fold acc
                        (lambda (x a)
                          (if (contains? other x) a (sorted-set-remove a x)))
                        acc)
                      (cdr rest)))))]
       [else
-       (let loop ([acc (car sets)] [rest (cdr sets)])
+       (let lp ([acc (car sets)] [rest (cdr sets)])
          (if (null? rest) acc
-             (loop (persistent-set-intersection acc (car rest)) (cdr rest))))]))
+             (lp (persistent-set-intersection acc (car rest)) (cdr rest))))]))
 
   (define (difference . sets)
     (cond
       [(null? sets) pset-empty]
       [(null? (cdr sets)) (car sets)]
       [(sorted-set? (car sets))
-       (let loop ([acc (car sets)] [rest (cdr sets)])
+       (let lp ([acc (car sets)] [rest (cdr sets)])
          (if (null? rest) acc
-             (loop (sorted-set-fold (car rest)
+             (lp (sorted-set-fold (car rest)
                      (lambda (x a) (sorted-set-remove a x))
                      acc)
                    (cdr rest))))]
       [else
-       (let loop ([acc (car sets)] [rest (cdr sets)])
+       (let lp ([acc (car sets)] [rest (cdr sets)])
          (if (null? rest) acc
-             (loop (persistent-set-difference acc (car rest)) (cdr rest))))]))
+             (lp (persistent-set-difference acc (car rest)) (cdr rest))))]))
 
   (define (subset? s1 s2)
     (cond
@@ -1229,10 +1232,10 @@
   ;;   (zipmap '(a b c) '(1 2 3)) => {a 1 b 2 c 3}
   ;; Extra items in either list are ignored, matching Clojure.
   (define (zipmap ks vs)
-    (let loop ([ks ks] [vs vs] [acc pmap-empty])
+    (let lp ([ks ks] [vs vs] [acc pmap-empty])
       (cond
         [(or (null? ks) (null? vs)) acc]
-        [else (loop (cdr ks) (cdr vs)
+        [else (lp (cdr ks) (cdr vs)
                     (persistent-map-set acc (car ks) (car vs)))])))
 
   ;; reduce-kv — like reduce, but takes a 3-argument function (acc k v)
@@ -1261,11 +1264,11 @@
             (not (persistent-set? coll))
             (not (sorted-set? coll))
             (not (concurrent-hash? coll)))
-       (let loop ([fields (%record-fields-all coll)] [acc init])
+       (let lp ([fields (%record-fields-all coll)] [acc init])
          (if (null? fields)
              acc
              (let ([pair (car fields)])
-               (loop (cdr fields)
+               (lp (cdr fields)
                      (f acc (car pair) ((cdr pair) coll))))))]
       [else (error 'reduce-kv "unsupported collection type" coll)]))
 
@@ -1274,25 +1277,25 @@
   (define (min-key k x . more)
     (if (null? more)
         x
-        (let loop ([best x] [best-key (k x)] [rest more])
+        (let lp ([best x] [best-key (k x)] [rest more])
           (if (null? rest)
               best
               (let* ([y (car rest)] [yk (k y)])
                 (if (< yk best-key)
-                    (loop y yk (cdr rest))
-                    (loop best best-key (cdr rest))))))))
+                    (lp y yk (cdr rest))
+                    (lp best best-key (cdr rest))))))))
 
   ;; max-key — return the x in coll that maximizes (k x).
   (define (max-key k x . more)
     (if (null? more)
         x
-        (let loop ([best x] [best-key (k x)] [rest more])
+        (let lp ([best x] [best-key (k x)] [rest more])
           (if (null? rest)
               best
               (let* ([y (car rest)] [yk (k y)])
                 (if (> yk best-key)
-                    (loop y yk (cdr rest))
-                    (loop best best-key (cdr rest))))))))
+                    (lp y yk (cdr rest))
+                    (lp best best-key (cdr rest))))))))
 
   ;; =========================================================================
   ;; Functional combinators — memoize / iterate / repeatedly
@@ -1322,10 +1325,10 @@
        (let make-lazy ()
          (lazy-cons (f) (make-lazy)))]
       [(n f)
-       (let loop ([i 0] [acc '()])
+       (let lp ([i 0] [acc '()])
          (if (>= i n)
              (reverse acc)
-             (loop (+ i 1) (cons (f) acc))))]))
+             (lp (+ i 1) (cons (f) acc))))]))
 
   ;; =========================================================================
   ;; doto — thread an object through side-effecting calls.
@@ -1395,47 +1398,47 @@
       ;;   as-name = #f or symbol
       ;;   or-alist = ((name . default) ...)
       (define (parse-keys-spec specs)
-        (let loop ([rest specs] [names '()] [as-name #f] [defaults '()])
+        (let lp ([rest specs] [names '()] [as-name #f] [defaults '()])
           (cond
             [(null? rest)
              (values (reverse names) as-name defaults)]
             ;; as: sym
             [(and (kw=? (car rest) "as") (pair? (cdr rest)))
-             (loop (cddr rest) names (cadr rest) defaults)]
+             (lp (cddr rest) names (cadr rest) defaults)]
             ;; or: ((name default) ...)
             [(and (kw=? (car rest) "or") (pair? (cdr rest))
                   (list? (cadr rest)))
-             (loop (cddr rest) names as-name
+             (lp (cddr rest) names as-name
                    (append defaults
                            (map (lambda (pair) (cons (car pair) (cadr pair)))
                                 (cadr rest))))]
             ;; plain symbol
             [(and (symbol? (car rest)) (not (kw-datum? (car rest))))
-             (loop (cdr rest) (cons (car rest) names) as-name defaults)]
+             (lp (cdr rest) (cons (car rest) names) as-name defaults)]
             [else
              (error 'dlet "invalid keys: spec" specs)])))
 
       ;; Build car/cdr accessor chain for index i.
       ;; 0 → (car tmp), 1 → (cadr tmp), 2 → (caddr tmp), etc.
       (define (list-ref-expr tmp i)
-        (let loop ([i i] [expr tmp])
+        (let lp ([i i] [expr tmp])
           (cond
             [(zero? i) `(car ,expr)]
-            [else (loop (- i 1) `(cdr ,expr))])))
+            [else (lp (- i 1) `(cdr ,expr))])))
 
       ;; Build cdr chain to get the tail after index i.
       ;; (list-tail-expr tmp 2) → (cddr tmp)
       (define (list-tail-expr tmp i)
-        (let loop ([i i] [expr tmp])
+        (let lp ([i i] [expr tmp])
           (cond
             [(zero? i) expr]
-            [else (loop (- i 1) `(cdr ,expr))])))
+            [else (lp (- i 1) `(cdr ,expr))])))
 
       ;; Analyze a list pattern for & (rest capture).
       ;; Returns (values before-syms rest-sym)
       ;; where rest-sym is #f if no & found.
       (define (parse-list-pattern elems)
-        (let loop ([rest elems] [before '()])
+        (let lp ([rest elems] [before '()])
           (cond
             [(null? rest)
              (values (reverse before) #f)]
@@ -1444,7 +1447,7 @@
                   (null? (cddr rest)))
              (values (reverse before) (cadr rest))]
             [else
-             (loop (cdr rest) (cons (car rest) before))])))
+             (lp (cdr rest) (cons (car rest) before))])))
 
       (syntax-case stx ()
         ;; Base: no bindings left
@@ -1502,10 +1505,10 @@
                 (let* ([tmp (gensym "seq")]
                        [binds
                          (append
-                           (let loop ([i 0] [syms before] [acc '()])
+                           (let lp ([i 0] [syms before] [acc '()])
                              (if (null? syms)
                                  (reverse acc)
-                                 (loop (+ i 1)
+                                 (lp (+ i 1)
                                        (cdr syms)
                                        (cons (list (car syms)
                                                    (list-ref-expr tmp i))
@@ -1552,13 +1555,13 @@
                          (if (simple-param? p) p (gensym "arg")))
                        param-data)]
                 [bindings
-                  (let loop ([ps param-data] [fs formals] [acc '()])
+                  (let lp ([ps param-data] [fs formals] [acc '()])
                     (cond
                       [(null? ps) (reverse acc)]
                       [(simple-param? (car ps))
-                       (loop (cdr ps) (cdr fs) acc)]
+                       (lp (cdr ps) (cdr fs) acc)]
                       [else
-                       (loop (cdr ps) (cdr fs)
+                       (lp (cdr ps) (cdr fs)
                              (cons (list (car ps) (car fs)) acc))]))])
            (with-syntax ([(formal ...) (datum->syntax ctx formals)]
                          [binds (datum->syntax ctx bindings)]
@@ -1569,30 +1572,51 @@
   ;; =========================================================================
   ;; Dynamic vars — Clojure-style `def-dynamic` + `binding`.
   ;;
-  ;; Wraps Chez's `make-parameter` / `parameterize` with the Clojure
-  ;; surface syntax.
-  ;;
-  ;;   (def-dynamic *debug* #f)
-  ;;   (binding ([*debug* #t])
-  ;;     (log "hi"))
-  ;;
-  ;; A dynamic-var identifier is actually bound to a Chez parameter
-  ;; object — normal reads look like `(*debug*)`. The `binding` macro
-  ;; expands to `parameterize`, which rebinds the parameter for the
-  ;; dynamic extent of its body.
-  ;;
-  ;; NOTE: because a dynamic var IS a parameter, reading it requires
-  ;; calling it (e.g. `(*debug*)` not `*debug*`). This matches Chez's
-  ;; parameter discipline. For shorthand read-as-value access, wrap
-  ;; the parameter in a `define-syntax` identifier macro on the user
-  ;; side, or project your own helper.
+  ;; Wraps Chez's `make-parameter` / `parameterize`.
+  ;; Includes a registry so that `go` / `clj-thread` / `clj-future` can
+  ;; snapshot current binding values and re-establish them in child
+  ;; threads/fibers — matching Clojure's binding conveyance.
   ;; =========================================================================
+
+  ;; Global registry of all dynamic-var parameters.
+  (define *dynamic-var-registry* '())
+  (define *dynamic-var-mutex* (make-mutex))
+
+  (define (register-dynamic-var! param)
+    (with-mutex *dynamic-var-mutex*
+      (set! *dynamic-var-registry*
+        (cons param *dynamic-var-registry*))))
+
+  ;; Capture current values of all registered dynamic vars.
+  ;; Returns an alist of (param . value).
+  (define (capture-dynamic-bindings)
+    (with-mutex *dynamic-var-mutex*
+      (map (lambda (p) (cons p (p))) *dynamic-var-registry*)))
+
+  ;; Wrap a thunk so it runs with the captured dynamic bindings.
+  (define (bound-fn thunk)
+    (let ([bindings (capture-dynamic-bindings)])
+      (lambda ()
+        (apply-dynamic-bindings bindings thunk))))
+
+  ;; Apply captured bindings around a thunk.
+  (define (apply-dynamic-bindings bindings thunk)
+    (if (null? bindings)
+        (thunk)
+        (let ([pair (car bindings)])
+          (parameterize ([(car pair) (cdr pair)])
+            (apply-dynamic-bindings (cdr bindings) thunk)))))
+
   (define-syntax def-dynamic
     (syntax-rules ()
       [(_ name default)
-       (define name (make-parameter default))]
+       (begin
+         (define name (make-parameter default))
+         (register-dynamic-var! name))]
       [(_ name default guard)
-       (define name (make-parameter default guard))]))
+       (begin
+         (define name (make-parameter default guard))
+         (register-dynamic-var! name))]))
 
   (define-syntax binding
     (syntax-rules ()
@@ -1734,20 +1758,23 @@
       [(_ body ...)
        (let* ([mtx (make-mutex)]
               [cv (make-condition)]
-              [f (make-clj-future-record (void) #f #f #f mtx cv #f)])
+              [f (make-clj-future-record (void) #f #f #f mtx cv #f)]
+              [%bindings (capture-dynamic-bindings)])
          (let ([t (fork-thread
                     (lambda ()
-                      (guard (exn
-                               [#t
-                                (with-mutex mtx
-                                  (clj-future-record-exception-set! f exn)
-                                  (clj-future-record-done?-set! f #t)
-                                  (condition-broadcast cv))])
-                        (let ([v (begin body ...)])
-                          (with-mutex mtx
-                            (clj-future-record-value-set! f v)
-                            (clj-future-record-done?-set! f #t)
-                            (condition-broadcast cv))))))])
+                      (apply-dynamic-bindings %bindings
+                        (lambda ()
+                          (guard (exn
+                                   [#t
+                                    (with-mutex mtx
+                                      (clj-future-record-exception-set! f exn)
+                                      (clj-future-record-done?-set! f #t)
+                                      (condition-broadcast cv))])
+                            (let ([v (begin body ...)])
+                              (with-mutex mtx
+                                (clj-future-record-value-set! f v)
+                                (clj-future-record-done?-set! f #t)
+                                (condition-broadcast cv))))))))])
            (clj-future-record-thread-set! f t)
            f))]))
 
@@ -1769,7 +1796,7 @@
 
   (define (deref-future f)
     (with-mutex (clj-future-record-mutex f)
-      (let loop ()
+      (let lp ()
         (cond
           [(clj-future-record-cancelled? f)
            (error 'deref "future was cancelled")]
@@ -1779,7 +1806,7 @@
           [else
            (condition-wait (clj-future-record-condvar f)
                            (clj-future-record-mutex f))
-           (loop)]))))
+           (lp)]))))
 
   ;; ---- Promise: write-once value, delivered from another thread ----
   ;; (clj-promise) → promise object
@@ -1812,13 +1839,13 @@
 
   (define (deref-promise p)
     (with-mutex (clj-promise-record-mutex p)
-      (let loop ()
+      (let lp ()
         (if (clj-promise-record-realized? p)
           (clj-promise-record-value p)
           (begin
             (condition-wait (clj-promise-record-condvar p)
                             (clj-promise-record-mutex p))
-            (loop))))))
+            (lp))))))
 
   ;; ---- Polymorphic deref ----
   ;; Works on atoms, delays, futures, and promises
@@ -1831,5 +1858,67 @@
       [(promise? x) (deref-promise x)]
       [(volatile? x) (vderef x)]
       [else (error 'deref "not a deref-able type" x)]))
+
+  ;; =========================================================================
+  ;; require — Clojure-style import sugar.
+  ;;
+  ;; (require '(std sort) :as s)         → (import (prefix (std sort) s:))
+  ;; (require '(std sort) :refer (sort)) → (import (only (std sort) sort))
+  ;; (require '(std sort))               → (import (std sort))
+  ;;
+  ;; NOTE: like import, this must be used at the top level of a program
+  ;; or library body. It cannot be used inside let/define/etc.
+  ;; =========================================================================
+  (define-syntax require
+    (lambda (stx)
+      (syntax-case stx (quote)
+        ;; (require '(mod path) :as alias)
+        [(_ (quote mod-path) kw alias)
+         (and (eq? (syntax->datum #'kw) ':as)
+              (identifier? #'alias))
+         (let ([prefix-sym (string->symbol
+                             (string-append
+                               (symbol->string (syntax->datum #'alias))
+                               ":"))])
+           (with-syntax ([pfx (datum->syntax #'alias prefix-sym)])
+             #'(import (prefix mod-path pfx))))]
+        ;; (require '(mod path) :refer (name1 name2 ...))
+        [(_ (quote mod-path) kw (name ...))
+         (eq? (syntax->datum #'kw) ':refer)
+         #'(import (only mod-path name ...))]
+        ;; (require '(mod path))  — bare import
+        [(_ (quote mod-path))
+         #'(import mod-path)])))
+
+  ;; =========================================================================
+  ;; loop / recur — Clojure-style explicit tail recursion.
+  ;;
+  ;; (loop ([x 0] [acc '()])
+  ;;   (if (= x 5)
+  ;;     acc
+  ;;     (recur (+ x 1) (cons x acc))))
+  ;;
+  ;; Expands to a named let. recur becomes a tail call to the loop
+  ;; label. Chez already optimizes all tail calls, so this is purely
+  ;; a familiarity/readability aid for Clojure developers.
+  ;; =========================================================================
+  (define-syntax recur
+    (lambda (stx)
+      (syntax-violation 'recur "recur used outside of loop" stx)))
+
+  (define-syntax loop
+    (lambda (stx)
+      (syntax-case stx ()
+        [(k ([var init] ...) body ...)
+         ;; Use datum->syntax with #'k (the call-site's `loop` keyword)
+         ;; to inject %loop and recur into the caller's scope.
+         (with-syntax ([%lp    (datum->syntax #'k '%loop)]
+                       [recur* (datum->syntax #'k 'recur)])
+           #'(let %lp ([var init] ...)
+               (letrec-syntax ([recur*
+                                (syntax-rules ()
+                                  [(_ arg (... ...))
+                                   (%lp arg (... ...))])])
+                 body ...)))])))
 
 ) ;; end library

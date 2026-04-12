@@ -62,7 +62,8 @@
           (std csp ops)
           (std csp fiber-chan)
           (std fiber)
-          (std transducer))
+          (std transducer)
+          (only (std clojure) capture-dynamic-bindings apply-dynamic-bindings))
 
   ;; ======================================================
   ;; Buffer specs — opaque tags for chan to dispatch on
@@ -250,25 +251,30 @@
   (define-syntax go
     (syntax-rules ()
       [(_ body ...)
-       (let ([rt (current-fiber-runtime)])
+       (let ([rt (current-fiber-runtime)]
+             [%bindings (capture-dynamic-bindings)])
          (if rt
            ;; Inside fiber runtime: spawn a fiber, return fiber-csp-chan
            (let ([%result-ch (make-fiber-csp-channel 1)])
              (fiber-spawn rt
                (lambda ()
-                 (guard (exn [else (unified-chan-close! %result-ch)])
-                   (let ([%v (let () body ...)])
-                     (unified-chan-put! %result-ch %v)
-                     (unified-chan-close! %result-ch)))))
+                 (apply-dynamic-bindings %bindings
+                   (lambda ()
+                     (guard (exn [else (unified-chan-close! %result-ch)])
+                       (let ([%v (let () body ...)])
+                         (unified-chan-put! %result-ch %v)
+                         (unified-chan-close! %result-ch)))))))
              %result-ch)
            ;; Outside fiber runtime: OS thread, regular channel
            (let ([%result-ch (make-channel 1)])
              (fork-thread
                (lambda ()
-                 (guard (exn [else (chan-close! %result-ch)])
-                   (let ([%v (let () body ...)])
-                     (chan-put! %result-ch %v)
-                     (chan-close! %result-ch)))))
+                 (apply-dynamic-bindings %bindings
+                   (lambda ()
+                     (guard (exn [else (chan-close! %result-ch)])
+                       (let ([%v (let () body ...)])
+                         (chan-put! %result-ch %v)
+                         (chan-close! %result-ch)))))))
              %result-ch)))]))
 
   (define-syntax go-loop
@@ -283,13 +289,16 @@
   (define-syntax clj-thread
     (syntax-rules ()
       [(_ body ...)
-       (let ([%result-ch (make-channel 1)])
+       (let ([%result-ch (make-channel 1)]
+             [%bindings (capture-dynamic-bindings)])
          (fork-thread
            (lambda ()
-             (guard (exn [else (chan-close! %result-ch)])
-               (let ([%v (let () body ...)])
-                 (chan-put! %result-ch %v)
-                 (chan-close! %result-ch)))))
+             (apply-dynamic-bindings %bindings
+               (lambda ()
+                 (guard (exn [else (chan-close! %result-ch)])
+                   (let ([%v (let () body ...)])
+                     (chan-put! %result-ch %v)
+                     (chan-close! %result-ch)))))))
          %result-ch)]))
 
   ;; ======================================================

@@ -64,20 +64,31 @@
   (define MASK      31)
 
   ;;; ========== Node records ==========
+  ;;
+  ;; Every node carries a mutable `edit` slot used for transient
+  ;; ownership tagging (Clojure-style edit-owner protocol):
+  ;;
+  ;;   edit = #f          → persistent / immutable node
+  ;;   edit = <box id>    → owned by the transient whose edit is the same box
+  ;;
+  ;; When a transient operation encounters a node whose `edit` is `eq?`
+  ;; to the transient's own edit box, it mutates the node in place.
+  ;; Otherwise it copies the node with the transient's edit, exactly
+  ;; like Clojure's HAMT.
 
   ;; Leaf: a single key-value pair
   (define-record-type hamt-leaf
-    (fields key val))
+    (fields (mutable edit) key (mutable val)))
 
   ;; Interior node: sparse array indexed by 5-bit hash chunks
   ;; bitmap: 32-bit integer where bit k means slot k is occupied
   ;; array:  compact vector of occupied children (length = popcount(bitmap))
   (define-record-type hamt-node
-    (fields bitmap array))
+    (fields (mutable edit) (mutable bitmap) (mutable array)))
 
   ;; Collision bucket: multiple keys with the exact same hash
   (define-record-type hamt-coll
-    (fields hash pairs))  ; pairs = list of (key . val)
+    (fields (mutable edit) hash (mutable pairs)))  ; pairs = list of (key . val)
 
   ;;; ========== The map record ==========
   (define-record-type %pmap
@@ -166,7 +177,7 @@
   (define (hamt-merge-leaves leaf1 hash1 leaf2 hash2 shift equal-proc)
     (if (= hash1 hash2)
       ;; True hash collision — bucket them
-      (make-hamt-coll hash1
+      (make-hamt-coll #f hash1
         (list (cons (hamt-leaf-key leaf1) (hamt-leaf-val leaf1))
               (cons (hamt-leaf-key leaf2) (hamt-leaf-val leaf2))))
       ;; Hashes differ — create interior node
@@ -174,13 +185,13 @@
             [bit2 (hamt-bitpos hash2 shift)])
         (if (= bit1 bit2)
           ;; Still collide at this level — recurse one level down
-          (make-hamt-node bit1
+          (make-hamt-node #f bit1
             (vector (hamt-merge-leaves leaf1 hash1 leaf2 hash2
                                        (+ shift BITS) equal-proc)))
           ;; Different slots — place each in its slot
           (if (< bit1 bit2)
-            (make-hamt-node (bitwise-ior bit1 bit2) (vector leaf1 leaf2))
-            (make-hamt-node (bitwise-ior bit1 bit2) (vector leaf2 leaf1)))))))
+            (make-hamt-node #f (bitwise-ior bit1 bit2) (vector leaf1 leaf2))
+            (make-hamt-node #f (bitwise-ior bit1 bit2) (vector leaf2 leaf1)))))))
 
   ;;; ========== Insert ==========
   ;; Returns (values new-node delta-size)
@@ -188,18 +199,18 @@
     (cond
       ;; Empty slot: create leaf
       [(not node)
-       (values (make-hamt-leaf key val) 1)]
+       (values (make-hamt-leaf #f key val) 1)]
 
       ;; Existing leaf
       [(hamt-leaf? node)
        (if (equal-proc (hamt-leaf-key node) key)
          ;; Same key: update value (no size change)
-         (values (make-hamt-leaf key val) 0)
+         (values (make-hamt-leaf #f key val) 0)
          ;; Different key: expand into interior node
          (let ([existing-hash (equal-hash (hamt-leaf-key node))])
            (values
              (hamt-merge-leaves node existing-hash
-                                (make-hamt-leaf key val) key-hash
+                                (make-hamt-leaf #f key val) key-hash
                                 shift equal-proc)
              1)))]
 
@@ -216,14 +227,14 @@
                                    key-hash (+ shift BITS) equal-proc)])
              (let ([new-arr (vector-copy arr)])
                (vector-set! new-arr idx new-child)
-               (values (make-hamt-node bitmap new-arr) delta)))
+               (values (make-hamt-node #f bitmap new-arr) delta)))
            ;; Slot empty: insert leaf here
            (let* ([len     (vector-length arr)]
                   [new-arr (make-vector (+ len 1))])
              (vec-copy! arr 0 new-arr 0 idx)
-             (vector-set!  new-arr idx (make-hamt-leaf key val))
+             (vector-set!  new-arr idx (make-hamt-leaf #f key val))
              (vec-copy! arr idx new-arr (+ idx 1) (- len idx))
-             (values (make-hamt-node (bitwise-ior bitmap bit) new-arr) 1))))]
+             (values (make-hamt-node #f (bitwise-ior bitmap bit) new-arr) 1))))]
 
       ;; Collision bucket
       [(hamt-coll? node)
@@ -234,13 +245,13 @@
                   [existing (assoc-with equal-proc key pairs)])
              (if existing
                (values
-                 (make-hamt-coll key-hash
+                 (make-hamt-coll #f key-hash
                    (map (lambda (p)
                           (if (equal-proc (car p) key) (cons key val) p))
                         pairs))
                  0)
                (values
-                 (make-hamt-coll key-hash (cons (cons key val) pairs))
+                 (make-hamt-coll #f key-hash (cons (cons key val) pairs))
                  1)))
            ;; Different hash: create inner node discriminating at this level.
            ;; Both hashes differ somewhere; find it by checking current level.
@@ -250,17 +261,17 @@
                ;; Same slot here: go one level deeper
                (let-values ([(sub-node added)
                              (hamt-set node key val key-hash (+ shift BITS) equal-proc)])
-                 (values (make-hamt-node coll-bit (vector sub-node)) added))
+                 (values (make-hamt-node #f coll-bit (vector sub-node)) added))
                ;; Different slots: create inner node with both
                (if (< coll-bit new-bit)
-                 (values (make-hamt-node (bitwise-ior coll-bit new-bit)
-                           (vector node (make-hamt-leaf key val))) 1)
-                 (values (make-hamt-node (bitwise-ior new-bit coll-bit)
-                           (vector (make-hamt-leaf key val) node)) 1))))))]))
+                 (values (make-hamt-node #f (bitwise-ior coll-bit new-bit)
+                           (vector node (make-hamt-leaf #f key val))) 1)
+                 (values (make-hamt-node #f (bitwise-ior new-bit coll-bit)
+                           (vector (make-hamt-leaf #f key val) node)) 1))))))]))
 
   (define (hamt-coll->leaf pairs)
     ;; Dummy — not actually used
-    (make-hamt-leaf (caar pairs) (cdar pairs)))
+    (make-hamt-leaf #f (caar pairs) (cdar pairs)))
 
   (define (persistent-map-set m key val)
     (let* ([h        ((%pmap-hash-proc m) key)]
@@ -306,11 +317,11 @@
                             [new-bitmap (bitwise-xor bitmap bit)])
                        (vec-copy! arr 0 new-arr 0 idx)
                        (vec-copy! arr (+ idx 1) new-arr idx (- arr-len idx 1))
-                       (values (make-hamt-node new-bitmap new-arr) #t)))
+                       (values (make-hamt-node #f new-bitmap new-arr) #t)))
                    ;; Child updated
                    (let ([new-arr (vector-copy arr)])
                      (vector-set! new-arr idx new-child)
-                     (values (make-hamt-node bitmap new-arr) #t))))))))]
+                     (values (make-hamt-node #f bitmap new-arr) #t))))))))]
 
       [(hamt-coll? node)
        (if (not (= (hamt-coll-hash node) key-hash))
@@ -323,9 +334,9 @@
                [(null? new-pairs)
                 (values #f #t)]
                [(= (length new-pairs) 1)
-                (values (make-hamt-leaf (caar new-pairs) (cdar new-pairs)) #t)]
+                (values (make-hamt-leaf #f (caar new-pairs) (cdar new-pairs)) #t)]
                [else
-                (values (make-hamt-coll key-hash new-pairs) #t)]))))]))
+                (values (make-hamt-coll #f key-hash new-pairs) #t)]))))]))
 
   (define (persistent-map-delete m key)
     (let* ([h       ((%pmap-hash-proc m) key)]
@@ -541,17 +552,28 @@
   ;;   (for ([i (in-range 1000)]) (tmap-set! t i (* i i)))
   ;;   (def m (persistent-map! t))     ;; invalidates t
   ;;
-  ;; Correctness note: this first version does NOT implement Clojure's
-  ;; edit-owner tagging, so every hamt-set / hamt-delete still copies
-  ;; the nodes on its path. The wrapper still wins over repeated
-  ;; persistent-map-set because it avoids allocating a %pmap record
-  ;; per update and the bulk constructors skip the hash/equal lookups
-  ;; that go through the record API. Expect a real speedup once
-  ;; in-place mutation of owned nodes is added (see TODO).
+  ;; Edit-owner protocol (matches Clojure's transient semantics):
   ;;
-  ;; Use-after-persist protection: persistent-map! clears the `live?`
-  ;; flag; subsequent tmap-* calls raise an error. Mirrors Clojure's
-  ;; "transient used after persistent!" exception.
+  ;; Every HAMT node carries a mutable `edit` slot. Persistent nodes
+  ;; have edit = #f. When a transient is created, it gets a fresh
+  ;; "edit token" — a mutable box containing #t. All nodes created
+  ;; or copied by that transient share the same edit box.
+  ;;
+  ;; On mutation (tmap-set!, tmap-delete!), the edit-aware HAMT
+  ;; operations check `(eq? (node-edit node) edit)`:
+  ;;   - Match: mutate the node in place (no allocation).
+  ;;   - Mismatch: copy the node with the transient's edit, then mutate.
+  ;;
+  ;; `persistent-map!` sets the edit box's contents to #f, which:
+  ;;   1. Prevents further transient mutations (the `tmap-check` guard
+  ;;      reads the box and rejects #f).
+  ;;   2. Ensures any nodes still referencing this edit are never
+  ;;      mutated again — their edit box now contains #f, which won't
+  ;;      `eq?`-match any future transient's edit box.
+  ;;
+  ;; This is the standard Clojure approach adapted for Chez Scheme:
+  ;; Clojure uses AtomicReference<Thread>; we use (box #t) / (box #f)
+  ;; with `eq?` identity comparison on the box itself.
 
   (define-record-type %tmap
     (fields
@@ -559,23 +581,27 @@
       (mutable size)
       equal-proc
       hash-proc
-      (mutable live?)))
+      edit))  ; a mutable box: (box #t) when live, set to #f on persist
 
   (define (transient-map? x) (%tmap? x))
 
+  (define (tmap-live? t)
+    (unbox (%tmap-edit t)))
+
   (define (transient-map m)
-    ;; Create a transient from a persistent map. The persistent map
-    ;; is unaffected (transients copy-on-write into fresh nodes until
-    ;; edit-owner tagging is added).
+    ;; Create a transient from a persistent map. A fresh edit box
+    ;; is allocated — it becomes the ownership token for all nodes
+    ;; created or adopted by this transient's mutations.
     (unless (persistent-map? m)
       (error 'transient-map "expected a persistent-map" m))
     (make-%tmap (%pmap-root m) (%pmap-size m)
-                (%pmap-equal-proc m) (%pmap-hash-proc m) #t))
+                (%pmap-equal-proc m) (%pmap-hash-proc m)
+                (box #t)))
 
   (define (tmap-check who t)
     (unless (%tmap? t)
       (error who "expected a transient-map" t))
-    (unless (%tmap-live? t)
+    (unless (tmap-live? t)
       (error who "transient used after persistent!" t)))
 
   (define (tmap-ref t key . default-thunk)
@@ -599,12 +625,212 @@
     (tmap-check 'tmap-size t)
     (%tmap-size t))
 
+  ;;; ---------- Edit-aware HAMT insert (transient path) ----------
+  ;;
+  ;; hamt-set/edit is the transient counterpart of hamt-set. When a
+  ;; node's edit is `eq?` to the transient's edit, it mutates in
+  ;; place. Otherwise it copies the node (stamped with the transient's
+  ;; edit) and then mutates the copy.
+
+  ;; Ensure we have an owned (mutable) leaf for this edit.
+  (define (ensure-leaf-edit leaf edit)
+    (if (eq? (hamt-leaf-edit leaf) edit)
+      leaf
+      (make-hamt-leaf edit (hamt-leaf-key leaf) (hamt-leaf-val leaf))))
+
+  ;; Ensure we have an owned (mutable) interior node for this edit.
+  (define (ensure-node-edit node edit)
+    (if (eq? (hamt-node-edit node) edit)
+      node
+      (make-hamt-node edit (hamt-node-bitmap node)
+                      (vector-copy (hamt-node-array node)))))
+
+  ;; Ensure we have an owned (mutable) collision node for this edit.
+  (define (ensure-coll-edit coll edit)
+    (if (eq? (hamt-coll-edit coll) edit)
+      coll
+      (make-hamt-coll edit (hamt-coll-hash coll) (hamt-coll-pairs coll))))
+
+  ;; Edit-aware variant of hamt-merge-leaves.
+  (define (hamt-merge-leaves/edit leaf1 hash1 leaf2 hash2 shift equal-proc edit)
+    (if (= hash1 hash2)
+      ;; True hash collision — bucket them
+      (make-hamt-coll edit hash1
+        (list (cons (hamt-leaf-key leaf1) (hamt-leaf-val leaf1))
+              (cons (hamt-leaf-key leaf2) (hamt-leaf-val leaf2))))
+      ;; Hashes differ — create interior node
+      (let ([bit1 (hamt-bitpos hash1 shift)]
+            [bit2 (hamt-bitpos hash2 shift)])
+        (if (= bit1 bit2)
+          ;; Still collide at this level — recurse one level down
+          (make-hamt-node edit bit1
+            (vector (hamt-merge-leaves/edit leaf1 hash1 leaf2 hash2
+                                            (+ shift BITS) equal-proc edit)))
+          ;; Different slots — place each in its slot
+          (if (< bit1 bit2)
+            (make-hamt-node edit (bitwise-ior bit1 bit2) (vector leaf1 leaf2))
+            (make-hamt-node edit (bitwise-ior bit1 bit2) (vector leaf2 leaf1)))))))
+
+  ;; Returns (values new-node delta-size)
+  (define (hamt-set/edit node key val key-hash shift equal-proc edit)
+    (cond
+      ;; Empty slot: create owned leaf
+      [(not node)
+       (values (make-hamt-leaf edit key val) 1)]
+
+      ;; Existing leaf
+      [(hamt-leaf? node)
+       (if (equal-proc (hamt-leaf-key node) key)
+         ;; Same key: update value in place if owned
+         (let ([n (ensure-leaf-edit node edit)])
+           (hamt-leaf-val-set! n val)
+           (values n 0))
+         ;; Different key: expand into interior node
+         (let ([existing-hash (equal-hash (hamt-leaf-key node))])
+           (values
+             (hamt-merge-leaves/edit node existing-hash
+                                     (make-hamt-leaf edit key val) key-hash
+                                     shift equal-proc edit)
+             1)))]
+
+      ;; Interior node
+      [(hamt-node? node)
+       (let* ([bit    (hamt-bitpos key-hash shift)]
+              [bitmap (hamt-node-bitmap node)]
+              [arr    (hamt-node-array node)]
+              [idx    (hamt-index bitmap bit)])
+         (if (not (= 0 (bitwise-and bitmap bit)))
+           ;; Slot occupied: recurse, then update array in place if owned
+           (let-values ([(new-child delta)
+                         (hamt-set/edit (vector-ref arr idx) key val
+                                        key-hash (+ shift BITS) equal-proc edit)])
+             (let ([n (ensure-node-edit node edit)])
+               (vector-set! (hamt-node-array n) idx new-child)
+               (values n delta)))
+           ;; Slot empty: expand array, insert leaf
+           (let* ([len     (vector-length arr)]
+                  [new-arr (make-vector (+ len 1))])
+             (vec-copy! arr 0 new-arr 0 idx)
+             (vector-set! new-arr idx (make-hamt-leaf edit key val))
+             (vec-copy! arr idx new-arr (+ idx 1) (- len idx))
+             (if (eq? (hamt-node-edit node) edit)
+               ;; Owned: mutate bitmap and array in place
+               (begin
+                 (hamt-node-bitmap-set! node (bitwise-ior bitmap bit))
+                 (hamt-node-array-set! node new-arr)
+                 (values node 1))
+               ;; Not owned: create new node
+               (values (make-hamt-node edit (bitwise-ior bitmap bit) new-arr) 1)))))]
+
+      ;; Collision bucket
+      [(hamt-coll? node)
+       (let ([coll-hash (hamt-coll-hash node)])
+         (if (= coll-hash key-hash)
+           ;; Same hash: update or extend the collision bucket
+           (let* ([pairs    (hamt-coll-pairs node)]
+                  [existing (assoc-with equal-proc key pairs)])
+             (let ([n (ensure-coll-edit node edit)])
+               (if existing
+                 (begin
+                   (hamt-coll-pairs-set! n
+                     (map (lambda (p)
+                            (if (equal-proc (car p) key) (cons key val) p))
+                          pairs))
+                   (values n 0))
+                 (begin
+                   (hamt-coll-pairs-set! n (cons (cons key val) pairs))
+                   (values n 1)))))
+           ;; Different hash: create inner node discriminating at this level.
+           (let ([coll-bit (hamt-bitpos coll-hash shift)]
+                 [new-bit  (hamt-bitpos key-hash  shift)])
+             (if (= coll-bit new-bit)
+               ;; Same slot here: go one level deeper
+               (let-values ([(sub-node added)
+                             (hamt-set/edit node key val key-hash
+                                            (+ shift BITS) equal-proc edit)])
+                 (values (make-hamt-node edit coll-bit (vector sub-node)) added))
+               ;; Different slots: create inner node with both
+               (if (< coll-bit new-bit)
+                 (values (make-hamt-node edit (bitwise-ior coll-bit new-bit)
+                           (vector node (make-hamt-leaf edit key val))) 1)
+                 (values (make-hamt-node edit (bitwise-ior new-bit coll-bit)
+                           (vector (make-hamt-leaf edit key val) node)) 1))))))]))
+
+  ;;; ---------- Edit-aware HAMT delete (transient path) ----------
+  ;;
+  ;; hamt-delete/edit is the transient counterpart of hamt-delete.
+  ;; Returns (values new-node removed?).
+
+  (define (hamt-delete/edit node key key-hash shift equal-proc edit)
+    (cond
+      [(not node)
+       (values #f #f)]
+
+      [(hamt-leaf? node)
+       (if (equal-proc (hamt-leaf-key node) key)
+         (values #f #t)
+         (values node #f))]
+
+      [(hamt-node? node)
+       (let* ([bit    (hamt-bitpos key-hash shift)]
+              [bitmap (hamt-node-bitmap node)]
+              [arr    (hamt-node-array node)])
+         (if (= 0 (bitwise-and bitmap bit))
+           (values node #f)
+           (let* ([idx   (hamt-index bitmap bit)]
+                  [child (vector-ref arr idx)])
+             (let-values ([(new-child removed?)
+                           (hamt-delete/edit child key key-hash
+                                             (+ shift BITS) equal-proc edit)])
+               (if (not removed?)
+                 (values node #f)
+                 (if (not new-child)
+                   ;; Child removed entirely
+                   (if (= (vector-length arr) 1)
+                     ;; Node itself becomes empty
+                     (values #f #t)
+                     ;; Compress the array (always creates a new smaller vector)
+                     (let* ([arr-len    (vector-length arr)]
+                            [new-arr    (make-vector (- arr-len 1))]
+                            [new-bitmap (bitwise-xor bitmap bit)])
+                       (vec-copy! arr 0 new-arr 0 idx)
+                       (vec-copy! arr (+ idx 1) new-arr idx (- arr-len idx 1))
+                       (if (eq? (hamt-node-edit node) edit)
+                         ;; Owned: mutate in place
+                         (begin
+                           (hamt-node-bitmap-set! node new-bitmap)
+                           (hamt-node-array-set! node new-arr)
+                           (values node #t))
+                         (values (make-hamt-node edit new-bitmap new-arr) #t))))
+                   ;; Child updated (not removed, just replaced)
+                   (let ([n (ensure-node-edit node edit)])
+                     (vector-set! (hamt-node-array n) idx new-child)
+                     (values n #t))))))))]
+
+      [(hamt-coll? node)
+       (if (not (= (hamt-coll-hash node) key-hash))
+         (values node #f)
+         (let* ([pairs     (hamt-coll-pairs node)]
+                [new-pairs (filter (lambda (p) (not (equal-proc (car p) key))) pairs)])
+           (if (= (length new-pairs) (length pairs))
+             (values node #f)
+             (cond
+               [(null? new-pairs)
+                (values #f #t)]
+               [(= (length new-pairs) 1)
+                (values (make-hamt-leaf edit (caar new-pairs) (cdar new-pairs)) #t)]
+               [else
+                (let ([n (ensure-coll-edit node edit)])
+                  (hamt-coll-pairs-set! n new-pairs)
+                  (values n #t))]))))]))
+
   (define (tmap-set! t key val)
     (tmap-check 'tmap-set! t)
     (let-values ([(new-root delta)
-                  (hamt-set (%tmap-root t) key val
-                            ((%tmap-hash-proc t) key)
-                            0 (%tmap-equal-proc t))])
+                  (hamt-set/edit (%tmap-root t) key val
+                                 ((%tmap-hash-proc t) key)
+                                 0 (%tmap-equal-proc t)
+                                 (%tmap-edit t))])
       (%tmap-root-set! t new-root)
       (%tmap-size-set! t (+ (%tmap-size t) delta))
       t))
@@ -612,20 +838,23 @@
   (define (tmap-delete! t key)
     (tmap-check 'tmap-delete! t)
     (let-values ([(new-root removed?)
-                  (hamt-delete (%tmap-root t) key
-                               ((%tmap-hash-proc t) key)
-                               0 (%tmap-equal-proc t))])
+                  (hamt-delete/edit (%tmap-root t) key
+                                    ((%tmap-hash-proc t) key)
+                                    0 (%tmap-equal-proc t)
+                                    (%tmap-edit t))])
       (when removed?
         (%tmap-root-set! t new-root)
         (%tmap-size-set! t (- (%tmap-size t) 1)))
       t))
 
   (define (persistent-map! t)
-    ;; Finalize a transient back into a persistent map. After this
-    ;; call, the transient is no longer live — any further tmap-*
-    ;; call raises an error, mirroring Clojure's semantics.
+    ;; Finalize a transient back into a persistent map. Setting the
+    ;; edit box to #f invalidates the transient: any further tmap-*
+    ;; call raises an error (tmap-live? reads the box), and nodes
+    ;; stamped with this edit will never match a future transient's
+    ;; edit box, so they become effectively immutable.
     (tmap-check 'persistent-map! t)
-    (%tmap-live?-set! t #f)
+    (set-box! (%tmap-edit t) #f)
     (make-%pmap (%tmap-root t) (%tmap-size t)
                 (%tmap-equal-proc t) (%tmap-hash-proc t)))
 
