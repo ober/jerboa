@@ -47,7 +47,7 @@ Webhook processing is the ideal demo because:
    starts.  In Jerboa, it's one file, one binary, 20MB of RAM, instant startup.
 
 4. **It's small enough to be readable** but complex enough to be credible.  Target:
-   300 lines of Scheme, not 3000.
+   ~380 lines of Scheme, not 3000.
 
 ---
 
@@ -547,7 +547,7 @@ webhook-service.ss                  — the entire service
 - 20-40MB RAM (no GC pressure from boxed JVM objects)
 - Static binary: 15MB
 - `scp edge user@server: && ssh server ./edge` to deploy
-- 300 lines, one file, zero config files
+- ~380 lines, one file, zero config files
 
 ### Side-by-Side: Processing a Webhook
 
@@ -616,7 +616,7 @@ one file.
 
 ## Implementation Plan
 
-### Phase 1: Core Demo (the 300-line file)
+### Phase 1: Core Demo (the ~380-line file)
 
 **Deliverable:** `examples/webhook-service.ss`
 
@@ -666,7 +666,7 @@ curl localhost:8080/api/stats
 
 **Success criteria:**
 - Runs with `scheme --libdirs lib --script examples/webhook-service.ss`
-- Under 300 lines of Scheme
+- ~380 lines of Scheme
 - Handles 10K concurrent webhook POSTs without dropped events
 - Worker crash + supervisor restart visible in logs
 - WebSocket dashboard receives live event stream
@@ -862,7 +862,7 @@ is concrete:
    isolation (Landlock/seccomp).  No "eval is dangerous" disclaimer — eval
    is sandboxed by default.
 
-6. **One file, 300 lines.**  A senior engineer can read the entire service in
+6. **One file, ~380 lines.**  A senior engineer can read the entire service in
    20 minutes and understand every decision.  Try that with a Spring Boot
    webhook processor.
 
