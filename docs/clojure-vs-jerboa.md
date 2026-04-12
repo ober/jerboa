@@ -673,7 +673,7 @@ Possibly the feature Clojure programmers miss most in other languages. Destructu
 
 Keyword-argument style falls out of rest + map destructuring.
 
-**Jerboa status**: **[partial]**. `match` provides strong pattern matching, and `using` gives dot-access to struct fields. `let-alist` handles alist-key destructuring. What's missing:
+**Jerboa status**: **[landed]**. `match` provides strong pattern matching, and `using` gives dot-access to struct fields. `let-alist` handles alist-key destructuring. `dlet` provides Clojure-style destructuring `let` with list patterns, map `:keys`, `:as`, and `:or` defaults. `dfn` defines functions with destructured parameters. Both are in `(std clojure)`. Previously missing:
 
 - `(def (f [x y z]) ...)` — destructure a list argument in the parameter position
 - `(def (f {:keys [name age]}) ...)` — map destructuring with `:keys` style in function params or `let`
@@ -751,13 +751,11 @@ Also thread-aware: `bound-fn`, `bound-fn*` capture current dynamic bindings so y
 
 Inside a binding thread, dynamic vars can be `set!` to a new value for the rest of the thread's execution. Lets you update state that started as a dynamic default.
 
-**Jerboa status**: **[partial]**. Chez has `fluid-let`, `make-parameter`, and `parameterize` — the underlying mechanism exists and is powerful. What's missing is the Clojure-friendly syntactic layer:
+**Jerboa status**: **[landed]** — `(std clojure)`. `def-dynamic` wraps `make-parameter`, `binding` wraps `parameterize`. Chez has `fluid-let`, `make-parameter`, and `parameterize` — the underlying mechanism exists and is powerful. The Clojure-friendly surface now provides:
 
 - `(def-dynamic *foo* default)` — sugar over `(define *foo* (make-parameter default))`
-- `(binding [*foo* new-val *bar* other] body)` — sugar over `(parameterize ([*foo* new-val] [*bar* other]) body)`
+- `(binding ((*foo* new-val) (*bar* other)) body)` — sugar over `(parameterize ([*foo* new-val] [*bar* other]) body)`
 - A convention that `*earmuffed*` names are dynamic and fair game to `binding`
-
-These are three small macros. Tier 1 in the roadmap below.
 
 ---
 
@@ -1105,7 +1103,7 @@ Small built-ins that matter:
 - `(iterate f x)` — lazy infinite `[x (f x) (f (f x)) ...]`.
 - `(repeatedly n f)` — calls f n times, lazily.
 
-**Jerboa status**: **[partial]**. `compose`/`comp`, `partial`, `complement`, `negate`, `identity`, `constantly`, `curry`, `flip`, `conjoin`/`disjoin` (Clojure's `every-pred`/`some-fn` under different names), `juxt`, `cut` are all in the prelude. Still missing: **`memoize`**, lazy **`iterate`** (Clojure's `(iterate f x)` = `[x (f x) (f (f x)) ...]`), **`repeatedly`**, **`fnil`**, **`trampoline`** (only strictly needed for mutual recursion across value-returning branches, since Chez has proper tail calls). These are all small, one-day adds. Tier 1 in the roadmap.
+**Jerboa status**: **[landed]**. `compose`/`comp`, `partial`, `complement`, `negate`, `identity`, `constantly`, `curry`, `flip`, `conjoin`/`disjoin` (Clojure's `every-pred`/`some-fn` under different names), `juxt`, `cut` are all in the prelude. `memoize`, `iterate` (strict/bounded: `(iterate n f x)`), `repeatedly`, `fnil`, `every-pred`, `some-fn` are now re-exported from `(std clojure)`. Remaining gap: lazy infinite `iterate` (Clojure's `(iterate f x)` = `[x (f x) (f (f x)) ...]`) — deferred to lazy-sequences work (Tier 2). `trampoline` is only strictly needed for mutual recursion across value-returning branches, since Chez has proper tail calls.
 
 ---
 
@@ -1136,7 +1134,7 @@ Clojure's answer to "exceptions should carry data, not just strings":
 
 Lets you catch by data-pattern rather than by class hierarchy, and serialize exceptions through channels/queues.
 
-**Jerboa status**: **[open]**. `try/catch/finally` with pattern-based catches and condition objects exist. `(std errors)` has its own structured errors. Close in spirit but not the standardized `ex-info`/`ex-data` surface that clojure-spec, pedestal, and porters expect. This is a ~10-line shim on top of Jerboa's condition system — Tier 1 in the roadmap.
+**Jerboa status**: **[landed]** — `(std clojure)`. `ex-info`, `ex-info?`, `ex-data`, `ex-message`, `ex-cause` built as a condition type (`&ex-info`) carrying a message string, a persistent-map of data, and an optional cause condition. `try/catch/finally` with pattern-based catches and condition objects already existed; the standardized Clojure surface is now in place.
 
 ---
 
@@ -1277,7 +1275,7 @@ Used by tooling like REBL and Reveal to build **data inspectors**: click into a 
 
 Generic tree rewriting that works on arbitrary nested Clojure data. One of those "I use it once a month but it's the right tool" libraries.
 
-**Jerboa status**: **[open]**. No walker. Easy to build on top of a recursive structure visitor — ~100 lines total including `postwalk`/`prewalk`/`walk`/`keywordize-keys`/`stringify-keys`/`macroexpand-all`. Tier 1 in the roadmap.
+**Jerboa status**: **[landed]** — `(std clojure walk)`. Exports `walk`, `postwalk`, `prewalk`, `postwalk-replace`, `prewalk-replace`, `keywordize-keys`, `stringify-keys`. Handles lists, dotted pairs, vectors, persistent-vectors, persistent-maps (entries as cons pairs), and persistent-sets. `macroexpand-all` is not included (would require access to the expander).
 
 ---
 
@@ -1443,13 +1441,14 @@ Clojure distinguishes `print` (human-readable, no escapes) from `pr` (EDN-readab
 - `declare` — Chez `define` forward refs work naturally; no separate macro needed
 - `pr`/`pr-str` vs `print`/`display` — Chez `write` vs `display` is the structural analogue
 
+**Landed** (Tier 1 batch, 2026-04-11):
+- `doto` macro — threads side-effecting calls on one object. In `(std clojure)`.
+- `merge-with`, `zipmap`, `reduce-kv`, `min-key`, `max-key` — map-convenience functions. In `(std clojure)`.
+- `fnil` — wraps a function so `nil`/`#f` arguments get replaced with defaults before calling. Re-exported from prelude via `(std clojure)`.
+
 **Open** (worth adding):
-- `doto` macro — threads side-effecting calls on one object. Trivial macro. **Tier 1**.
 - Anonymous `#(...)` reader shorthand — requires reader modification (same class of work as [`clojure-reader.md`](./clojure-reader.md)); Jerboa uses `(lambda (x) ...)` / `(cut + <> 1)` instead. **Deferred.**
 - `condp` — single-predicate dispatch form. Small macro, nice-to-have. **Tier 3**.
-- `merge-with`, `zipmap`, `reduce-kv` — the last few map-convenience functions not yet in `(std clojure)`. (`merge` and `select-keys` already landed.) Small self-contained additions. **Tier 1**.
-- `min-key` / `max-key` — select the element of a collection that minimizes/maximizes a key function: `(max-key :age users)`. Trivial ~5-line definitions. **Tier 1**.
-- `fnil` — wraps a function so `nil`/`#f` arguments get replaced with defaults before calling. Trivial closure. **Tier 1**.
 
 ---
 
@@ -1476,6 +1475,13 @@ Most of the features originally ranked "Tier 1 / Tier 2" are now in place. The C
 | Set operations | `(std pset)` + `(std clojure)` | `union`, `intersection`, `difference`, `subset?`, `superset?` |
 | `get-in`/`assoc-in`/`update-in` | `(std misc nested)` | Polymorphic over pmap, chash, hash-table, vector, pair (alist), and records |
 | Pattern matching | `(jerboa prelude)` | `match` with nested, guards, predicates, or-patterns, view patterns |
+| Destructuring `let`/`fn` | `(std clojure)` | `dlet` (list, map `:keys`, `:as`, `:or`), `dfn` for destructured function params |
+| `ex-info` / `ex-data` | `(std clojure)` | Structured exceptions via condition type `&ex-info`; `ex-info?`, `ex-message`, `ex-cause` |
+| `memoize` / `iterate` / `repeatedly` | `(std clojure)` | Re-exported combinators; `iterate` is strict/bounded |
+| `clojure.walk` | `(std clojure walk)` | `walk`, `postwalk`, `prewalk`, `keywordize-keys`, `stringify-keys` |
+| `doto` | `(std clojure)` | Side-effect threading macro |
+| Dynamic vars | `(std clojure)` | `def-dynamic` + `binding` sugar over `make-parameter`/`parameterize` |
+| Map utilities | `(std clojure)` | `merge-with`, `zipmap`, `reduce-kv`, `min-key`, `max-key`, `fnil` |
 
 ### What Chez/Jerboa does as well or better than Clojure
 
