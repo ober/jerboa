@@ -39,7 +39,8 @@
   (export
     ;; ---- Polymorphic collection ops (new in this module) ----
     get assoc dissoc contains? count keys vals
-    merge update select-keys
+    merge merge-with update select-keys
+    zipmap reduce-kv min-key max-key
     first rest next last
     conj cons* empty?
     peek pop
@@ -47,6 +48,22 @@
     seq =? hash
     inc dec
     nil? some? true? false?
+
+    ;; ---- Functional combinators (re-exports + Clojure additions) ----
+    memoize iterate repeatedly fnil
+    every-pred some-fn
+
+    ;; ---- Sugar macros ----
+    doto
+
+    ;; ---- Destructuring (Clojure-style) ----
+    dlet dfn
+
+    ;; ---- Dynamic vars (Clojure-style binding) ----
+    def-dynamic binding
+
+    ;; ---- Structured exceptions (ex-info / ex-data) ----
+    ex-info ex-info? ex-data ex-message ex-cause
 
     ;; ---- Transients (Clojure-style polymorphic dispatch) ----
     transient persistent! transient?
@@ -127,6 +144,9 @@
           (std misc atom)
           (std misc meta)
           (std misc nested)
+          (only (std misc func) fnil every-pred some-fn)
+          (rename (only (std misc memoize) memoize) (memoize clj-memoize))
+          (only (std misc list) iterate-n)
           (std pqueue)
           (std sorted-set))
 
@@ -1036,5 +1056,453 @@
       [else (persistent-set-subset? s1 s2)]))
 
   (define (superset? s1 s2) (subset? s2 s1))
+
+  ;; =========================================================================
+  ;; Map-convenience stragglers — Clojure's `merge-with`, `zipmap`,
+  ;; `reduce-kv`, and `min-key`/`max-key`.
+  ;; =========================================================================
+
+  ;; merge-with — like merge, but resolves key collisions by applying
+  ;; `f` to the existing and new values. Preserves the type of the
+  ;; leftmost map argument.
+  ;;   (merge-with + {:a 1 :b 2} {:b 3 :c 4}) => {:a 1 :b 5 :c 4}
+  (define (merge-with f . maps)
+    (cond
+      [(null? maps) #f]                         ;; Clojure returns nil
+      [(null? (cdr maps)) (car maps)]
+      [else
+       (let ([first-map (car maps)])
+         (reduce
+           (lambda (acc m)
+             (reduce
+               (lambda (acc2 kv)
+                 (let ([k (car kv)] [v (cdr kv)])
+                   (if (contains? acc2 k)
+                       (assoc acc2 k (f (get acc2 k) v))
+                       (assoc acc2 k v))))
+               acc
+               (seq m)))
+           first-map
+           (cdr maps)))]))
+
+  ;; zipmap — build a persistent-map from a list of keys and values.
+  ;;   (zipmap '(a b c) '(1 2 3)) => {a 1 b 2 c 3}
+  ;; Extra items in either list are ignored, matching Clojure.
+  (define (zipmap ks vs)
+    (let loop ([ks ks] [vs vs] [acc pmap-empty])
+      (cond
+        [(or (null? ks) (null? vs)) acc]
+        [else (loop (cdr ks) (cdr vs)
+                    (persistent-map-set acc (car ks) (car vs)))])))
+
+  ;; reduce-kv — like reduce, but takes a 3-argument function (acc k v)
+  ;; and walks a map's entries.
+  ;;   (reduce-kv (lambda (acc k v) (+ acc v)) 0 {:a 1 :b 2}) => 3
+  (define (reduce-kv f init coll)
+    (cond
+      [(persistent-map? coll)
+       (persistent-map-fold
+         (lambda (acc k v) (f acc k v))
+         init coll)]
+      [(concurrent-hash? coll)
+       (let ([acc init])
+         (concurrent-hash-for-each
+           (lambda (k v) (set! acc (f acc k v)))
+           coll)
+         acc)]
+      [(hash-table? coll)
+       (let ([acc init])
+         (hash-for-each
+           (lambda (k v) (set! acc (f acc k v)))
+           coll)
+         acc)]
+      [(and (record? coll)
+            (not (persistent-map? coll))
+            (not (persistent-set? coll))
+            (not (sorted-set? coll))
+            (not (concurrent-hash? coll)))
+       (let loop ([fields (%record-fields-all coll)] [acc init])
+         (if (null? fields)
+             acc
+             (let ([pair (car fields)])
+               (loop (cdr fields)
+                     (f acc (car pair) ((cdr pair) coll))))))]
+      [else (error 'reduce-kv "unsupported collection type" coll)]))
+
+  ;; min-key — return the x in coll that minimizes (k x).
+  ;;   (min-key count '("aa" "b" "ccc")) => "b"
+  (define (min-key k x . more)
+    (if (null? more)
+        x
+        (let loop ([best x] [best-key (k x)] [rest more])
+          (if (null? rest)
+              best
+              (let* ([y (car rest)] [yk (k y)])
+                (if (< yk best-key)
+                    (loop y yk (cdr rest))
+                    (loop best best-key (cdr rest))))))))
+
+  ;; max-key — return the x in coll that maximizes (k x).
+  (define (max-key k x . more)
+    (if (null? more)
+        x
+        (let loop ([best x] [best-key (k x)] [rest more])
+          (if (null? rest)
+              best
+              (let* ([y (car rest)] [yk (k y)])
+                (if (> yk best-key)
+                    (loop y yk (cdr rest))
+                    (loop best best-key (cdr rest))))))))
+
+  ;; =========================================================================
+  ;; Functional combinators — memoize / iterate / repeatedly
+  ;;
+  ;; Clojure's `iterate` and `repeatedly` return lazy seqs; Jerboa has
+  ;; no lazy seqs in the prelude (Tier 2 item). For now we expose
+  ;; bounded, strict forms that require a count.
+  ;; =========================================================================
+
+  ;; memoize — cache f's results by argument list (unbounded).
+  (define memoize clj-memoize)
+
+  ;; iterate — (iterate n f x) returns a list of n elements:
+  ;;   (x (f x) (f (f x)) ... )
+  ;; Clojure's (iterate f x) is lazy and infinite; Jerboa's strict form
+  ;; requires the count up front. Equivalent to Clojure's
+  ;; (take n (iterate f x)).
+  (define (iterate n f x) (iterate-n n f x))
+
+  ;; repeatedly — (repeatedly n f) calls f n times and returns the list
+  ;; of results.
+  ;;   (repeatedly 3 (lambda () (random 10))) => (3 7 1)
+  (define (repeatedly n f)
+    (let loop ([i 0] [acc '()])
+      (if (>= i n)
+          (reverse acc)
+          (loop (+ i 1) (cons (f) acc)))))
+
+  ;; =========================================================================
+  ;; doto — thread an object through side-effecting calls.
+  ;;
+  ;; (doto obj (f a b) (g c)) => (let ([x obj]) (f x a b) (g x c) x)
+  ;;
+  ;; Classic use: build up a mutable container.
+  ;;   (doto (make-hash-table)
+  ;;     (hash-put! 'a 1)
+  ;;     (hash-put! 'b 2))
+  ;; =========================================================================
+  (define-syntax doto
+    (syntax-rules ()
+      [(_ x) x]
+      [(_ x (f arg ...) rest ...)
+       (let ([tmp x])
+         (f tmp arg ...)
+         (doto tmp rest ...))]))
+
+  ;; =========================================================================
+  ;; Destructuring — Clojure-style `dlet` and `dfn`.
+  ;;
+  ;; Destructuring `let` that supports sequential and map patterns:
+  ;;
+  ;;   (dlet ([x 42]                              ;; plain binding
+  ;;          [(a b c) '(1 2 3)]                   ;; list destructure
+  ;;          [(h & t) '(10 20 30)]                ;; head + rest
+  ;;          [(keys: x y) m]                      ;; map :keys (keyword lookup)
+  ;;          [(keys: x y as: all) m]              ;; map + bind whole
+  ;;          [(keys: x y or: ([y 100])) m])       ;; map + defaults
+  ;;     body ...)
+  ;;
+  ;; `dfn` defines a function whose parameters are destructured:
+  ;;   (dfn (name (keys: x y) z) body ...)
+  ;;   → (define (name _tmp z) (dlet ([(keys: x y) _tmp]) body ...))
+  ;;
+  ;; NOTES:
+  ;;   - keys: lookups use Jerboa keywords (x: → #:x) via `get`.
+  ;;   - List patterns walk via car/cdr — no length checking.
+  ;;   - & binds the remainder of the list.
+  ;; =========================================================================
+
+  (define-syntax dlet
+    (lambda (stx)
+      ;; Is datum a Jerboa keyword (name:)?
+      ;; The Jerboa reader stores keywords as symbols with a trailing
+      ;; colon: keys: → symbol "keys:", x: → symbol "x:".
+      (define (kw-datum? d)
+        (and (symbol? d)
+             (let ([s (symbol->string d)])
+               (and (>= (string-length s) 2)
+                    (char=? (string-ref s (- (string-length s) 1)) #\:)))))
+
+      ;; Does keyword datum match a specific name?
+      (define (kw=? d name)
+        (and (kw-datum? d)
+             (string=? (symbol->string d)
+                       (string-append name ":"))))
+
+      ;; symbol → keyword symbol: x → x:
+      (define (sym->kw s)
+        (string->symbol (string-append (symbol->string s) ":")))
+
+      ;; Parse the spec list after keys: keyword.
+      ;; Returns (values names as-name or-alist)
+      ;;   names   = list of symbols
+      ;;   as-name = #f or symbol
+      ;;   or-alist = ((name . default) ...)
+      (define (parse-keys-spec specs)
+        (let loop ([rest specs] [names '()] [as-name #f] [defaults '()])
+          (cond
+            [(null? rest)
+             (values (reverse names) as-name defaults)]
+            ;; as: sym
+            [(and (kw=? (car rest) "as") (pair? (cdr rest)))
+             (loop (cddr rest) names (cadr rest) defaults)]
+            ;; or: ((name default) ...)
+            [(and (kw=? (car rest) "or") (pair? (cdr rest))
+                  (list? (cadr rest)))
+             (loop (cddr rest) names as-name
+                   (append defaults
+                           (map (lambda (pair) (cons (car pair) (cadr pair)))
+                                (cadr rest))))]
+            ;; plain symbol
+            [(and (symbol? (car rest)) (not (kw-datum? (car rest))))
+             (loop (cdr rest) (cons (car rest) names) as-name defaults)]
+            [else
+             (error 'dlet "invalid keys: spec" specs)])))
+
+      ;; Build car/cdr accessor chain for index i.
+      ;; 0 → (car tmp), 1 → (cadr tmp), 2 → (caddr tmp), etc.
+      (define (list-ref-expr tmp i)
+        (let loop ([i i] [expr tmp])
+          (cond
+            [(zero? i) `(car ,expr)]
+            [else (loop (- i 1) `(cdr ,expr))])))
+
+      ;; Build cdr chain to get the tail after index i.
+      ;; (list-tail-expr tmp 2) → (cddr tmp)
+      (define (list-tail-expr tmp i)
+        (let loop ([i i] [expr tmp])
+          (cond
+            [(zero? i) expr]
+            [else (loop (- i 1) `(cdr ,expr))])))
+
+      ;; Analyze a list pattern for & (rest capture).
+      ;; Returns (values before-syms rest-sym)
+      ;; where rest-sym is #f if no & found.
+      (define (parse-list-pattern elems)
+        (let loop ([rest elems] [before '()])
+          (cond
+            [(null? rest)
+             (values (reverse before) #f)]
+            [(and (symbol? (car rest)) (string=? (symbol->string (car rest)) "&")
+                  (pair? (cdr rest))
+                  (null? (cddr rest)))
+             (values (reverse before) (cadr rest))]
+            [else
+             (loop (cdr rest) (cons (car rest) before))])))
+
+      (syntax-case stx ()
+        ;; Base: no bindings left
+        [(k () body ...)
+         #'(begin body ...)]
+
+        ;; Symbol pattern — plain binding
+        [(k ([pat expr] . rest) body ...)
+         (identifier? #'pat)
+         #'(let ([pat expr])
+             (dlet rest body ...))]
+
+        ;; Compound pattern — inspect at datum level.
+        ;; Use #'expr as the lexical context for generated bindings
+        ;; so that they resolve in the user's scope.
+        [(k ([pat expr] . rest) body ...)
+         (let* ([p (syntax->datum #'pat)]
+                ;; Use the second element of pat (a user identifier)
+                ;; as the lexical context so generated names resolve
+                ;; in the user's scope. Fall back to the first body form.
+                [pat-elts (syntax->list #'pat)]
+                [ctx (if (and pat-elts (> (length pat-elts) 1))
+                         (cadr pat-elts)  ;; first name in pattern
+                         #'k)])
+           (cond
+             ;; --- Map destructure: (keys: x y ...) ---
+             [(and (pair? p) (kw=? (car p) "keys"))
+              (let-values ([(names as-name defaults)
+                            (parse-keys-spec (cdr p))])
+                (let* ([tmp (gensym "map")]
+                       [binds
+                         (append
+                           (if as-name (list (list as-name tmp)) '())
+                           (map (lambda (name)
+                                  (let ([kw (sym->kw name)]
+                                        [dflt (assq name defaults)])
+                                    (if dflt
+                                        `(,name (if (contains? ,tmp ',kw)
+                                                    (get ,tmp ',kw)
+                                                    ,(cdr dflt)))
+                                        `(,name (get ,tmp ',kw)))))
+                                names))])
+                  (with-syntax ([tmp-id (datum->syntax ctx tmp)]
+                                [(bind ...) (datum->syntax ctx binds)]
+                                [e #'expr]
+                                [r #'rest]
+                                [(bd ...) #'(body ...)])
+                    #'(let ([tmp-id e])
+                        (let* (bind ...)
+                          (dlet r bd ...))))))]
+
+             ;; --- List destructure: (a b c) or (a b & rest) ---
+             [(pair? p)
+              (let-values ([(before rest-sym) (parse-list-pattern p)])
+                (let* ([tmp (gensym "seq")]
+                       [binds
+                         (append
+                           (let loop ([i 0] [syms before] [acc '()])
+                             (if (null? syms)
+                                 (reverse acc)
+                                 (loop (+ i 1)
+                                       (cdr syms)
+                                       (cons (list (car syms)
+                                                   (list-ref-expr tmp i))
+                                             acc))))
+                           (if rest-sym
+                               (list (list rest-sym
+                                           (list-tail-expr tmp
+                                                           (length before))))
+                               '()))])
+                  (with-syntax ([tmp-id (datum->syntax ctx tmp)]
+                                [(bind ...) (datum->syntax ctx binds)]
+                                [e #'expr]
+                                [r #'rest]
+                                [(bd ...) #'(body ...)])
+                    #'(let ([tmp-id e])
+                        (let* (bind ...)
+                          (dlet r bd ...))))))]
+
+             [else (syntax-error #'pat "dlet: unsupported pattern")]))])))
+
+  ;; dfn — define a function with destructured parameters.
+  ;;
+  ;; Parameters that are compound patterns are destructured. Plain
+  ;; symbol parameters pass through.
+  ;;
+  ;; (dfn (name (keys: x y) z) body ...)
+  ;; → (define (name __tmp1 z)
+  ;;     (dlet ([(keys: x y) __tmp1]) body ...))
+  (define-syntax dfn
+    (lambda (stx)
+      ;; Returns #t for identifiers (plain symbols), #f for compound
+      ;; patterns that need destructuring.
+      (define (simple-param? d)
+        (and (symbol? d)
+             (not (pair? d))))
+
+      (syntax-case stx ()
+        [(k (name params ...) body ...)
+         (identifier? #'name)
+         (let* ([ctx #'name]   ;; use the function name as lexical context
+                [param-data (map syntax->datum (syntax->list #'(params ...)))]
+                [formals
+                  (map (lambda (p)
+                         (if (simple-param? p) p (gensym "arg")))
+                       param-data)]
+                [bindings
+                  (let loop ([ps param-data] [fs formals] [acc '()])
+                    (cond
+                      [(null? ps) (reverse acc)]
+                      [(simple-param? (car ps))
+                       (loop (cdr ps) (cdr fs) acc)]
+                      [else
+                       (loop (cdr ps) (cdr fs)
+                             (cons (list (car ps) (car fs)) acc))]))])
+           (with-syntax ([(formal ...) (datum->syntax ctx formals)]
+                         [binds (datum->syntax ctx bindings)]
+                         [(bd ...) #'(body ...)])
+             #'(define (name formal ...)
+                 (dlet binds bd ...))))])))
+
+  ;; =========================================================================
+  ;; Dynamic vars — Clojure-style `def-dynamic` + `binding`.
+  ;;
+  ;; Wraps Chez's `make-parameter` / `parameterize` with the Clojure
+  ;; surface syntax.
+  ;;
+  ;;   (def-dynamic *debug* #f)
+  ;;   (binding ([*debug* #t])
+  ;;     (log "hi"))
+  ;;
+  ;; A dynamic-var identifier is actually bound to a Chez parameter
+  ;; object — normal reads look like `(*debug*)`. The `binding` macro
+  ;; expands to `parameterize`, which rebinds the parameter for the
+  ;; dynamic extent of its body.
+  ;;
+  ;; NOTE: because a dynamic var IS a parameter, reading it requires
+  ;; calling it (e.g. `(*debug*)` not `*debug*`). This matches Chez's
+  ;; parameter discipline. For shorthand read-as-value access, wrap
+  ;; the parameter in a `define-syntax` identifier macro on the user
+  ;; side, or project your own helper.
+  ;; =========================================================================
+  (define-syntax def-dynamic
+    (syntax-rules ()
+      [(_ name default)
+       (define name (make-parameter default))]
+      [(_ name default guard)
+       (define name (make-parameter default guard))]))
+
+  (define-syntax binding
+    (syntax-rules ()
+      [(_ ([var val] ...) body ...)
+       (parameterize ([var val] ...) body ...)]))
+
+  ;; =========================================================================
+  ;; Structured exceptions — Clojure's `ex-info` / `ex-data` surface.
+  ;;
+  ;; Wraps Jerboa/Chez's condition system so handlers can match on
+  ;; a data map rather than a class hierarchy.
+  ;;
+  ;;   (try
+  ;;     (throw (ex-info "nsf" (hash-map :from a :to b :reason 'nsf)))
+  ;;     (catch (e)
+  ;;       (when (ex-info? e)
+  ;;         (let ([data (ex-data e)])
+  ;;           (when (eq? (get data :reason) 'nsf)
+  ;;             (handle-nsf))))))
+  ;;
+  ;; `ex-info` creates a composite condition containing a data
+  ;; condition, a message condition, and optionally a nested cause.
+  ;; `ex-data`, `ex-message`, `ex-cause` extract the parts and return
+  ;; #f if the condition isn't an ex-info.
+  ;; =========================================================================
+
+  (define-condition-type &ex-info &condition
+    make-ex-info-condition ex-info-condition?
+    (data ex-info-condition-data)
+    (cause ex-info-condition-cause))
+
+  (define ex-info
+    (case-lambda
+      [(msg data) (ex-info msg data #f)]
+      [(msg data cause)
+       (condition
+         (make-ex-info-condition data cause)
+         (make-message-condition msg))]))
+
+  (define (ex-info? c)
+    (and (condition? c) (ex-info-condition? c)))
+
+  (define (ex-data c)
+    (and (condition? c)
+         (ex-info-condition? c)
+         (ex-info-condition-data c)))
+
+  (define (ex-message c)
+    (cond
+      [(and (condition? c) (message-condition? c))
+       (condition-message c)]
+      [else #f]))
+
+  (define (ex-cause c)
+    (and (condition? c)
+         (ex-info-condition? c)
+         (ex-info-condition-cause c)))
 
 ) ;; end library

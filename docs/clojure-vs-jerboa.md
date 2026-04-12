@@ -1499,17 +1499,19 @@ Most of the features originally ranked "Tier 1 / Tier 2" are now in place. The C
 
 What's left, ranked by value-per-effort. Each entry links to the section above for the full discussion.
 
-### Tier 1 — Biggest daily-ergonomics wins, low-to-medium effort
+### Tier 1 — ✅ Landed (2026-04-11)
 
-| Feature | Section | Effort | Why it's worth doing |
-|---------|---------|--------|----------------------|
-| **Map destructuring with `:keys` in `let`/`def`** | [§14](#14-destructuring-everywhere) | Easy–Medium | Single biggest "I miss this every day" gap for Clojure migrants. `(def (f {:keys [name age]}) ...)` in function params. A macro on top of the existing `match` machinery. |
-| **`ex-info` / `ex-data` structured exceptions** | [§27](#27-exception-design-ex-info) | Easy | Ten-line shim over Jerboa's condition system. Makes every library catch-by-data-shape instead of catch-by-class. |
-| **`memoize` / `iterate` / `repeatedly`** | [§26](#26-memoize-trampoline-and-friends) | Easy | The three missing functional combinators. Couple dozen lines total. |
-| **`clojure.walk` (`postwalk` / `prewalk` / `keywordize-keys`)** | [§33](#33-clojurewalk) | Easy | Generic tree rewriting. Self-contained library, ~100 lines. |
-| **`doto` macro** | [§38](#38-miscellaneous-small-things-that-add-up) | Trivial | Threads an object through side-effecting calls. One-macro add. |
-| **Dynamic vars + `binding` sugar** | [§16](#16-dynamic-vars-and-thread-local-binding) | Easy | Wrap `make-parameter`/`parameterize` in `def-dynamic` + `binding` macros so Clojure porters don't have to know about Chez parameters. |
-| **Map-convenience stragglers** | [§38](#38-miscellaneous-small-things-that-add-up) | Easy | `merge-with`, `zipmap`, `reduce-kv`, `min-key`/`max-key`. The handful of map-convenience functions not yet exported from `(std clojure)` (merge and select-keys already landed). Each is 5–15 lines. |
+All Tier 1 items shipped in a single batch in `(std clojure)` and `(std clojure walk)`.
+
+| Feature | Section | Status | Notes |
+|---------|---------|--------|-------|
+| **Map destructuring with `:keys` in `let`/`def`** | [§14](#14-destructuring-everywhere) | ✅ Landed | `dlet` macro with list destructure, map `:keys`, `:as`, `:or` defaults. `dfn` for destructured function params. |
+| **`ex-info` / `ex-data` structured exceptions** | [§27](#27-exception-design-ex-info) | ✅ Landed | `ex-info`, `ex-info?`, `ex-data`, `ex-message`, `ex-cause`. Condition-type based. |
+| **`memoize` / `iterate` / `repeatedly`** | [§26](#26-memoize-trampoline-and-friends) | ✅ Landed | Re-exported from prelude internals. `iterate` is strict/bounded: `(iterate n f x)`. |
+| **`clojure.walk` (`postwalk` / `prewalk` / `keywordize-keys`)** | [§33](#33-clojurewalk) | ✅ Landed | New `(std clojure walk)` module. Handles lists, vectors, pmaps, pvecs, psets. |
+| **`doto` macro** | [§38](#38-miscellaneous-small-things-that-add-up) | ✅ Landed | `syntax-rules` macro in `(std clojure)`. |
+| **Dynamic vars + `binding` sugar** | [§16](#16-dynamic-vars-and-thread-local-binding) | ✅ Landed | `def-dynamic` wraps `make-parameter`, `binding` wraps `parameterize`. |
+| **Map-convenience stragglers** | [§38](#38-miscellaneous-small-things-that-add-up) | ✅ Landed | `merge-with`, `zipmap`, `reduce-kv`, `min-key`, `max-key`. |
 
 ### Tier 2 — High value, medium effort, self-contained
 
@@ -1549,6 +1551,6 @@ What's left, ranked by value-per-effort. Each entry links to the section above f
 
 ### Recommendation
 
-If I were picking the next pass after this campaign: **Tier 1 as a single batch**. Map destructuring, `ex-info`, `memoize`/`iterate`/`repeatedly`, `clojure.walk`, `doto`, and dynamic-var sugar together are maybe a few days of work and close most of the "I type this every hour and Jerboa doesn't have it" complaints from Clojure migrants. Tier 2 items become more attractive in isolation once Tier 1 is in place. Tier 3's STM is the only remaining "foundational" gap and deserves a real design round of its own.
+Tier 1 is done. The next natural pass is **Tier 2 items in isolation** — lazy sequences, zippers, and Specter-style paths each stand alone and become more attractive now that the core ergonomics gap is closed. Tier 3's STM is the only remaining "foundational" gap and deserves a real design round of its own.
 
 The language features above are what you'd port. The culture is built alongside, one idiomatic library at a time.
