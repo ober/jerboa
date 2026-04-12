@@ -4,7 +4,7 @@
 demonstrates why Jerboa exists — Clojure's data philosophy, Erlang's fault
 tolerance, Go's deployment story, and built-in security, all in one 15MB binary.
 
-**Status:** 2026-04-12 — Design
+**Status:** 2026-04-12 — Phase 2 complete
 
 ---
 
@@ -664,7 +664,6 @@ curl localhost:8080/api/stats
 **Non-goals for Phase 1:**
 - Persistence across restarts (in-memory only)
 - TLS termination (use a reverse proxy, or wait for Phase 3)
-- User-defined filters (Phase 2)
 - Static binary packaging (Phase 3)
 
 **Success criteria:**
@@ -679,45 +678,52 @@ curl localhost:8080/api/stats
 
 **Deliverable:** Sandboxed user filter support + handler registry
 
-2.1 **Sandboxed eval** — Users submit filter expressions via
-    `POST /api/filters`.  Filters are stored and evaluated in a Landlock
-    sandbox for each incoming event.  Events that fail the filter are
-    dropped before reaching workers.
+- [x] 2.1 **Sandboxed eval** — Users submit filter expressions via
+    `POST /api/filters`.  Filters evaluated per-event via
+    `restricted-eval-string` (allowlist-only: no I/O, no FFI) with a
+    2-second engine-based timeout (no fork — fiber-safe).  Events that
+    fail any filter are dropped silently before processing.
 
-```scheme
-;; User submits:
-;; POST /api/filters
-;; {"name": "big-payments", "code": "(> (cdr (assoc \"amount\" evt)) 1000)"}
+    ```
+    POST /api/filters  {"name":"payments-only","code":"(equal? (cdr (assoc \"type\" evt)) \"payment.completed\")"}
+    GET  /api/filters
+    DELETE /api/filters/:name
+    ```
 
-;; Internally:
-(def (apply-user-filters event filters)
-  (every
-    (lambda (f)
-      (let ([result (eval-user-filter (hash-ref f "code") event)])
-        (and (not (err? result))
-             (unwrap result))))
-    filters))
-```
+    Key implementation detail: event data is bound as `evt` (a deep
+    alist), so filter code uses `assoc` with string keys (not `assq`).
 
-2.2 **Hot handler registration** — New webhook types can be registered at
-    runtime via the REPL or an admin API.  No restart required.
+- [x] 2.2 **Hot handler registration** — New webhook types registered at
+    runtime via `POST /api/handlers`.  No restart required.  Handler
+    code runs in a custom restricted environment (`safe-bindings` +
+    `displayln`) with a 5-second engine timeout.  Exceptions propagate
+    to the worker's retry machinery.
 
-```scheme
-;; Via REPL connected to running service:
-(hash-put! handlers "order.shipped"
-  (lambda (evt)
-    (send-notification! (hash-ref (hash-ref evt "payload") "email")
-      "Your order has shipped!")))
-```
+    ```
+    POST /api/handlers  {"type":"order.shipped","code":"(displayln \"shipped: \" (cdr (assoc \"id\" evt)))"}
+    GET  /api/handlers
+    ```
 
-2.3 **Retry with exponential backoff** — Failed events re-enter the channel
-    with a retry count.  Workers check the count and delay processing.
-    After N retries, events go to a dead-letter store.
+- [x] 2.3 **Retry with exponential backoff** — Failed events re-enter the
+    channel with an incremented retry count.  Workers delay via
+    `fork-thread` + `sleep` (non-blocking, OS-thread safe).  Dedup
+    transducer passes retried events (`retry-count > 0`).  After 3
+    retries, events go to a dead-letter STM store.
+
+    ```
+    GET  /api/dead-letter
+    POST /api/dead-letter/:id/replay
+    ```
+
+    Replay sets `retry-count: 1` to bypass the dedup filter.
 
 **Success criteria:**
-- User filter code cannot read files, open sockets, or run longer than 2s
-- Hot-registered handlers process events without service restart
-- Failed events retry 3 times with 1s/2s/4s backoff
+- [x] Filter code cannot call `open-file`, `socket`, or any I/O (allowlist env)
+- [x] Filter with 2s timeout verified: `with-timeout` uses Chez engines, no fork
+- [x] Hot-registered handlers process events without service restart (verified: `order.shipped`, `inventory.updated`)
+- [x] Failed events retry 3× with 1s/2s/4s backoff then dead-letter (verified in log)
+- [x] Dead-letter replay re-processes event and clears queue (verified: status → "ok")
+- [x] Runs with `make run` (690 lines of Scheme)
 
 ### Phase 3: Production Hardening
 
