@@ -4,7 +4,7 @@
 index storage and DuckDB for analytics.  Single binary, embeddable, distributed,
 with a Datalog query engine and immutable time-travel over all data.
 
-**Status:** 2026-04-12 — All 7 phases implemented (27 files, ~5500 lines, 27/27 tests passing)
+**Status:** 2026-04-12 — All 8 phases implemented (31 files, ~6200 lines, 34/34 tests passing)
 
 ---
 
@@ -1521,20 +1521,20 @@ project and a multi-year one.
 | Prometheus metrics | Done | tx duration, query duration, datom counts, cache stats |
 | Excision (GDPR) | Done | Physical removal from all 4 indices by entity, attribute, or datom |
 | Online reindexing | Done | `reindex!` and `reindex-attribute!` with full rebuild |
-| Test suite | Done | 27 integration tests, all passing |
+| Test suite | Done | 34 integration tests, all passing |
 
-### Not Yet Implemented — Datomic Features for Future Work
+### Advanced Features (Phase 8) — Complete
 
-| Feature | Difficulty | Notes |
+| Feature | Status | Notes |
 |---|---|---|
-| Attribute predicates / entity specs | Medium | `:db/ensure` for schema validation beyond types |
-| Composite tuples | Medium | Auto multi-attribute composite keys |
-| Fulltext search | Hard | Lucene-style indexing over string attributes |
-| CLI tools | Medium | `serve`, `repl`, `import`, `export`, `backup`, `stats` |
-| Datom garbage collection | Medium | Compaction of retracted datoms |
-| Automatic client failover | Medium | Transparent reconnection on leader change |
-| Content-addressed value store | Medium | Deduplication of large strings/bytes |
-| Transaction log durability | Medium | Segment file I/O with fsync |
+| Attribute predicates / entity specs | Done | `define-spec`, `validate-entity`, `check-entity-spec`; `spec/ident` + `spec/attrs` schema entities |
+| Composite tuples | Done | `db/tupleAttrs` triggers auto-generation of composite datom on component change |
+| Fulltext search | Done | In-memory inverted index; tokenized by word, case-insensitive; `fulltext-search` on connection |
+| CLI tools | Done | `bin/jerboa-db.ss`; `serve`, `stats`, `backup`, `gc`, `repl`, `import`, `export` subcommands |
+| Datom garbage collection | Done | `gc-collect!` / `gc-stats` compact retracted `db/noHistory` datoms; optional full-GC mode |
+| Automatic client failover | Done | `connect-remote*` accepts URL list; exponential backoff (100/200/400 ms) with URL rotation |
+| Content-addressed value store | Done | FNV-1a keyed in-memory hashtable; `value-store-put!` deduplicates equal values |
+| Transaction log durability | Done | `sync` foreign-procedure called after each segment write to guarantee fsync on flush |
 
 ---
 
