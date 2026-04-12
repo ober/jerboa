@@ -96,9 +96,15 @@
     persistent-set-hash in-pset
 
     ;; ---- Re-exports from (std misc atom) ----
-    atom atom? deref reset! swap! compare-and-set!
+    atom atom? reset! swap! compare-and-set!
     add-watch! remove-watch!
     volatile! volatile? vreset! vswap! vderef
+
+    ;; ---- Delay / Future / Promise (Clojure-style) ----
+    clj-delay delay? clj-force
+    clj-future future? future-cancel future-cancelled? future-done?
+    clj-promise promise? deliver
+    deref
 
     ;; ---- Re-exports from (std misc meta) ----
     with-meta meta vary-meta meta-wrapped? strip-meta
@@ -151,7 +157,7 @@
           (rename (std pset)
                   (persistent-set!    pset-persistent!))
           (std concur hash)
-          (std misc atom)
+          (except (std misc atom) deref)
           (std misc meta)
           (std misc nested)
           (only (std misc func) fnil every-pred some-fn)
@@ -1548,7 +1554,164 @@
     (when (lazy-seq? seq)
       (lazy-for-each (lambda (_) (void)) seq)))
 
-  ;; realized? — check if a lazy seq has been forced
-  (define realized? lazy-realized?)
+  ;; realized? — polymorphic: lazy seqs, delays, futures, promises
+  (define (realized? x)
+    (cond
+      [(lazy-seq? x) (lazy-realized? x)]
+      [(delay? x) (delay-realized? x)]
+      [(future? x) (future-done? x)]
+      [(promise? x) (promise-realized? x)]
+      [else (error 'realized? "not a realizable type" x)]))
+
+  ;; =========================================================================
+  ;; Delay / Future / Promise — Clojure-style concurrency primitives
+  ;; =========================================================================
+
+  ;; ---- Delay: lazy memoized computation ----
+  ;; (clj-delay body ...) → delay object, computed at most once on deref
+
+  (define-record-type clj-delay-record
+    (nongenerative std-clojure-delay)
+    (fields thunk
+            (mutable value)
+            (mutable realized?))
+    (sealed #t)
+    (protocol (lambda (new) (lambda (thunk) (new thunk (void) #f)))))
+
+  (define-syntax clj-delay
+    (syntax-rules ()
+      [(_ body ...)
+       (make-clj-delay-record (lambda () body ...))]))
+
+  (define (delay? x) (clj-delay-record? x))
+
+  (define (delay-realized? d) (clj-delay-record-realized? d))
+
+  (define (force-delay d)
+    (unless (clj-delay-record-realized? d)
+      (let ([v ((clj-delay-record-thunk d))])
+        (unless (clj-delay-record-realized? d)
+          (clj-delay-record-value-set! d v)
+          (clj-delay-record-realized?-set! d #t))))
+    (clj-delay-record-value d))
+
+  (define clj-force force-delay)
+
+  ;; ---- Future: computation in a separate thread ----
+  ;; (clj-future body ...) → future object, runs body in a new thread
+
+  (define-record-type clj-future-record
+    (nongenerative std-clojure-future)
+    (fields (mutable value)
+            (mutable done?)
+            (mutable exception)
+            (mutable cancelled?)
+            mutex
+            condvar
+            (mutable thread))
+    (sealed #t))
+
+  (define-syntax clj-future
+    (syntax-rules ()
+      [(_ body ...)
+       (let* ([mtx (make-mutex)]
+              [cv (make-condition)]
+              [f (make-clj-future-record (void) #f #f #f mtx cv #f)])
+         (let ([t (fork-thread
+                    (lambda ()
+                      (guard (exn
+                               [#t
+                                (with-mutex mtx
+                                  (clj-future-record-exception-set! f exn)
+                                  (clj-future-record-done?-set! f #t)
+                                  (condition-broadcast cv))])
+                        (let ([v (begin body ...)])
+                          (with-mutex mtx
+                            (clj-future-record-value-set! f v)
+                            (clj-future-record-done?-set! f #t)
+                            (condition-broadcast cv))))))])
+           (clj-future-record-thread-set! f t)
+           f))]))
+
+  (define (future? x) (clj-future-record? x))
+
+  (define (future-done? f)
+    (clj-future-record-done? f))
+
+  (define (future-cancel f)
+    (with-mutex (clj-future-record-mutex f)
+      (unless (clj-future-record-done? f)
+        (clj-future-record-cancelled?-set! f #t)
+        (clj-future-record-done?-set! f #t)
+        (condition-broadcast (clj-future-record-condvar f))))
+    #t)
+
+  (define (future-cancelled? f)
+    (clj-future-record-cancelled? f))
+
+  (define (deref-future f)
+    (with-mutex (clj-future-record-mutex f)
+      (let loop ()
+        (cond
+          [(clj-future-record-cancelled? f)
+           (error 'deref "future was cancelled")]
+          [(clj-future-record-done? f)
+           (let ([exn (clj-future-record-exception f)])
+             (if exn (raise exn) (clj-future-record-value f)))]
+          [else
+           (condition-wait (clj-future-record-condvar f)
+                           (clj-future-record-mutex f))
+           (loop)]))))
+
+  ;; ---- Promise: write-once value, delivered from another thread ----
+  ;; (clj-promise) → promise object
+  ;; (deliver p val) → delivers val to the promise
+
+  (define-record-type clj-promise-record
+    (nongenerative std-clojure-promise)
+    (fields (mutable value)
+            (mutable realized?)
+            mutex
+            condvar)
+    (sealed #t)
+    (protocol (lambda (new)
+                (lambda ()
+                  (new (void) #f (make-mutex) (make-condition))))))
+
+  (define (clj-promise) (make-clj-promise-record))
+
+  (define (promise? x) (clj-promise-record? x))
+
+  (define (promise-realized? p) (clj-promise-record-realized? p))
+
+  (define (deliver p val)
+    (with-mutex (clj-promise-record-mutex p)
+      (unless (clj-promise-record-realized? p)
+        (clj-promise-record-value-set! p val)
+        (clj-promise-record-realized?-set! p #t)
+        (condition-broadcast (clj-promise-record-condvar p))))
+    p)
+
+  (define (deref-promise p)
+    (with-mutex (clj-promise-record-mutex p)
+      (let loop ()
+        (if (clj-promise-record-realized? p)
+          (clj-promise-record-value p)
+          (begin
+            (condition-wait (clj-promise-record-condvar p)
+                            (clj-promise-record-mutex p))
+            (loop))))))
+
+  ;; ---- Polymorphic deref ----
+  ;; Works on atoms, delays, futures, and promises
+
+  (define (deref x)
+    (cond
+      [(atom? x) (atom-deref x)]
+      [(delay? x) (force-delay x)]
+      [(future? x) (deref-future x)]
+      [(promise? x) (deref-promise x)]
+      [(volatile? x) (vderef x)]
+      [else (error 'deref "not a deref-able type" x)]))
 
 ) ;; end library
