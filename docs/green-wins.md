@@ -4,7 +4,7 @@
 ergonomics of Go goroutines, the safety of Erlang, and the raw speed of
 io_uring — all in a language that fits in your head.
 
-**Status:** 2026-04-11 — Roadmap. No phases started yet.
+**Status:** 2026-04-11 — All 6 phases implemented.
 
 ---
 
@@ -523,12 +523,12 @@ node.
 ## Priority Order
 
 ```
-Phase 1  ██████████  — Foundation. Without this, nothing else works.
-Phase 2  ████████    — The thing users actually see.
-Phase 4  ██████      — The difference between demo and production.
-Phase 3  █████       — Required for real-world servers (DNS, TLS, files).
-Phase 5  ████        — Modern protocol support.
-Phase 6  ███         — Performance ceiling. Do last.
+Phase 1  ██████████  ✓ (std net io) — epoll poller, fiber-aware TCP
+Phase 2  ████████    ✓ (std net fiber-httpd) — fiber-native HTTP/1.1
+Phase 3  █████       ✓ (std net workpool/resolve/filepool) — blocking offload
+Phase 4  ██████      ✓ semaphore, metrics, admission control, graceful shutdown
+Phase 5  ████        ✓ (std net fiber-ws) — WebSocket with httpd integration
+Phase 6  ███         ✓ (std net sendfile) + (std net connpool) — zero-copy, pooling
 ```
 
 ## Success Criteria
