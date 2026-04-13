@@ -386,9 +386,16 @@
   (define cpu-count
     (let ([cached
            (guard (exn [#t 1])
-             (let ([c-sysconf (foreign-procedure "sysconf" (int) long)])
-               (let ([result (c-sysconf 84)])
-                 (if (> result 0) result 1))))])
+             (let* ([mt (symbol->string (machine-type))]
+                    [sc (cond
+                          [(or (string-contains mt "osx")
+                               (string-contains mt "fb")
+                               (string-contains mt "ob")
+                               (string-contains mt "nb")) 58]
+                          [else 84])]  ;; Linux
+                    [c-sysconf (foreign-procedure "sysconf" (int) long)]
+                    [result (c-sysconf sc)])
+               (if (> result 0) result 1)))])
       (lambda () cached)))
 
   ;; ================================================================

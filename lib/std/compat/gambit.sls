@@ -22,10 +22,19 @@
       (lambda (p) (write obj p))))
 
   ;; ##cpu-count — number of online processors
+  ;; _SC_NPROCESSORS_ONLN: 58 on macOS/BSD, 84 on Linux
   (define gambit-cpu-count
-    (let ([sysconf (foreign-procedure "sysconf" (long) long)])
+    (let* ([mt (symbol->string (machine-type))]
+           [len (string-length mt)]
+           [ends? (lambda (sfx)
+                    (let ([sl (string-length sfx)])
+                      (and (>= len sl)
+                           (string=? (substring mt (- len sl) len) sfx))))]
+           [sc (if (or (ends? "osx") (ends? "fb") (ends? "ob") (ends? "nb"))
+                 58 84)]
+           [sysconf (foreign-procedure "sysconf" (long) long)])
       (lambda ()
-        (let ([n (sysconf 84)])  ;; _SC_NPROCESSORS_ONLN = 84 on Linux
+        (let ([n (sysconf sc)])
           (if (> n 0) n 1)))))
 
   ;; ##current-time-milliseconds — monotonic time in milliseconds

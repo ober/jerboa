@@ -86,13 +86,50 @@
 
   ;; ========== CPU Count ==========
 
+  ;; _SC_NPROCESSORS_ONLN constant by platform.
+  (define (sc-nprocessors-onln)
+    (cond
+      [(platform-macos?) 58]   ;; macOS/Darwin (_SC_NPROCESSORS_ONLN)
+      [(platform-bsd?)   58]   ;; FreeBSD/OpenBSD/NetBSD
+      [(platform-linux?) 84]   ;; Linux
+      [else #f]))
+
+  ;; Try sysconf(3) directly — works when libc symbols are already
+  ;; visible (static binary, or libc already loaded).
+  (define (try-sysconf)
+    (guard (e [#t #f])
+      (let ([k (sc-nprocessors-onln)])
+        (and k
+             (let ([n ((foreign-procedure "sysconf" (int) long) k)])
+               (and (> n 0) n))))))
+
+  ;; Try loading libc then retrying sysconf — needed in interpreter
+  ;; mode where libc symbols aren't visible until explicitly loaded.
+  (define (try-sysconf/load-libc)
+    (guard (e [#t #f])
+      (platform-load-libc)
+      (try-sysconf)))
+
+  ;; Linux-only pure-Scheme fallback: count "processor" lines in
+  ;; /proc/cpuinfo. Used when both sysconf paths fail.
+  (define (try-proc-cpuinfo)
+    (guard (e [#t #f])
+      (call-with-port (open-input-file "/proc/cpuinfo")
+        (lambda (p)
+          (let loop ([n 0])
+            (let ([line (get-line p)])
+              (if (eof-object? line)
+                (and (> n 0) n)
+                (loop (if (and (>= (string-length line) 9)
+                               (string=? (substring line 0 9) "processor"))
+                        (+ n 1)
+                        n)))))))))
+
   (define (platform-cpu-count)
-    (guard (e [#t 1])
-      (cond
-        [(or (platform-linux?) (platform-macos?) (platform-bsd?))
-         (let ([n ((foreign-procedure "sysconf" (int) long) 84)])  ;; _SC_NPROCESSORS_ONLN
-           (if (> n 0) n 1))]
-        [else 1])))
+    (or (try-sysconf)
+        (try-sysconf/load-libc)
+        (try-proc-cpuinfo)
+        1))
 
   ;; ========== Page Size ==========
 

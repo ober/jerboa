@@ -63,6 +63,9 @@
     ;; ---- std/text/json ----
     read-json write-json json-object->string string->json-object
 
+    ;; ---- std/os/platform ----
+    cpu-count
+
     ;; ---- std/os/path ----
     path-expand path-normalize path-directory path-strip-directory
     path-extension path-strip-extension
@@ -244,6 +247,7 @@
     read-line                            ;; Gambit
     force-output                         ;; Gambit
     string-map                           ;; Racket/R7RS
+    processor-count                      ;; Racket
     ;; Regex aliases (common generic names from Python, Ruby, JS training data)
     regex-match regex-search regex-replace regex-replace-all)
 
@@ -277,6 +281,7 @@
                         with-exception-handler)
     (except (std sugar) try catch finally)
     (std text json)
+    (only (std os platform) platform-cpu-count)
     (std os path)
     (std regex)
     (std rx)
@@ -295,6 +300,10 @@
     (std misc meta)
     (std misc shared)
     (std misc nested))
+
+  ;; ---- System ----
+  (define cpu-count platform-cpu-count)
+  (define processor-count platform-cpu-count)  ;; Racket name
 
   ;; ---- AI compatibility aliases ----
   (define hash-has-key? hash-key?)
