@@ -26,10 +26,14 @@
   (import (chezscheme))
 
   (define _native-loaded
-    (or (guard (e [#t #f]) (load-shared-object "libjerboa_native.so") #t)
-        (guard (e [#t #f]) (load-shared-object "lib/libjerboa_native.so") #t)
-        (guard (e [#t #f]) (load-shared-object "./lib/libjerboa_native.so") #t)
-        (error 'std/db/sqlite-native "libjerboa_native.so not found")))
+    ;; In static builds (JEMACS_STATIC=1), symbols are pre-registered via Sforeign_symbol.
+    (let ([static? (let ([v (getenv "JEMACS_STATIC")]) (and v (not (string=? v "")) (not (string=? v "0"))))])
+      (if static?
+          #t
+          (or (guard (e [#t #f]) (load-shared-object "libjerboa_native.so") #t)
+              (guard (e [#t #f]) (load-shared-object "lib/libjerboa_native.so") #t)
+              (guard (e [#t #f]) (load-shared-object "./lib/libjerboa_native.so") #t)
+              (error 'std/db/sqlite-native "libjerboa_native.so not found")))))
 
   ;; Constants
   (define SQLITE_INTEGER 1)

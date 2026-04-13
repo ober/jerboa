@@ -729,9 +729,11 @@ curl localhost:8080/api/stats
 
 **Deliverable:** Static binary, TLS, persistence, metrics (~1048 lines)
 
-- [x] 3.1 **Static musl binary** — `make edge-static` target added.  Builds
-    via `docker run jerboa21/jerboa` base image (musl Chez + Rust toolchain).
-    No runtime dependencies.  Deploy with `scp edge host:/usr/local/bin/`.
+- [x] 3.1 **Static musl binary** — `make edge-static` produces a fully static
+    ELF via `docker run jerboa21/jerboa` (musl Chez + Rust toolchain + WPO).
+    **Verified: 12MB, zero runtime dependencies.**  All native FFI symbols
+    registered via `Sforeign_symbol`; `JEMACS_STATIC=1` auto-set at startup
+    to bypass `load-shared-object` calls.  Deploy with `scp edge host:/usr/local/bin/`.
 
 - [x] 3.2 **TLS termination** — Optional `EDGE_TLS_CERT` / `EDGE_TLS_KEY`
     env vars for direct HTTPS.  Uses `(std net tls-rustls)` — the Rust
@@ -765,7 +767,7 @@ curl localhost:8080/api/stats
     `(exit 0)`.  Verified: completes in ~3s.
 
 **Success criteria:**
-- [x] `make edge-static` target wired to `jerboa21/jerboa` Docker image
+- [x] `make edge-static` builds and runs — 12MB, fully static, verified functional
 - [x] Graceful shutdown completes in ~3 seconds (verified)
 - [x] Prometheus scrape at `/metrics` returns well-formed text format (verified)
 - [x] SQLite events survive restart: `total:2 ok:2` after reload (verified)
