@@ -52,20 +52,43 @@
   ;; ========== Optional native backend ==========
   ;; Try to load the Rust regex crate shim for linear-time matching.
   ;; Falls back silently to pregexp if the library is absent.
+  ;;
+  ;; Search order:
+  ;;   1. libjerboa_native.so / .dylib  (LD_LIBRARY_PATH / DYLD_LIBRARY_PATH)
+  ;;   2. lib/libjerboa_native.so / .dylib  (relative to CWD)
+  ;;   3. $JERBOA_HOME/lib/libjerboa_native.so / .dylib  (absolute, set by Makefile)
 
   (define native-available?
-    (or (guard (exn [#t #f]) (load-shared-object "libjerboa_native.so") #t)
-        (guard (exn [#t #f]) (load-shared-object "lib/libjerboa_native.so") #t)
-        #f))
+    (let ([try (lambda (path)
+                 (guard (exn [#t #f])
+                   (load-shared-object path) #t))]
+          [home (or (getenv "JERBOA_HOME") "")])
+      (or (try "libjerboa_native.so")
+          (try "libjerboa_native.dylib")
+          (try "lib/libjerboa_native.so")
+          (try "lib/libjerboa_native.dylib")
+          (and (not (string=? home ""))
+               (or (try (string-append home "/lib/libjerboa_native.so"))
+                   (try (string-append home "/lib/libjerboa_native.dylib"))))
+          #f)))
 
-  ;; Foreign procedures — always defined; Chez resolves symbols lazily on Linux.
-  ;; These are ONLY CALLED when native-available? is #t.
+  ;; Foreign procedures — defined conditionally.
+  ;; On Linux, Chez resolves foreign symbols lazily, so unconditional
+  ;; (foreign-procedure ...) forms are safe.  On macOS, symbols are resolved
+  ;; eagerly at definition time; if the native library is absent the form
+  ;; throws "no entry for".  Guard by checking native-available? first.
   (define c-native-compile
-    (foreign-procedure "jerboa_regex_compile" (u8* size_t u8*) int))
+    (if native-available?
+      (foreign-procedure "jerboa_regex_compile" (u8* size_t u8*) int)
+      (lambda args (error 'c-native-compile "native backend not available"))))
   (define c-native-find
-    (foreign-procedure "jerboa_regex_find" (unsigned-64 u8* size_t u8* u8*) int))
+    (if native-available?
+      (foreign-procedure "jerboa_regex_find" (unsigned-64 u8* size_t u8* u8*) int)
+      (lambda args (error 'c-native-find "native backend not available"))))
   (define c-native-free
-    (foreign-procedure "jerboa_regex_free" (unsigned-64) int))
+    (if native-available?
+      (foreign-procedure "jerboa_regex_free" (unsigned-64) int)
+      (lambda args (error 'c-native-free "native backend not available"))))
 
   ;; ========== Records ==========
 
