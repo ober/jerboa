@@ -73,10 +73,10 @@
           #f)))
 
   ;; Foreign procedures — defined conditionally.
-  ;; On Linux, Chez resolves foreign symbols lazily, so unconditional
-  ;; (foreign-procedure ...) forms are safe.  On macOS, symbols are resolved
-  ;; eagerly at definition time; if the native library is absent the form
-  ;; throws "no entry for".  Guard by checking native-available? first.
+  ;; (foreign-procedure ...) is evaluated eagerly in compiled/WPO code on both
+  ;; Linux and macOS; if the native library is absent the form throws "no entry
+  ;; for".  Guard by checking native-available? first.  The fallback lambdas are
+  ;; never called because every call site checks native-available? first.
   (define c-native-compile
     (if native-available?
       (foreign-procedure "jerboa_regex_compile" (u8* size_t u8*) int)
