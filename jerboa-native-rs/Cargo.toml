@@ -31,6 +31,7 @@ getrandom = "0.2"
 duckdb = { version = "1", features = ["bundled"] }
 mozjs = { git = "https://github.com/servo/mozjs.git", optional = true, default-features = false, features = ["jit", "libz-sys"] }
 mozjs_sys = { git = "https://github.com/servo/mozjs.git", optional = true }
+rscap = "0.3"
 
 [features]
 default = []

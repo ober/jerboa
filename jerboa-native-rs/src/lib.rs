@@ -1,4 +1,5 @@
 mod panic;
+mod pcap_capture;
 mod crypto;
 mod compress;
 mod duckdb_native;
