@@ -8,6 +8,7 @@
 (library (std net request)
   (export
     http-get http-post http-put http-delete http-head
+    http-post-stream
     request-status request-text request-content
     request-headers request-header request-close
     parse-url url-parts-scheme url-parts-host url-parts-port url-parts-path
@@ -286,7 +287,7 @@
     (let* ([max-body  (*http-max-body-size*)]
            [cl        (assoc "content-length"    headers)]
            [chunked?  (let ([te (assoc "transfer-encoding" headers)])
-                        (and te (string-contains (cdr te) "chunked")))])
+                        (and te (string-contains (string-downcase (cdr te)) "chunked")))])
       (cond
         ;; Chunked transfer encoding
         [chunked?
@@ -403,5 +404,185 @@
       [else (let loop ([rest (cdr lst)] [acc (car lst)])
               (if (null? rest) acc
                 (loop (cdr rest) (string-append acc sep (car rest)))))]))
+
+  ;; ========== Streaming POST ==========
+  ;;
+  ;; http-post-stream calls event-cb with each complete SSE event string,
+  ;; e.g. "data: {...}" (without the trailing \n\n).
+  ;; Called with #f when the stream ends.
+  ;; Returns the HTTP status code.
+
+  (define (http-post-stream url headers body event-cb)
+    (let* ([parsed (parse-url url)]
+           [scheme (url-parts-scheme parsed)]
+           [host   (url-parts-host   parsed)]
+           [port   (url-parts-port   parsed)]
+           [path   (url-parts-path   parsed)])
+      (if (string=? scheme "https")
+        (stream-post-https host port path headers body event-cb)
+        (stream-post-http  host port path headers body event-cb))))
+
+  ;; ─── HTTPS streaming ───────────────────────────────────────────
+
+  (define (stream-post-https host port path headers data event-cb)
+    (let ([handle #f])
+      (dynamic-wind
+        (lambda () (void))
+        (lambda ()
+          (set! handle (rustls-connect host port))
+          (send-https-request handle "POST" host path headers data)
+          (let* ([hdr+lo  (stream-read-headers handle)]
+                 [hdr-str (car hdr+lo)]
+                 [leftover (cdr hdr+lo)]
+                 [hdr-port (open-input-string hdr-str)]
+                 [status   (parse-status-code (read-line-crlf hdr-port))]
+                 [hdrs     (read-headers hdr-port)]
+                 [chunked? (let ([te (assoc "transfer-encoding" hdrs)])
+                             (and te (string-contains (string-downcase (cdr te)) "chunked")))])
+            (stream-sse handle leftover chunked? event-cb)
+            (event-cb #f)
+            status))
+        (lambda ()
+          (when handle
+            (guard (e [#t (void)]) (rustls-close handle)))))))
+
+  (define (stream-read-headers handle)
+    ;; Read bytes until \r\n\r\n, return (cons header-string leftover-string)
+    (let ([buf (make-bytevector 4096)]
+          [acc ""])
+      (let loop ()
+        (let ([n (rustls-read handle buf 4096)])
+          (if (<= n 0)
+            (cons acc "")
+            (let* ([chunk   (utf8->string (bv-slice buf 0 n))]
+                   [combined (string-append acc chunk)]
+                   [sep      (string-contains combined "\r\n\r\n")])
+              (if sep
+                (cons (substring combined 0 (+ sep 4))
+                      (substring combined (+ sep 4) (string-length combined)))
+                (begin (set! acc combined) (loop)))))))))
+
+  (define (stream-sse handle leftover chunked? event-cb)
+    ;; Dispatch to chunked or plain SSE streaming
+    (if chunked?
+      (stream-sse-chunked handle leftover event-cb)
+      (stream-sse-plain   handle leftover event-cb)))
+
+  (define (stream-sse-plain handle leftover event-cb)
+    ;; Stream plain (non-chunked) SSE body
+    (let ([buf (make-bytevector 4096)]
+          [acc leftover])
+      (let loop ()
+        ;; Flush complete events already in acc
+        (let event-loop ()
+          (let ([sep (string-contains acc "\n\n")])
+            (when sep
+              (let ([event (string-trim (substring acc 0 sep))])
+                (when (> (string-length event) 0)
+                  (event-cb event)))
+              (set! acc (substring acc (+ sep 2) (string-length acc)))
+              (event-loop))))
+        ;; Read more bytes
+        (let ([n (rustls-read handle buf 4096)])
+          (when (> n 0)
+            (set! acc (string-append acc (utf8->string (bv-slice buf 0 n))))
+            (loop))))))
+
+  (define (stream-sse-chunked handle leftover event-cb)
+    ;; Stream chunked-TE SSE body: decode chunks then extract SSE events
+    (let ([buf     (make-bytevector 4096)]
+          [raw-acc leftover]   ; raw bytes including chunk headers
+          [sse-acc ""]         ; decoded data bytes
+          [done?   #f])
+      (define (decode-chunks!)
+        ;; Decode as many complete chunks as possible from raw-acc
+        (let loop ()
+          (when (not done?)
+            (let ([crlf (string-contains raw-acc "\r\n")])
+              (when crlf
+                (let* ([size-str  (substring raw-acc 0 crlf)]
+                       [semi      (string-contains size-str ";")]
+                       [hex       (string-trim (if semi
+                                                 (substring size-str 0 semi)
+                                                 size-str))]
+                       [chunk-len (string->number hex 16)])
+                  (when chunk-len
+                    (if (= chunk-len 0)
+                      (set! done? #t)
+                      (let ([data-start (+ crlf 2)]
+                            [data-end   (+ crlf 2 chunk-len)])
+                        ;; Need data + trailing \r\n in raw-acc
+                        (when (>= (string-length raw-acc) (+ data-end 2))
+                          (set! sse-acc
+                            (string-append sse-acc
+                              (substring raw-acc data-start data-end)))
+                          (set! raw-acc
+                            (substring raw-acc (+ data-end 2)
+                              (string-length raw-acc)))
+                          (loop)))))))))))
+      (define (flush-sse-events!)
+        (let loop ()
+          (let ([sep (string-contains sse-acc "\n\n")])
+            (when sep
+              (let ([event (string-trim (substring sse-acc 0 sep))])
+                (when (> (string-length event) 0)
+                  (event-cb event)))
+              (set! sse-acc (substring sse-acc (+ sep 2) (string-length sse-acc)))
+              (loop)))))
+      (let outer-loop ()
+        (decode-chunks!)
+        (flush-sse-events!)
+        (when (not done?)
+          (let ([n (rustls-read handle buf 4096)])
+            (when (> n 0)
+              (set! raw-acc
+                (string-append raw-acc (utf8->string (bv-slice buf 0 n))))
+              (outer-loop)))))))
+
+  ;; ─── HTTP (plain) streaming ─────────────────────────────────────
+
+  (define (stream-post-http host port path headers data event-cb)
+    (let-values ([(in out) (tcp-connect host port)])
+      (dynamic-wind
+        (lambda () (void))
+        (lambda ()
+          (send-http-request out "POST" host path headers data)
+          (let* ([status-code  (parse-status-code (read-line-crlf in))]
+                 [resp-headers (read-headers in)]
+                 [chunked?     (let ([te (assoc "transfer-encoding" resp-headers)])
+                                 (and te (string-contains (string-downcase (cdr te)) "chunked")))])
+            ;; For plain TCP, read body as string then process as SSE
+            (let ([body (if chunked?
+                          (read-chunked-body in (*http-max-body-size*))
+                          (let ([out-str (open-output-string)])
+                            (let loop ()
+                              (let ([c (read-char in)])
+                                (unless (eof-object? c)
+                                  (write-char c out-str)
+                                  (loop))))
+                            (get-output-string out-str)))])
+              ;; Process SSE events from complete body
+              (let ([acc body])
+                (let event-loop ()
+                  (let ([sep (string-contains acc "\n\n")])
+                    (when sep
+                      (let ([event (string-trim (substring acc 0 sep))])
+                        (when (> (string-length event) 0)
+                          (event-cb event)))
+                      (set! acc (substring acc (+ sep 2) (string-length acc)))
+                      (event-loop))))))
+            (event-cb #f)
+            status-code))
+        (lambda ()
+          (close-port in)
+          (close-port out)))))
+
+  ;; ─── Helpers ────────────────────────────────────────────────────
+
+  (define (bv-slice bv start end)
+    (let ([n (- end start)]
+          [out (make-bytevector (- end start))])
+      (bytevector-copy! bv start out 0 n)
+      out))
 
   ) ;; end library
