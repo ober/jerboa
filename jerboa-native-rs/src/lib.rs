@@ -1,23 +1,43 @@
 mod panic;
-mod pcap_capture;
-mod crypto;
 mod compress;
-mod duckdb_native;
 mod regex_native;
 mod secure_mem;
-mod sqlite;
-mod postgres_native;
-mod tls;
-mod x509;
 mod antidebug;
 mod integrity;
-mod x25519;
-mod ed25519;
 mod process_ctl;
+mod socks5_server;
+
+#[cfg(feature = "tls")]
+mod tls;
+#[cfg(feature = "tls")]
+mod x509;
+
+#[cfg(feature = "crypto")]
+mod crypto;
+#[cfg(feature = "crypto")]
+mod x25519;
+#[cfg(feature = "crypto")]
+mod ed25519;
+#[cfg(feature = "crypto")]
+mod embed_crypto;
+
+#[cfg(feature = "pcap")]
+mod pcap_capture;
+
+#[cfg(feature = "duckdb_feat")]
+mod duckdb_native;
+
+#[cfg(feature = "sqlite")]
+mod sqlite;
+
+#[cfg(feature = "postgres_feat")]
+mod postgres_native;
+
+#[cfg(feature = "wasm")]
 mod wasm;
+
 #[cfg(feature = "spidermonkey")]
 mod wasm_sm;
-mod socks5_server;
 
 #[cfg(target_os = "linux")]
 mod epoll;
