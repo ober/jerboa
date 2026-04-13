@@ -26,7 +26,12 @@
     raft-commit-index
     make-raft-cluster
     raft-cluster-nodes
-    raft-cluster-leader)
+    raft-cluster-leader
+    ;; Transport adapter hooks — needed by (jerboa-db transport)
+    raft-node-inbox          ;; (raft-node → channel) read-only: inject inbound messages
+    raft-node-peers          ;; (raft-node → list) read-only: current peers list
+    raft-node-peers-set!
+    raft-node-add-peer!)     ;; safe runtime peer addition (updates next/match-index for leaders)
 
   (import (chezscheme) (std misc channel))
 
@@ -159,9 +164,30 @@
   (define (majority count)
     (+ (quotient count 2) 1))
 
-  ;; Random election timeout: 150–300ms
-  (define (election-timeout-ms)
-    (+ 150 (random 150)))
+  ;; Random election timeout: 150–300ms per node.
+  ;; A node-specific constant offset (derived from the node's id) is added to
+  ;; the random component so that two nodes starting simultaneously cannot end
+  ;; up with identical timeouts even if Chez's PRNG returns the same value from
+  ;; concurrent threads (which it can, since random is not thread-safe).
+  (define (node-id-hash id)
+    ;; Simple integer hash of a symbol or integer node identifier.
+    (cond
+      [(integer? id) id]
+      [(symbol? id)
+       (let* ([s (symbol->string id)]
+              [n (string-length s)])
+         (let loop ([i 0] [h 0])
+           (if (= i n)
+             h
+             (loop (+ i 1) (+ (* h 31) (char->integer (string-ref s i)))))))]
+      [else 0]))
+
+  (define (election-timeout-ms node)
+    ;; Node-specific base: 0–74ms determined by node id, random: 0–74ms.
+    ;; Total range: 150–298ms; guaranteed unique initial value per node id.
+    (+ 150
+       (modulo (node-id-hash (raft-node-id node)) 75)
+       (random 75)))
 
   ;; Heartbeat interval: 50ms
   (define heartbeat-interval-ms 50)
@@ -228,7 +254,7 @@
     (when (raft-node-running? node)
       (let ([t (fork-thread
                  (lambda ()
-                   (let ([timeout-ms (election-timeout-ms)])
+                   (let ([timeout-ms (election-timeout-ms node)])
                      (sleep (make-time 'time-duration
                               (* timeout-ms 1000000) 0))
                      (when (and (raft-node-running? node)
@@ -267,18 +293,22 @@
           [commit (raft-node-commit-index node)])
       (for-each
         (lambda (peer-entry)
-          (let* ([peer-id (car peer-entry)]
-                 [ni (cdr (assv peer-id (raft-node-next-index node)))]
-                 [prev-index (- ni 1)]
-                 [prev-term (let ([e (log-entry-at node prev-index)])
-                              (if e (log-entry-term e) 0))]
-                 ;; entries from ni onwards
-                 [entries (filter (lambda (e)
-                                    (>= (log-entry-index e) ni))
-                                  (raft-node-log node))])
-            (send-to-peer node peer-id
-              (make-append-entries term id prev-index prev-term
-                                   entries commit))))
+          (guard (exn [#t (void)])   ;; never let a bad peer crash the message loop
+            (let* ([peer-id (car peer-entry)]
+                   ;; Safe lookup: peers added after become-leader! may not be in next-index yet;
+                   ;; fall back to log-last-index+1 so the peer gets a complete resync.
+                   [ni-entry (assv peer-id (raft-node-next-index node))]
+                   [ni (if ni-entry (cdr ni-entry) (+ (log-last-index node) 1))]
+                   [prev-index (- ni 1)]
+                   [prev-term (let ([e (log-entry-at node prev-index)])
+                                (if e (log-entry-term e) 0))]
+                   ;; entries from ni onwards
+                   [entries (filter (lambda (e)
+                                      (>= (log-entry-index e) ni))
+                                    (raft-node-log node))])
+              (send-to-peer node peer-id
+                (make-append-entries term id prev-index prev-term
+                                     entries commit)))))
         (raft-node-peers node))))
 
   ;; ========== Election Check ==========
@@ -414,7 +444,7 @@
                (let* ([existing (raft-node-log node)]
                       ;; Keep entries before first new entry
                       [keep (filter (lambda (e)
-                                      (< (log-entry-index e) prev-idx))
+                                      (<= (log-entry-index e) prev-idx))
                                     existing)])
                  ;; Append entries from leader
                  (raft-node-log-set! node (append keep entries))))
@@ -481,6 +511,26 @@
 
   ;; ========== Node Lifecycle ==========
 
+  ;; raft-node-add-peer! : raft-node peer-id channel -> void
+  ;;
+  ;; Safely adds a new peer to a running node.  Unlike raft-node-peers-set!,
+  ;; this function also initialises next-index and match-index for the new peer
+  ;; when the node is currently a leader, so the next call to send-heartbeats!
+  ;; does not crash with a missing assv entry.
+  ;;
+  ;; Thread-safe: acquires the node's mutex.
+  (define (raft-node-add-peer! node peer-id peer-chan)
+    (with-mutex (raft-node-mutex node)
+      (unless (assv peer-id (raft-node-peers node))
+        (raft-node-peers-set! node
+          (cons (cons peer-id peer-chan) (raft-node-peers node)))
+        (when (eq? (raft-node-state node) 'leader)
+          (let ([ni (+ (log-last-index node) 1)])
+            (raft-node-next-index-set! node
+              (cons (cons peer-id ni) (raft-node-next-index node)))
+            (raft-node-match-index-set! node
+              (cons (cons peer-id 0) (raft-node-match-index node))))))))
+
   (define (raft-start! node)
     (raft-node-running?-set! node #t)
     ;; Start main message loop in a thread
@@ -490,8 +540,10 @@
         (let loop ()
           (when (raft-node-running? node)
             (let ([msg (channel-get (raft-node-inbox node))])
-              (with-mutex (raft-node-mutex node)
-                (handle-message! node msg))
+              ;; Guard prevents any handler error from crashing the loop thread.
+              (guard (exn [#t (void)])
+                (with-mutex (raft-node-mutex node)
+                  (handle-message! node msg)))
               (loop))))))
     node)
 

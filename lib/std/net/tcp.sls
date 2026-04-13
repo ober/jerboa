@@ -20,7 +20,12 @@
     tcp-listen tcp-accept tcp-close
     tcp-connect
     tcp-server? tcp-server-port
-    with-tcp-server)
+    with-tcp-server
+    ;; Binary-port variants — for protocols that need raw bytevector I/O
+    ;; (e.g. FASL framing). Same semantics as tcp-accept/tcp-connect but
+    ;; returns (values binary-input-port binary-output-port) with no
+    ;; UTF-8 transcoder.
+    tcp-accept-binary tcp-connect-binary)
 
   (import (chezscheme))
 
@@ -296,5 +301,90 @@
           (transcoded-port out (make-transcoder (utf-8-codec)
                                  (eol-style none)
                                  (error-handling-mode replace)))))))
+
+  ;; ========== Binary-Port Variants ==========
+
+  (define (fd->binary-ports fd name)
+    ;; Like fd->ports but returns raw binary ports (no UTF-8 transcoder).
+    ;; Use for protocols that need put-bytevector / get-bytevector-n, e.g.
+    ;; FASL-framed Raft transport messages.
+    (set-nonblocking! fd)
+    (let ([closed? #f])
+      (let ([in (make-custom-binary-input-port
+                  (string-append name "-bin-in")
+                  (lambda (bv start count)
+                    (if closed? 0
+                      (let ([buf (make-bytevector count)])
+                        (let retry ()
+                          (let ([n (c-read fd buf count)])
+                            (cond
+                              [(> n 0)
+                               (bytevector-copy! buf 0 bv start n)
+                               n]
+                              [(and (< n 0)
+                                    (let ([e (get-errno)])
+                                      (or (= e EINTR) (= e EAGAIN))))
+                               (sleep *retry-delay*)
+                               (retry)]
+                              [else 0]))))))
+                  #f #f
+                  (lambda ()
+                    (unless closed?
+                      (set! closed? #t)
+                      (c-close fd))))]
+            [out (make-custom-binary-output-port
+                   (string-append name "-bin-out")
+                   (lambda (bv start count)
+                     (if closed? 0
+                       (let ([buf (make-bytevector count)])
+                         (bytevector-copy! bv start buf 0 count)
+                         (let lp ([written 0])
+                           (if (= written count)
+                             count
+                             (let ([n (c-write fd
+                                        (let ([tmp (make-bytevector (- count written))])
+                                          (bytevector-copy! buf written tmp 0 (- count written))
+                                          tmp)
+                                        (- count written))])
+                               (cond
+                                 [(> n 0) (lp (+ written n))]
+                                 [(and (< n 0)
+                                       (let ([e (get-errno)])
+                                         (or (= e EINTR) (= e EAGAIN))))
+                                  (sleep *retry-delay*)
+                                  (lp written)]
+                                 [else written])))))))
+                   #f #f #f)])
+        (values in out))))
+
+  (define (tcp-accept-binary srv)
+    ;; Like tcp-accept but returns (values binary-input-port binary-output-port).
+    (let ([fd (tcp-server-fd srv)])
+      (let loop ()
+        (let ([client-fd (c-accept fd 0 0)])
+          (cond
+            [(>= client-fd 0) (fd->binary-ports client-fd "tcp-client")]
+            [(let ([e (get-errno)]) (or (= e EINTR) (= e EAGAIN)))
+             (sleep *retry-delay*)
+             (loop)]
+            [else (error 'tcp-accept-binary "accept() failed")])))))
+
+  (define (tcp-connect-binary address port)
+    ;; Like tcp-connect but returns (values binary-input-port binary-output-port).
+    (let ([fd (c-socket AF_INET SOCK_STREAM 0)])
+      (when (< fd 0)
+        (error 'tcp-connect-binary "socket() failed"))
+      (let ([addr (make-sockaddr-in address port)])
+        (let loop ()
+          (let ([rc (c-connect fd addr SOCKADDR_IN_SIZE)])
+            (cond
+              [(>= rc 0)
+               (foreign-free addr)
+               (fd->binary-ports fd "tcp-connection")]
+              [(= (get-errno) EINTR) (loop)]
+              [else
+               (foreign-free addr)
+               (c-close fd)
+               (error 'tcp-connect-binary "connect() failed" address port)]))))))
 
   ) ;; end library
