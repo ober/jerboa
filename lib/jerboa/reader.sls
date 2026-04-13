@@ -170,10 +170,12 @@
          (reader-next! rs)
          (annotate rs (read-list rs #\) (+ depth 1)) loc))
 
-        ;; Square brackets — plain parentheses (same as Gerbil and Chez)
+        ;; Square brackets → (list ...) — Clojure-compatible vector literal
+        ;; [1 2 3] reads as (list 1 2 3), enabling persistent-vector semantics
+        ;; and Clojure-style let/for binding vectors.
         ((char=? ch #\[)
          (reader-next! rs)
-         (annotate rs (read-list rs #\] (+ depth 1)) loc))
+         (annotate rs (cons 'list (read-list rs #\] (+ depth 1))) loc))
 
         ;; Curly braces → (~ obj method args...)
         ((char=? ch #\{)
