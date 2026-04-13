@@ -70,6 +70,19 @@
           (std fiber)
           (std net io))
 
+  ;; ========== FFI: Rust HTTP parser ==========
+  ;; jerboa_http_parse is in libjerboa_native.so (loaded by epoll-native via io)
+
+  (define c-http-parse
+    (foreign-procedure "jerboa_http_parse" (u8* size_t u8*) int))
+
+  ;; Parse-out buffer layout (270 bytes):
+  ;; [0-3]   i32 status  (>0=header_end, 0=partial, -1=error)
+  ;; [4-5]   u16 method_start   [6-7]  u16 method_len
+  ;; [8-9]   u16 path_start     [10-11] u16 path_len
+  ;; [12]    u8  version        [13]    u8  nheaders
+  ;; [14..270] 32 * [name_start:u16, name_len:u16, val_start:u16, val_len:u16]
+
   ;; ========== Request record ==========
 
   (define-record-type request
@@ -132,160 +145,92 @@
     (fields (immutable handler))   ;; (lambda (fd poller req) ...)
     (sealed #t))
 
-  ;; ========== HTTP Parser ==========
+  ;; ========== HTTP Parser (Rust-backed) ==========
   ;;
-  ;; Reads HTTP/1.1 requests from a raw fd using fiber-aware I/O.
-  ;; Returns a request record or #f on connection close/error.
+  ;; Reads HTTP/1.1 requests using the Rust httparse crate for header parsing.
+  ;; hdr-buf (8192 bytes) and parse-out (270 bytes) are per-connection allocations
+  ;; passed in from handle-connection — zero per-request allocation on the hot path.
 
   (define *max-header-size* 8192)
   (define *max-body-size*   (* 10 1024 1024))  ;; 10MB
 
-  ;; Read bytes from fd into a bytevector buffer, growing as needed.
-  ;; Returns (values buf filled) where filled is total bytes in buf.
-  ;; Reads until we find \r\n\r\n (end of headers) or hit max.
-  (define (read-until-headers fd poller)
-    (let ([buf (make-bytevector *max-header-size*)]
-          [tmp (make-bytevector 4096)])
+  ;; Extract a sub-bytevector [start, start+len)
+  (define (bv-sub bv start len)
+    (let ([out (make-bytevector len)])
+      (bytevector-copy! bv start out 0 len)
+      out))
+
+  ;; Read the body using Content-Length, using bytes already buffered after header_end.
+  (define (read-body fd poller hdr-buf header-end filled content-length)
+    (if (or (not content-length) (= content-length 0))
+      #f
+      (let* ([already-have (- filled header-end)]
+             [body-buf (make-bytevector content-length)])
+        (when (> already-have 0)
+          (bytevector-copy! hdr-buf header-end body-buf 0
+            (min already-have content-length)))
+        (let loop ([got already-have])
+          (when (< got content-length)
+            (let ([tmp (make-bytevector (min 4096 (- content-length got)))])
+              (let ([n (fiber-tcp-read fd tmp
+                         (min 4096 (- content-length got)) poller)])
+                (when (> n 0)
+                  (bytevector-copy! tmp 0 body-buf got n)
+                  (loop (+ got n)))))))
+        (utf8->string body-buf))))
+
+  ;; Build alist of (lowercase-name . value) pairs from parse-out offsets into hdr-buf.
+  (define (extract-headers hdr-buf parse-out nhdrs)
+    (let loop ([i 0] [acc '()])
+      (if (fx>= i nhdrs)
+        (reverse acc)
+        (let* ([base (fx+ 14 (fx* i 8))]
+               [ns   (bytevector-u16-native-ref parse-out base)]
+               [nl   (bytevector-u16-native-ref parse-out (fx+ base 2))]
+               [vs   (bytevector-u16-native-ref parse-out (fx+ base 4))]
+               [vl   (bytevector-u16-native-ref parse-out (fx+ base 6))]
+               [name (string-downcase (utf8->string (bv-sub hdr-buf ns nl)))]
+               [val  (utf8->string (bv-sub hdr-buf vs vl))])
+          (loop (fx+ i 1) (cons (cons name val) acc))))))
+
+  ;; Read a full HTTP/1.1 request. hdr-buf (8192) and parse-out (270) are
+  ;; caller-provided per-connection buffers — no allocation on the common path.
+  (define (read-request fd poller hdr-buf parse-out)
+    (let ([tmp (make-bytevector 4096)])
       (let loop ([filled 0])
         (if (>= filled *max-header-size*)
-          (values buf filled)  ;; hit limit
+          #f
           (let ([n (fiber-tcp-read fd tmp
                      (min 4096 (- *max-header-size* filled))
                      poller)])
             (cond
-              [(<= n 0) (values buf filled)]  ;; EOF or error
+              [(<= n 0) #f]  ;; EOF / error
               [else
-               (bytevector-copy! tmp 0 buf filled n)
+               (bytevector-copy! tmp 0 hdr-buf filled n)
                (let ([total (+ filled n)])
-                 ;; Check for \r\n\r\n
-                 (if (header-complete? buf total)
-                   (values buf total)
-                   (loop total)))]))))))
-
-  (define (header-complete? buf len)
-    (let loop ([i 0])
-      (cond
-        [(> (+ i 3) len) #f]
-        [(and (= (bytevector-u8-ref buf i) 13)       ;; \r
-              (= (bytevector-u8-ref buf (+ i 1)) 10)  ;; \n
-              (= (bytevector-u8-ref buf (+ i 2)) 13)  ;; \r
-              (= (bytevector-u8-ref buf (+ i 3)) 10))  ;; \n
-         #t]
-        [else (loop (+ i 1))])))
-
-  ;; Find the offset of \r\n\r\n in buffer
-  (define (find-header-end buf len)
-    (let loop ([i 0])
-      (cond
-        [(> (+ i 3) len) len]
-        [(and (= (bytevector-u8-ref buf i) 13)
-              (= (bytevector-u8-ref buf (+ i 1)) 10)
-              (= (bytevector-u8-ref buf (+ i 2)) 13)
-              (= (bytevector-u8-ref buf (+ i 3)) 10))
-         (+ i 4)]
-        [else (loop (+ i 1))])))
-
-  ;; Parse the header portion into a request record.
-  (define (parse-request-headers buf header-end)
-    (let* ([header-str (utf8->string
-                         (let ([b (make-bytevector header-end)])
-                           (bytevector-copy! buf 0 b 0 header-end) b))]
-           [lines (string-split-crlf header-str)])
-      (if (null? lines) #f
-        (let ([req-line (car lines)]
-              [header-lines (cdr lines)])
-          (let ([parts (string-split-spaces req-line)])
-            (if (< (length parts) 3) #f
-              (let ([method (car parts)]
-                    [path (cadr parts)]
-                    [version (caddr parts)]
-                    [headers (parse-headers header-lines)])
-                (make-request method path version headers #f))))))))
-
-  (define (string-split-crlf s)
-    (let loop ([start 0] [acc '()])
-      (let ([idx (string-search s "\r\n" start)])
-        (if idx
-          (let ([line (substring s start idx)])
-            (if (= (string-length line) 0)
-              (reverse acc)
-              (loop (+ idx 2) (cons line acc))))
-          (let ([rest (substring s start (string-length s))])
-            (reverse (if (= (string-length rest) 0) acc (cons rest acc))))))))
-
-  (define (string-search s needle start)
-    (let ([slen (string-length s)]
-          [nlen (string-length needle)])
-      (let loop ([i start])
-        (cond
-          [(> (+ i nlen) slen) #f]
-          [(string=? (substring s i (+ i nlen)) needle) i]
-          [else (loop (+ i 1))]))))
-
-  (define (string-split-spaces s)
-    (let loop ([i 0] [start 0] [acc '()])
-      (cond
-        [(= i (string-length s))
-         (reverse (if (= start i) acc
-                    (cons (substring s start i) acc)))]
-        [(char=? (string-ref s i) #\space)
-         (loop (+ i 1) (+ i 1)
-           (if (= start i) acc (cons (substring s start i) acc)))]
-        [else (loop (+ i 1) start acc)])))
-
-  (define (parse-headers lines)
-    (let loop ([ls lines] [acc '()])
-      (if (null? ls) (reverse acc)
-        (let* ([line (car ls)]
-               [colon (string-index line #\:)])
-          (if colon
-            (let ([name (string-downcase (substring line 0 colon))]
-                  [value (string-trim-left (substring line (+ colon 1) (string-length line)))])
-              (loop (cdr ls) (cons (cons name value) acc)))
-            (loop (cdr ls) acc))))))
-
-  (define (string-trim-left s)
-    (let loop ([i 0])
-      (if (and (< i (string-length s)) (char=? (string-ref s i) #\space))
-        (loop (+ i 1))
-        (substring s i (string-length s)))))
-
-  ;; Read the body based on Content-Length
-  (define (read-body fd poller buf header-end filled content-length)
-    (if (or (not content-length) (= content-length 0))
-      #f
-      (let* ([already-have (- filled header-end)]
-             [need (- content-length already-have)]
-             [body-buf (make-bytevector content-length)])
-        ;; Copy what we already have
-        (when (> already-have 0)
-          (bytevector-copy! buf header-end body-buf 0
-            (min already-have content-length)))
-        ;; Read the rest
-        (when (> need 0)
-          (let loop ([got already-have])
-            (when (< got content-length)
-              (let ([tmp (make-bytevector (min 4096 (- content-length got)))])
-                (let ([n (fiber-tcp-read fd tmp
-                           (min 4096 (- content-length got)) poller)])
-                  (when (> n 0)
-                    (bytevector-copy! tmp 0 body-buf got n)
-                    (loop (+ got n))))))))
-        (utf8->string body-buf))))
-
-  ;; Full request read
-  (define (read-request fd poller)
-    (let-values ([(buf filled) (read-until-headers fd poller)])
-      (if (= filled 0) #f  ;; connection closed
-        (let ([header-end (find-header-end buf filled)])
-          (let ([req (parse-request-headers buf header-end)])
-            (if (not req) #f
-              (let ([cl-str (request-header req "content-length")])
-                (let ([content-length (and cl-str (string->number cl-str))])
-                  (let ([body (read-body fd poller buf header-end filled content-length)])
-                    (make-request (request-method req) (request-path req)
-                                  (request-version req) (request-headers req)
-                                  body))))))))))
+                 (c-http-parse hdr-buf total parse-out)
+                 (let ([status (bytevector-s32-native-ref parse-out 0)])
+                   (cond
+                     ;; Complete — status is the header_end byte offset
+                     [(> status 0)
+                      (let* ([header-end status]
+                             [ms    (bytevector-u16-native-ref parse-out 4)]
+                             [ml    (bytevector-u16-native-ref parse-out 6)]
+                             [ps    (bytevector-u16-native-ref parse-out 8)]
+                             [pl    (bytevector-u16-native-ref parse-out 10)]
+                             [nhdrs (bytevector-u8-ref parse-out 13)]
+                             [method  (utf8->string (bv-sub hdr-buf ms ml))]
+                             [path    (utf8->string (bv-sub hdr-buf ps pl))]
+                             [headers (extract-headers hdr-buf parse-out nhdrs)]
+                             [cl-str  (let ([e (assoc "content-length" headers)])
+                                        (and e (cdr e)))]
+                             [cl      (and cl-str (string->number cl-str))]
+                             [body    (read-body fd poller hdr-buf header-end total cl)])
+                        (make-request method path "HTTP/1.1" headers body))]
+                     ;; Partial — need more data
+                     [(= status 0) (loop total)]
+                     ;; Parse error
+                     [else #f])))]))))))
 
   ;; ========== HTTP Response Writer ==========
 
@@ -301,35 +246,76 @@
       [(503) "Service Unavailable"] [(504) "Gateway Timeout"]
       [else "Unknown"]))
 
-  (define (write-response fd poller resp)
-    (let* ([status (response-status resp)]
-           [headers (response-headers resp)]
-           [body (response-body resp)]
-           [body-bv (cond
-                      [(not body) (make-bytevector 0)]
-                      [(string? body)
-                       (string->bytevector body (make-transcoder (utf-8-codec)))]
-                      [(bytevector? body) body]
-                      [else (string->bytevector (format "~a" body)
-                              (make-transcoder (utf-8-codec)))])]
-           [status-line (format "HTTP/1.1 ~a ~a\r\n" status (status-text status))]
-           ;; Build header string
-           [header-str
-             (let ([h (string-append
-                        status-line
-                        (format "Content-Length: ~a\r\n" (bytevector-length body-bv))
-                        (apply string-append
-                          (map (lambda (hdr)
-                                 (format "~a: ~a\r\n" (car hdr) (cdr hdr)))
-                               headers))
-                        "\r\n")])
-               h)]
-           [header-bv (string->bytevector header-str (make-transcoder (utf-8-codec)))])
-      ;; Write headers
-      (fiber-tcp-write fd header-bv (bytevector-length header-bv) poller)
-      ;; Write body
-      (when (> (bytevector-length body-bv) 0)
-        (fiber-tcp-write fd body-bv (bytevector-length body-bv) poller))))
+  ;; ========== HTTP Response Writer (pre-allocated buffer + writev) ==========
+  ;;
+  ;; Writes response headers directly into a caller-provided bytevector
+  ;; (no string allocation), then sends headers+body in one writev syscall.
+
+  ;; Write decimal integer n into bv at pos. Returns new pos.
+  (define (write-decimal! bv pos n)
+    (if (fx= n 0)
+      (begin (bytevector-u8-set! bv pos 48) (fx+ pos 1))
+      (let* ([s (number->string n)]
+             [len (string-length s)])
+        (do ([i 0 (fx+ i 1)]) ((fx= i len))
+          (bytevector-u8-set! bv (fx+ pos i)
+            (char->integer (string-ref s i))))
+        (fx+ pos len))))
+
+  ;; Write ASCII string s into bv at pos. Returns new pos.
+  (define (write-ascii! bv pos s)
+    (let ([len (string-length s)])
+      (do ([i 0 (fx+ i 1)]) ((fx= i len))
+        (bytevector-u8-set! bv (fx+ pos i)
+          (char->integer (string-ref s i))))
+      (fx+ pos len)))
+
+  ;; Write CRLF at pos. Returns new pos.
+  (define (write-crlf! bv pos)
+    (bytevector-u8-set! bv pos 13)
+    (bytevector-u8-set! bv (fx+ pos 1) 10)
+    (fx+ pos 2))
+
+  ;; Fill resp-buf with the HTTP status line + headers block (no body).
+  ;; Returns number of bytes written.
+  (define (fill-response-headers! resp-buf status headers body-len)
+    (let* ([pos (write-ascii! resp-buf 0 "HTTP/1.1 ")]
+           [pos (write-decimal! resp-buf pos status)]
+           [pos (begin (bytevector-u8-set! resp-buf pos 32) (fx+ pos 1))]
+           [pos (write-ascii! resp-buf pos (status-text status))]
+           [pos (write-crlf! resp-buf pos)]
+           [pos (write-ascii! resp-buf pos "Content-Length: ")]
+           [pos (write-decimal! resp-buf pos body-len)]
+           [pos (write-crlf! resp-buf pos)]
+           [pos (let lp ([hs headers] [p pos])
+                  (if (null? hs) p
+                    (let* ([h (car hs)]
+                           [p (write-ascii! resp-buf p (car h))]
+                           [p (begin (bytevector-u8-set! resp-buf p 58)
+                                     (bytevector-u8-set! resp-buf (fx+ p 1) 32)
+                                     (fx+ p 2))]
+                           [p (write-ascii! resp-buf p (cdr h))]
+                           [p (write-crlf! resp-buf p)])
+                      (lp (cdr hs) p))))]
+           [pos (write-crlf! resp-buf pos)])
+      pos))
+
+  ;; Write response: fills resp-buf with headers, sends headers+body via writev2.
+  ;; resp-buf is a per-connection 4096-byte buffer (from handle-connection).
+  (define (write-response fd poller resp resp-buf)
+    (let* ([status   (response-status resp)]
+           [headers  (response-headers resp)]
+           [body     (response-body resp)]
+           [body-bv  (cond
+                       [(not body) #f]
+                       [(string? body)
+                        (string->bytevector body (make-transcoder (utf-8-codec)))]
+                       [(bytevector? body) body]
+                       [else (string->bytevector (format "~a" body)
+                               (make-transcoder (utf-8-codec)))])]
+           [body-len (if body-bv (bytevector-length body-bv) 0)]
+           [hdr-len  (fill-response-headers! resp-buf status headers body-len)])
+      (fiber-tcp-writev2 fd resp-buf hdr-len body-bv poller)))
 
   ;; ========== Router ==========
 
@@ -455,11 +441,16 @@
             (immutable conn-semaphore))   ;; fiber-semaphore or #f
     (sealed #t))
 
-  ;; Connection handler: one fiber per connection, keep-alive loop
+  ;; Connection handler: one fiber per connection, keep-alive loop.
+  ;; Per-connection buffers are allocated once here and reused across
+  ;; all keep-alive requests on this connection.
   (define (handle-connection fd poller handler metrics)
-    (let ([ws-upgraded? #f])
+    (let ([hdr-buf   (make-bytevector 8192)]    ;; request header read buffer
+          [parse-out (make-bytevector 270 0)]   ;; Rust HTTP parse result
+          [resp-buf  (make-bytevector 4096 0)]  ;; response header write buffer
+          [ws-upgraded? #f])
       (let loop ()
-        (let ([req (read-request fd poller)])
+        (let ([req (read-request fd poller hdr-buf parse-out)])
           (when req
             (metrics-inc-requests! metrics)
             (let ([resp (guard (exn [#t
@@ -480,7 +471,7 @@
                  ;; Track 5xx errors
                  (when (>= (response-status resp) 500)
                    (metrics-inc-errors! metrics))
-                 (write-response fd poller resp)
+                 (write-response fd poller resp resp-buf)
                  ;; Keep-alive: check Connection header
                  (let ([conn (request-header req "connection")])
                    (unless (and conn (string=? (string-downcase conn) "close"))

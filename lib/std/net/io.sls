@@ -48,6 +48,7 @@
     fiber-tcp-accept
     fiber-tcp-read
     fiber-tcp-write
+    fiber-tcp-writev2
     fiber-tcp-connect
 
     ;; Convenience
@@ -76,6 +77,7 @@
   (define c-setsockopt (foreign-procedure "setsockopt" (int int int void* int) int))
   (define c-read      (foreign-procedure "read" (int u8* size_t) ssize_t))
   (define c-write     (foreign-procedure "write" (int u8* size_t) ssize_t))
+  (define c-writev2   (foreign-procedure "jerboa_writev2" (int u8* size_t u8* size_t) ssize_t))
   (define c-htons     (foreign-procedure "htons" (unsigned-short) unsigned-short))
   (define c-inet-pton (foreign-procedure "inet_pton" (int string void*) int))
   (define c-getsockname (foreign-procedure "getsockname" (int void* void*) int))
@@ -307,19 +309,19 @@
         (or (ft-ref fdt fd)
             (let ([pd (make-poll-desc fd)])
               (ft-set! fdt fd pd)
-              (epoll-add! (io-poller-epfd poller) fd
-                (bitwise-ior EPOLLIN EPOLLOUT))
+              ;; Edge-triggered: one notification per data-arrival transition.
+            ;; Re-arm via epoll_modify before each park closes the race window.
+            (epoll-add! (io-poller-epfd poller) fd
+                (bitwise-ior EPOLLIN EPOLLOUT EPOLLET))
               pd)))))
 
   ;; ========== fiber-wait-readable / fiber-wait-writable ==========
   ;;
-  ;; Strategy: Level-triggered epoll. The poller fires continuously
-  ;; for ready fds. When a fiber parks for read/write, the next
-  ;; poller iteration will see the fd is ready (if it is), find the
-  ;; registered fiber, and wake it. No lost events possible.
-  ;;
-  ;; To avoid busy-wake on fds that are always writable, the poller
-  ;; only wakes fibers that are actually registered (non-#f).
+  ;; Strategy: Edge-triggered epoll (EPOLLET). The kernel fires once per
+  ;; state transition (data arrives / send buffer drains). Before parking,
+  ;; we call epoll_modify to re-arm the fd — this forces an immediate
+  ;; notification if the fd is already ready, closing the EAGAIN→park race.
+  ;; This mirrors Go's netpoller model.
 
   (define (fiber-wait-readable fd poller)
     (let ([f (fiber-self)]
@@ -327,11 +329,15 @@
       (fiber-check-cancelled!)
       (let ([pdmx (poll-desc-pd-mutex pd)]
             [gate (box 'channel)])
-        ;; Register fiber as reader
+        ;; Register fiber as reader under lock
         (mutex-acquire pdmx)
         (poll-desc-reader-fiber-set! pd f)
         (mutex-release pdmx)
-        ;; Signal poller in case it's sleeping in epoll_wait
+        ;; Re-arm: if fd became readable between EAGAIN and now,
+        ;; this epoll_modify causes an immediate EPOLLIN on next epoll_wait.
+        (epoll-modify! (io-poller-epfd poller) fd
+          (bitwise-ior EPOLLIN EPOLLOUT EPOLLET))
+        ;; Signal poller thread to break out of epoll_wait
         (eventfd-signal (io-poller-wakefd poller))
         ;; Park the fiber
         (fiber-gate-set! f gate)
@@ -347,10 +353,13 @@
       (fiber-check-cancelled!)
       (let ([pdmx (poll-desc-pd-mutex pd)]
             [gate (box 'channel)])
-        ;; Register fiber as writer
+        ;; Register fiber as writer under lock
         (mutex-acquire pdmx)
         (poll-desc-writer-fiber-set! pd f)
         (mutex-release pdmx)
+        ;; Re-arm for write readiness
+        (epoll-modify! (io-poller-epfd poller) fd
+          (bitwise-ior EPOLLIN EPOLLOUT EPOLLET))
         ;; Signal poller
         (eventfd-signal (io-poller-wakefd poller))
         ;; Park the fiber
@@ -456,6 +465,76 @@
              (fiber-wait-writable fd poller)
              (loop written)]
             [else written])))))  ;; partial write on error
+
+  ;; ---------- fiber-tcp-writev2 ----------
+  ;;
+  ;; Write hdr-bv (hdr-n bytes) + body-bv in a single writev syscall.
+  ;; body-bv may be #f or zero-length for header-only responses.
+  ;; The common case (small responses) completes in one syscall.
+  ;; Partial writes fall back to position-tracked loop.
+
+  (define (fiber-tcp-writev2 fd hdr-bv hdr-n body-bv poller)
+    (let* ([body-n (if (and body-bv (fx> (bytevector-length body-bv) 0))
+                       (bytevector-length body-bv) 0)]
+           [total  (fx+ hdr-n body-n)]
+           [dummy  (make-bytevector 0)]
+           [b2     (if (fx> body-n 0) body-bv dummy)]
+           ;; First attempt: combined writev
+           [rc0    (c-writev2 fd hdr-bv hdr-n b2 body-n)])
+      (cond
+        ;; Everything sent in one shot (common case)
+        [(fx= rc0 total) rc0]
+        ;; EAGAIN / EINTR on first try — park and fall through to loop
+        [(or (fx<= rc0 0)
+             (let ([e (get-errno)]) (or (= e EAGAIN) (= e EINTR))))
+         (when (fx<= rc0 0)
+           (fiber-wait-writable fd poller))
+         (let loop ([sent (fxmax rc0 0)])
+           (if (fx= sent total)
+             sent
+             (let* ([h-off (fxmin sent hdr-n)]
+                    [b-off (fxmax 0 (fx- sent hdr-n))]
+                    [h-rem (fx- hdr-n h-off)]
+                    [b-rem (fx- body-n b-off)]
+                    [buf   (if (fx> h-rem 0)
+                               (if (fx= h-off 0) hdr-bv
+                                   (let ([t (make-bytevector h-rem)])
+                                     (bytevector-copy! hdr-bv h-off t 0 h-rem) t))
+                               (if (fx= b-off 0) body-bv
+                                   (let ([t (make-bytevector b-rem)])
+                                     (bytevector-copy! body-bv b-off t 0 b-rem) t)))]
+                    [n     (if (fx> h-rem 0) h-rem b-rem)]
+                    [rc    (c-write fd buf n)])
+               (cond
+                 [(fx> rc 0) (loop (fx+ sent rc))]
+                 [(let ([e (get-errno)]) (or (= e EAGAIN) (= e EINTR)))
+                  (fiber-wait-writable fd poller)
+                  (loop sent)]
+                 [else sent]))))]
+        ;; Partial write — continue from where writev left off
+        [else
+         (let loop ([sent rc0])
+           (if (fx= sent total)
+             sent
+             (let* ([h-off (fxmin sent hdr-n)]
+                    [b-off (fxmax 0 (fx- sent hdr-n))]
+                    [h-rem (fx- hdr-n h-off)]
+                    [b-rem (fx- body-n b-off)]
+                    [buf   (if (fx> h-rem 0)
+                               (if (fx= h-off 0) hdr-bv
+                                   (let ([t (make-bytevector h-rem)])
+                                     (bytevector-copy! hdr-bv h-off t 0 h-rem) t))
+                               (if (fx= b-off 0) body-bv
+                                   (let ([t (make-bytevector b-rem)])
+                                     (bytevector-copy! body-bv b-off t 0 b-rem) t)))]
+                    [n     (if (fx> h-rem 0) h-rem b-rem)]
+                    [rc    (c-write fd buf n)])
+               (cond
+                 [(fx> rc 0) (loop (fx+ sent rc))]
+                 [(let ([e (get-errno)]) (or (= e EAGAIN) (= e EINTR)))
+                  (fiber-wait-writable fd poller)
+                  (loop sent)]
+                 [else sent]))))])))
 
   ;; ---------- fiber-tcp-connect ----------
   ;;

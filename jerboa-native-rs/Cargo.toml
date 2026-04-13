@@ -13,6 +13,7 @@ argon2 = "0.5"
 flate2 = "1"
 regex = "1"
 libc = "0.2"
+httparse = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 postgres = "0.19"
 x25519-dalek = { version = "2", features = ["static_secrets"] }

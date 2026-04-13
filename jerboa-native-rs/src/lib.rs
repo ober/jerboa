@@ -20,6 +20,8 @@ mod socks5_server;
 #[cfg(target_os = "linux")]
 mod epoll;
 #[cfg(target_os = "linux")]
+mod http_parse;
+#[cfg(target_os = "linux")]
 mod inotify_native;
 #[cfg(target_os = "linux")]
 mod landlock;
