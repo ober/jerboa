@@ -48,6 +48,7 @@
     condition-variable-signal! condition-variable-broadcast!
     condition-variable-specific condition-variable-specific-set!
     thread-send thread-receive thread-mailbox-next
+    thread-done?
 
     ;; Path utilities (re-exported from :std/os/path)
     path-expand path-normalize path-directory

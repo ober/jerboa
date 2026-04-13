@@ -39,6 +39,9 @@
 
     ;; Mailbox (Gambit thread mailboxes)
     thread-send thread-receive thread-mailbox-next
+
+    ;; Thread completion check (non-blocking)
+    thread-done?
     )
 
   (import (except (chezscheme)
@@ -90,6 +93,7 @@
   (define (thread-name t) (gerbil-thread-name-val t))
   (define (thread-specific t) (gerbil-thread-specific t))
   (define (thread-specific-set! t v) (gerbil-thread-specific-set! t v))
+  (define (thread-done? t) (gerbil-thread-done? t))
 
   ;; Thread-local storage for current gerbil-thread (no global lock!)
   ;; make-thread-parameter is Chez's SMP-safe thread-local mechanism.

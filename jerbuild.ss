@@ -270,6 +270,12 @@
             [(char=? ch #\")
              (write-char ch out)
              (loop (+ i 1) #t #f)]
+            ;; Empty bracket pair [] → '() (Gerbil empty list literal)
+            [(and (char=? ch #\[)
+                  (< (+ i 1) len)
+                  (char=? (string-ref str (+ i 1)) #\]))
+             (display "'()" out)
+             (loop (+ i 2) #f #f)]
             ;; Bracket open → (
             [(char=? ch #\[)
              (write-char #\( out)
@@ -451,10 +457,13 @@
     ;; (jerboa core) has a compat wrapper. Prefer srfi-19 when both present.
     ((jerboa core) (std srfi srfi-19)
      time->seconds)
-    ;; (std srfi srfi-1) provides iota, any, every, filter-map, take, drop, delete, etc.
+    ;; (std srfi srfi-1) provides iota, any, every, filter-map, take, drop, delete,
+    ;; append-map, fold, fold-right, last, delete-duplicates, count, etc.
     ;; (jerboa core) has compat versions. Prefer srfi-1 when both present.
     ((jerboa core) (std srfi srfi-1)
-     iota any every filter-map take drop delete)
+     iota any every filter-map take drop delete
+     append-map fold fold-right last delete-duplicates count
+     take-while drop-while concatenate list-index)
     ;; (jerboa runtime) provides iota. Prefer srfi-1 when both imported.
     ((jerboa runtime) (std srfi srfi-1)
      iota)
@@ -514,6 +523,67 @@
                            result))))
             (loop (cdr rules) result)))))))
 
+(define *library-known-exports*
+  ;; Known exports per library that commonly conflict with local body definitions.
+  ;; When the body locally defines a symbol AND imports a library that exports
+  ;; that same symbol, we exclude the symbol from the library import.
+  ;; (Local definition takes priority — matches Gerbil semantics.)
+  '(((std srfi srfi-1) .
+     (iota any every filter-map take drop delete
+      append-map fold fold-right last delete-duplicates count
+      take-while drop-while concatenate list-index
+      zip reduce reduce-right not-pair? null-list?
+      first second third fourth fifth sixth seventh eighth ninth tenth))
+    ((std srfi srfi-13) .
+     (string-join string-trim string-trim-right
+      string-prefix? string-prefix-ci? string-suffix? string-suffix-ci?
+      string-contains string-contains-ci
+      string-index string-index-right string-count))
+    ((jerboa core) .
+     (iota any every filter-map take drop delete
+      append-map open-process open-input-process time->seconds))
+    ((jerboa runtime) .
+     (iota))))
+
+(define (resolve-local-vs-import-conflicts imports body-forms)
+  ;; When the body locally defines a symbol that a library imports also exports,
+  ;; the local definition wins (Gerbil semantics). Exclude those symbols from
+  ;; the offending imports to avoid R6RS "multiple definitions" errors.
+  (let ([local-defs (collect-all-local-definitions body-forms)])
+    (map (lambda (imp)
+           (let* ([lib (unwrap-import-lib imp)]
+                  [entry (assoc lib *library-known-exports*)]
+                  [conflicts (and entry
+                                  (filter (lambda (sym) (memq sym local-defs))
+                                          (cdr entry)))])
+             (if (and conflicts (not (null? conflicts)))
+               (if (and (pair? imp) (eq? (car imp) 'except))
+                 ;; Already an except form — add new conflicts, deduplicating
+                 (let ([new (filter (lambda (s) (not (memq s (cddr imp)))) conflicts)])
+                   (if (null? new) imp (append imp new)))
+                 `(except ,imp ,@conflicts))
+               imp)))
+         imports)))
+
+(define (collect-all-local-definitions body-forms)
+  ;; Collect all top-level symbol names defined in body-forms.
+  ;; Used for local-vs-import conflict resolution.
+  (let loop ([forms body-forms] [names '()])
+    (if (null? forms)
+      names
+      (let ([form (car forms)])
+        (loop (cdr forms)
+              (if (and (pair? form) (pair? (cdr form)))
+                (let ([head (car form)]
+                      [second (cadr form)])
+                  (cond
+                    [(and (memq head '(def define)) (symbol? second))
+                     (cons second names)]
+                    [(and (memq head '(def define)) (pair? second) (symbol? (car second)))
+                     (cons (car second) names)]
+                    [else names]))
+                names))))))
+
 ;;;; ============================================================
 ;;;; Chez exclusion triggers (conditional approach)
 ;;;; ============================================================
@@ -532,7 +602,9 @@
     ;; srfi-1 redefines iota with SRFI-1 semantics (count [start [step]])
     ((std srfi srfi-1) . (iota))
     ;; std/misc/ports redefines with-input-from-string and with-output-to-string
-    ((std misc ports) . (with-input-from-string with-output-to-string))))
+    ((std misc ports) . (with-input-from-string with-output-to-string))
+    ;; jsh/util re-exports and overrides several chezscheme identifiers
+    ((jsh util) . (string-downcase string-upcase file-directory? file-regular?))))
 
 ;; Chez Scheme built-in names that may be redefined in user code.
 ;; Only these will be auto-excluded when a local definition shadows them.
@@ -546,6 +618,7 @@
     with-exception-handler raise
     error? condition? condition-message
     string-copy string-append substring
+    string-trim string-trim-right
     string-upcase string-downcase string-titlecase
     number->string string->number
     symbol->string string->symbol
@@ -630,26 +703,16 @@
     (jerboa runtime)))
 
 (define (add-auto-imports translated-imports)
-  ;; Inject (jerboa core) and (jerboa runtime) if not already present.
-  ;; Skip injection when any (std ...) module is imported — Jerboa stdlib
-  ;; is self-sufficient and conflicts with Gherkin's (jerboa core)/(jerboa runtime)
-  ;; on identifiers like string-downcase, any, every, filter-map, etc.
-  (let* ([existing-libs (map unwrap-import-lib translated-imports)]
-         [has-std? (let check ([libs existing-libs])
-                     (cond
-                       [(null? libs) #f]
-                       [(and (pair? (car libs)) (eq? (caar libs) 'std)) #t]
-                       [else (check (cdr libs))]))])
-    (if has-std?
-      ;; Jerboa stdlib present: skip (jerboa core)/(jerboa runtime) injection
-      ;; to avoid identifier conflicts.
-      translated-imports
-      (let loop ([autos *auto-imports*] [result translated-imports])
-        (if (null? autos)
-          result
-          (if (member (car autos) existing-libs)
-            (loop (cdr autos) result)
-            (loop (cdr autos) (append result (list (car autos))))))))))
+  ;; Always inject (jerboa core) and (jerboa runtime) if not already present.
+  ;; Gherkin-generated .sls files confirm these coexist with (std ...) in Docker.
+  ;; Identifier conflicts with chezscheme are handled by *exclusion-triggers*.
+  (let ([existing-libs (map unwrap-import-lib translated-imports)])
+    (let loop ([autos *auto-imports*] [result translated-imports])
+      (if (null? autos)
+        result
+        (if (member (car autos) existing-libs)
+          (loop (cdr autos) result)
+          (loop (cdr autos) (append result (list (car autos)))))))))
 
 ;;;; ============================================================
 ;;;; Defstruct parsing (for struct-out expansion)
@@ -1049,14 +1112,17 @@
   ;; 1. Transform (set! (f obj) val) → (f-set! obj val)
   ;; 2. Wrap exported+assigned variables in identifier-syntax cells.
   ;; 3. Reorder body so all definitions precede expressions (R6RS requirement).
+  ;; 4. Resolve local-def vs import conflicts (local definition wins).
   (let* ([transformed-body (quote-bare-vectors-in-body
                               (quote-keyword-args-in-body
-                                (transform-set!-fields-in-body body-forms)))])
+                                (transform-set!-fields-in-body body-forms)))]
+         ;; Resolve: locally-defined symbols exclude from their source libraries
+         [resolved-imports (resolve-local-vs-import-conflicts imports body-forms)])
     (let-values ([(new-exports new-body) (wrap-mutable-exports exports transformed-body)])
       (let ([ordered (reorder-body-forms new-body)])
         `(library ,library-name
            (export ,@new-exports)
-           (import ,@imports)
+           (import ,@resolved-imports)
            ,@ordered)))))
 
 (define (write-library-file output-path library-form src-path)

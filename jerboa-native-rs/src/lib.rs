@@ -1,6 +1,7 @@
 mod panic;
 mod crypto;
 mod compress;
+mod duckdb_native;
 mod regex_native;
 mod secure_mem;
 mod sqlite;
