@@ -351,7 +351,7 @@ endif
 RUST_NATIVE_LIB = $(RUST_NATIVE_DIR)/target/release/libjerboa_native.$(NATIVE_LIB_EXT)
 
 $(RUST_NATIVE_LIB): $(RUST_NATIVE_DIR)/src/*.rs $(RUST_NATIVE_DIR)/Cargo.toml
-	cd $(RUST_NATIVE_DIR) && cargo build --release
+	cd $(RUST_NATIVE_DIR) && cargo build --release --features full
 
 native: $(RUST_NATIVE_LIB)
 	cp $(RUST_NATIVE_LIB) lib/

@@ -44,7 +44,8 @@
             #t)
           #f)))
 
-  (define (pcap-available?) _loaded)
+  ;; True only when the dylib loaded AND symbols resolved
+  (define (pcap-available?) (and _loaded (procedure? c-pcap-open)))
 
   ;; ── Sub-bytevector helper (bytevector-copy in Chez takes 1 arg, not 3) ────
 
@@ -54,22 +55,29 @@
       out))
 
   ;; ── FFI declarations ──────────────────────────────────────────────────────
+  ;; foreign-procedure is eager in Chez — guard each one so a missing dylib
+  ;; yields #f instead of crashing library initialisation.
 
   (define c-pcap-open
-    (foreign-procedure "jerboa_pcap_open" (u8* size_t) integer-64))
+    (guard (e [#t #f])
+      (foreign-procedure "jerboa_pcap_open" (u8* size_t) integer-64)))
 
   (define c-pcap-next
-    (foreign-procedure "jerboa_pcap_next"
-      (integer-64 u8* size_t u8* u8*) int))
+    (guard (e [#t #f])
+      (foreign-procedure "jerboa_pcap_next"
+        (integer-64 u8* size_t u8* u8*) int)))
 
   (define c-pcap-close
-    (foreign-procedure "jerboa_pcap_close" (integer-64) int))
+    (guard (e [#t #f])
+      (foreign-procedure "jerboa_pcap_close" (integer-64) int)))
 
   (define c-pcap-list-interfaces
-    (foreign-procedure "jerboa_pcap_list_interfaces" (u8* size_t) int))
+    (guard (e [#t #f])
+      (foreign-procedure "jerboa_pcap_list_interfaces" (u8* size_t) int)))
 
   (define c-last-error
-    (foreign-procedure "jerboa_last_error" (u8* size_t) size_t))
+    (guard (e [#t #f])
+      (foreign-procedure "jerboa_last_error" (u8* size_t) size_t)))
 
   ;; ── Error helper ─────────────────────────────────────────────────────────
 
