@@ -631,13 +631,25 @@
 
 (define (add-auto-imports translated-imports)
   ;; Inject (jerboa core) and (jerboa runtime) if not already present.
-  (let ([existing-libs (map unwrap-import-lib translated-imports)])
-    (let loop ([autos *auto-imports*] [result translated-imports])
-      (if (null? autos)
-        result
-        (if (member (car autos) existing-libs)
-          (loop (cdr autos) result)
-          (loop (cdr autos) (append result (list (car autos)))))))))
+  ;; Skip injection when any (std ...) module is imported — Jerboa stdlib
+  ;; is self-sufficient and conflicts with Gherkin's (jerboa core)/(jerboa runtime)
+  ;; on identifiers like string-downcase, any, every, filter-map, etc.
+  (let* ([existing-libs (map unwrap-import-lib translated-imports)]
+         [has-std? (let check ([libs existing-libs])
+                     (cond
+                       [(null? libs) #f]
+                       [(and (pair? (car libs)) (eq? (caar libs) 'std)) #t]
+                       [else (check (cdr libs))]))])
+    (if has-std?
+      ;; Jerboa stdlib present: skip (jerboa core)/(jerboa runtime) injection
+      ;; to avoid identifier conflicts.
+      translated-imports
+      (let loop ([autos *auto-imports*] [result translated-imports])
+        (if (null? autos)
+          result
+          (if (member (car autos) existing-libs)
+            (loop (cdr autos) result)
+            (loop (cdr autos) (append result (list (car autos))))))))))
 
 ;;;; ============================================================
 ;;;; Defstruct parsing (for struct-out expansion)
