@@ -11,6 +11,7 @@
 ;; Errors during compilation of optional/platform-specific libraries are non-fatal.
 (define libraries-to-compile
   '((jerboa reader)
+    (jerboa cloj)
     (jerboa core)
     (jerboa runtime)
     (jerboa ffi)

@@ -236,6 +236,14 @@
     string-map
     regex-match regex-search regex-replace regex-replace-all
 
+    ;; ---- Clojure reader mode ----
+    ;; reader-cloj-mode: parameter — (reader-cloj-mode #t) activates Clojure syntax
+    ;; fn-literal: macro — expands #(...) anonymous function literals
+    ;; activate-cloj-reader!: procedure — convenience wrapper to enable cloj mode
+    reader-cloj-mode
+    fn-literal
+    activate-cloj-reader!
+
     ;; ================================================================
     ;; (std clojure) — Clojure compatibility layer (wins on conflicts)
     ;; ================================================================
@@ -451,8 +459,8 @@
     ;; (std clojure) re-exports from the same underlying modules, so
     ;; semantics are identical — we just avoid R6RS duplicate-import errors.
     (except (jerboa prelude)
-      ;; hash-map — re-exported by (std clojure) as Clojure constructor
-      hash-map
+      ;; hash-map, hash-set — re-exported by (std clojure) as Clojure constructors
+      hash-map hash-set
       ;; atom / volatile / watches — re-exported by (std clojure)
       atom atom? reset! swap! compare-and-set!
       add-watch! remove-watch!
@@ -465,6 +473,9 @@
       ;; func combinators — re-exported by (std clojure)
       fnil every-pred some-fn)
 
+    ;; Clojure reader mode + fn-literal macro (in its own bootstrap file)
+    (jerboa cloj)
+
     ;; Clojure compatibility — wins on all conflicts
     (std clojure)
 
@@ -475,4 +486,12 @@
     (std transit)
     (std clojure seq)
     (prefix (std clojure string) str/)
-    (std clojure reducers)))
+    (std clojure reducers))
+
+  ;;;; Activate Clojure reader mode for programmatic use
+  ;; (e.g. REPL sessions, load-file calls).
+  ;; Files that use Clojure syntax should also start with  #!cloj  so the
+  ;; reader is in cloj mode before parsing the  (import (jerboa clojure))  form.
+  (activate-cloj-reader!)
+
+  )

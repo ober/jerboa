@@ -19,6 +19,7 @@
     list->hash-table plist->hash-table
     hash-table?
     hash-eq hash-eq?
+    hash-set
 
     ;; Keywords
     keyword? keyword->string string->keyword make-keyword
@@ -213,6 +214,14 @@
           [else
            (hashtable-set! ht (car rest) (cadr rest))
            (lp (cddr rest))]))))
+
+  ;; hash-set: Clojure-style set (hash table where all values are #t)
+  ;; (hash-set 'a 'b 'c) → eq-hashtable with a, b, c as keys
+  ;; Used by the reader for #{...} literals
+  (define (hash-set . items)
+    (let ([ht (make-eq-hashtable)])
+      (for-each (lambda (item) (hashtable-set! ht item #t)) items)
+      ht))
 
   ;; hash-eq constructor: (hash-eq (k1 v1) (k2 v2) ...) is a macro in core.sls
   ;; but we need hash-eq? predicate

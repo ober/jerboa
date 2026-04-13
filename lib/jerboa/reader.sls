@@ -1,9 +1,22 @@
 #!chezscheme
 ;;; reader.sls -- Gerbil-compatible reader for Jerboa
 ;;;
-;;; Handles: [...] → (list ...), {...} → (~ obj method args ...),
-;;; #!void/#!eof, keyword: syntax, source locations,
-;;; #; datum comments, #| block comments |#, #u8(...), #&box
+;;; Default mode:
+;;;   [...] → (list ...)       — Clojure-style vector literal (always)
+;;;   {@} → method dispatch    — {method obj args...} → (~ obj 'method args...)
+;;;   #{...} → set literal     — (hash-set item ...) (always)
+;;;   @expr → (deref expr)     — Clojure-style deref (always)
+;;;   :pkg/mod → (pkg mod)     — Gerbil module-path shorthand
+;;;   name: → keyword          — trailing-colon keyword
+;;;
+;;; Clojure reader mode  (reader-cloj-mode) → #t :
+;;;   {}  → hash map literal   — {k1 v1 ...} → (plist->hash-table (list k1 v1 ...))
+;;;   #() → anonymous function — #(+ % 1) → (fn-literal + % 1)
+;;;   :name → keyword          — leading-colon Clojure keyword
+;;;   nil → #f, true → #t, false → #f
+;;;
+;;; Activation: put  #!cloj  at the top of any .ss file, or call
+;;;   (reader-cloj-mode #t) programmatically.
 
 (library (jerboa reader)
   (export
@@ -11,6 +24,7 @@
     jerboa-read-all
     jerboa-read-file
     jerboa-read-string
+    reader-cloj-mode
     *max-read-depth*
     *max-block-comment-depth*
     *max-string-length*
@@ -30,6 +44,12 @@
   (define *max-string-length* (make-parameter (* 10 1024 1024)))  ;; 10MB default
   (define *max-list-length* (make-parameter 1000000))             ;; 1M elements default
   (define *max-symbol-length* (make-parameter 4096))              ;; 4KB default
+
+  ;; When #t, enables Clojure reader syntax:
+  ;;   {}  → hash map,  #() → anonymous fn,  :name → keyword,
+  ;;   nil → #f,  true → #t,  false → #f
+  ;; Activated by  #!cloj  directive or  (reader-cloj-mode #t)  call.
+  (define reader-cloj-mode (make-parameter #f))
 
   ;;;; Source locations
   (define-record-type source-location
@@ -177,23 +197,35 @@
          (reader-next! rs)
          (annotate rs (cons 'list (read-list rs #\] (+ depth 1))) loc))
 
-        ;; Curly braces → (~ obj method args...)
+        ;; Curly braces:
+        ;;   cloj mode  → hash map literal  {k1 v1 ...} → (plist->hash-table (list k1 v1 ...))
+        ;;   default    → method dispatch   {method obj args...} → (~ obj 'method args...)
         ((char=? ch #\{)
          (reader-next! rs)
          (let ((items (read-list rs #\} (+ depth 1))))
-           (cond
-             ((null? items)
-              (error 'jerboa-read "empty method dispatch {}"))
-             ((null? (cdr items))
-              (error 'jerboa-read "method dispatch needs at least {method obj}"))
-             (else
-              ;; {method obj args...} → (~ obj 'method args...)
-              (let ((method (car items))
-                    (obj (cadr items))
-                    (args (cddr items)))
-                (annotate rs
-                  (cons* '~ obj (list 'quote method) args)
-                  loc))))))
+           (if (reader-cloj-mode)
+               ;; Clojure hash map literal
+               (if (null? items)
+                   (annotate rs '(make-hash-table) loc)
+                   (begin
+                     (when (odd? (length items))
+                       (error 'jerboa-read
+                         "map literal {} requires an even number of forms (key value ...)"
+                         (length items)))
+                     (annotate rs
+                       (list 'plist->hash-table (cons 'list items))
+                       loc)))
+               ;; Default: Jerboa method dispatch
+               (cond
+                 ((null? items)
+                  (error 'jerboa-read "empty method dispatch {}"))
+                 ((null? (cdr items))
+                  (error 'jerboa-read "method dispatch needs at least {method obj}"))
+                 (else
+                  (let ((method (car items)) (obj (cadr items)) (args (cddr items)))
+                    (annotate rs
+                      (cons* '~ obj (list 'quote method) args)
+                      loc)))))))
 
         ;; Closing delimiters
         ((or (char=? ch #\)) (char=? ch #\]) (char=? ch #\}))
@@ -224,6 +256,11 @@
                  (reader-next! rs)
                  (annotate rs (list 'unquote-splicing (read-datum rs (+ depth 1))) loc))
                (annotate rs (list 'unquote (read-datum rs (+ depth 1))) loc))))
+
+        ;; @ → Clojure-style deref: @atom → (deref atom)
+        ((char=? ch #\@)
+         (reader-next! rs)
+         (annotate rs (list 'deref (read-datum rs (+ depth 1))) loc))
 
         ;; Hash dispatch
         ((char=? ch #\#)
@@ -359,11 +396,18 @@
                     (error 'jerboa-read "invalid # syntax" rest))))
              (else (annotate rs #f loc)))))
 
-        ;; #( vector
+        ;; #( — vector (default) or anonymous function (cloj mode)
+        ;; cloj: #(+ % 1) → reads (+ % 1) as one form → (fn-literal (+ % 1))
+        ;;       → (lambda (%1) (+ %1 1))
+        ;; The ( is NOT consumed in cloj mode — read-datum reads the whole list.
         ((char=? ch #\()
-         (reader-next! rs)
-         (let ((items (read-list rs #\) (+ depth 1))))
-           (annotate rs (list->vector items) loc)))
+         (if (reader-cloj-mode)
+             (let ((body (read-datum rs (+ depth 1))))
+               (annotate rs (list 'fn-literal body) loc))
+             (begin
+               (reader-next! rs)
+               (let ((items (read-list rs #\) (+ depth 1))))
+                 (annotate rs (list->vector items) loc)))))
 
         ;; #u8( bytevector
         ((char=? ch #\u)
@@ -396,7 +440,7 @@
         ;; #! hash-bang
         ((char=? ch #\!)
          (reader-next! rs)
-         (read-hash-bang rs loc))
+         (read-hash-bang rs loc depth))
 
         ;; #| block comment
         ((char=? ch #\|)
@@ -510,6 +554,13 @@
                           (lloop (cons c chars)))))))))
              (error 'jerboa-read "invalid # dispatch" ch))))
 
+        ;; #{...} → Clojure-style set literal
+        ;; #{1 2 3} → (hash-set 1 2 3)
+        ((char=? ch #\{)
+         (reader-next! rs)
+         (let ((items (read-list rs #\} (+ depth 1))))
+           (annotate rs (cons 'hash-set items) loc)))
+
         ;; #r"..." raw string — backslashes are literal, no escape processing.
         ;; Only \" is handled so you can embed a double-quote inside.
         ((char=? ch #\r)
@@ -556,7 +607,7 @@
 
   ;;;; Hash-bang reader
 
-  (define (read-hash-bang rs loc)
+  (define (read-hash-bang rs loc depth)
     (let ((ch (reader-peek rs)))
       (cond
         ((or (eof-object? ch) (delimiter? ch))
@@ -567,6 +618,11 @@
              ((void)     (annotate rs (void) loc))
              ((eof)      (annotate rs (eof-object) loc))
              ((optional) (annotate rs (void) loc))  ; placeholder
+             ;; #!cloj — activate Clojure reader mode for the rest of this file
+             ;; skips the directive itself, continues reading the next datum
+             ((cloj)
+              (reader-cloj-mode #t)
+              (read-datum rs depth))
              (else
               (annotate rs (list (string->symbol "#!") name) loc))))))))
 
@@ -721,12 +777,23 @@
                      (char=? (string-ref s (fx- (string-length s) 1)) #\:))
                 (let ((kw-name (substring s 0 (fx- (string-length s) 1))))
                   (annotate rs (string->keyword kw-name) loc)))
-               ;; :package/module/... → (package module ...)
-               ;; Gerbil module path syntax
+               ;; Leading-colon handling differs by mode:
+               ;;   cloj mode : :name → keyword (Clojure-style)
+               ;;   default   : :pkg/mod → (pkg mod) Gerbil module-path
                ((and (fx> (string-length s) 1)
                      (char=? (string-ref s 0) #\:))
-                (let ((path (substring s 1 (string-length s))))
-                  (annotate rs (module-path->list path) loc)))
+                (if (reader-cloj-mode)
+                    (let ((kw-name (substring s 1 (string-length s))))
+                      (annotate rs (string->keyword kw-name) loc))
+                    (let ((path (substring s 1 (string-length s))))
+                      (annotate rs (module-path->list path) loc))))
+               ;; Clojure literal booleans / nil (only in cloj mode)
+               ((and (reader-cloj-mode) (eq? sym 'nil))
+                (annotate rs #f loc))
+               ((and (reader-cloj-mode) (eq? sym 'true))
+                (annotate rs #t loc))
+               ((and (reader-cloj-mode) (eq? sym 'false))
+                (annotate rs #f loc))
                (else
                 (annotate rs sym loc)))))))))
 

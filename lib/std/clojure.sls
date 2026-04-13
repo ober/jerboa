@@ -150,7 +150,7 @@
                   merge merge!
                   list*
                   meta)
-          (except (jerboa runtime) cons* hash-map)
+          (except (jerboa runtime) cons* hash-map hash-set)
           (std pmap)
           (std immutable)
           (rename (std pvec)

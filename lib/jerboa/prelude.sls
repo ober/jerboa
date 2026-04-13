@@ -31,6 +31,7 @@
     hash-find hash-keys hash-values hash-copy hash-clear!
     hash-merge hash-merge! hash-length hash-table?
     list->hash-table plist->hash-table
+    hash-set
     keyword? keyword->string string->keyword make-keyword
     error-message error-irritants error-trace
     displayln 1+ 1-
