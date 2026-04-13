@@ -177,10 +177,11 @@
 ;;;; ============================================================
 
 (define (preprocess-brackets str)
-  ;; Convert Gerbil bracket list syntax [x y z] → (list x y z)
+  ;; Convert Jerboa/Chez bracket syntax [x y z] → (x y z)
   ;; in source text, while correctly skipping strings, comments,
   ;; and character literals (#\[).
-  ;; In Gerbil, [...] is always (list ...), never syntactic grouping.
+  ;; In Chez Scheme (and Gerbil), [...] is syntactically identical to (...).
+  ;; This matches the reader semantics: [let ([x 1]) x] ≡ (let ((x 1)) x).
   (let* ([len (string-length str)]
          [out (open-output-string)])
     (let loop ([i 0]
@@ -269,9 +270,9 @@
             [(char=? ch #\")
              (write-char ch out)
              (loop (+ i 1) #t #f)]
-            ;; Bracket open → (list
+            ;; Bracket open → (
             [(char=? ch #\[)
-             (display "(list " out)
+             (write-char #\( out)
              (loop (+ i 1) #f #f)]
             ;; Bracket close → )
             [(char=? ch #\])
@@ -284,7 +285,7 @@
 
 (define (read-source-file path)
   ;; Read all top-level S-expressions from a .ss file.
-  ;; Preprocesses Gerbil bracket syntax [x y z] → (list x y z).
+  ;; Preprocesses Jerboa/Chez bracket syntax [x y z] → (x y z).
   ;; Returns a list of forms.
   (let* ([raw (call-with-input-file path
                 (lambda (port)
