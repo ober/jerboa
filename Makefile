@@ -64,6 +64,7 @@ help:
 	@echo "  fuzz-<target>    Individual fuzz targets (reader, json, http2, ...)"
 	@echo ""
 	@echo "Docker:"
+	@echo "  docker           Alias for docker-build"
 	@echo "  docker-build     Build jerboa21/jerboa base image"
 	@echo "  docker-push      Push base image to Docker Hub"
 
@@ -439,6 +440,8 @@ clean:
 # Base image for building static musl binaries of Jerboa projects.
 # Includes: stock Chez, musl Chez, jerboa lib, musl-gcc, build deps.
 DOCKER_IMAGE = jerboa21/jerboa
+
+docker: docker-build
 
 docker-build:
 	@echo "=== Building $(DOCKER_IMAGE) base image ==="

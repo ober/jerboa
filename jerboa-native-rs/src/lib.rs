@@ -41,7 +41,7 @@ mod wasm_sm;
 
 #[cfg(target_os = "linux")]
 mod epoll;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "tls"))]
 mod http_parse;
 #[cfg(target_os = "linux")]
 mod inotify_native;
