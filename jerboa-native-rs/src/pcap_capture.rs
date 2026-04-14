@@ -7,12 +7,68 @@
 //!   jerboa_pcap_list_interfaces(buf, buf_len) -> i32  // bytes written or -1
 //!
 //! The handle is a Box<rscap::Sniffer> cast to i64 (raw pointer).
-//! The Sniffer is activated (ready to recv) immediately after open.
 //! Scheme is responsible for calling jerboa_pcap_close exactly once per handle.
 
 use crate::panic::set_last_error;
 use rscap::{Interface, Sniffer};
+use std::io;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+// ── macOS BPF activation ──────────────────────────────────────────────────────
+//
+// rscap's activate() calls BIOCSETFNR which returns EINVAL on macOS.
+// Work around by calling BIOCSETF (the resetting variant) + BIOCIMMEDIATE
+// directly via ioctl on the sniffer's fd.
+
+#[cfg(target_os = "macos")]
+mod macos_bpf {
+    use std::io;
+    use std::os::fd::AsRawFd;
+
+    // ioctl numbers from <net/bpf.h>
+    const BIOCSETF: libc::c_ulong = 0x80104267; // set filter (resets buffer)
+    const BIOCIMMEDIATE: libc::c_ulong = 0x80044270; // immediate mode
+
+    // Must match kernel struct bpf_program layout on 64-bit macOS:
+    //   u_int bf_len  (4 bytes) + 4-byte padding + struct bpf_insn* (8 bytes)
+    #[repr(C)]
+    struct BpfProgram {
+        bf_len: u32,
+        _pad: u32,
+        bf_insns: *mut BpfInsn,
+    }
+
+    // struct bpf_insn: code(2) + jt(1) + jf(1) + k(4) = 8 bytes
+    #[repr(C)]
+    struct BpfInsn {
+        code: u16,
+        jt: u8,
+        jf: u8,
+        k: u32,
+    }
+
+    /// Set accept-all filter on a Sniffer's BPF fd and enable immediate mode.
+    pub fn activate(sniffer: &rscap::Sniffer) -> io::Result<()> {
+        let fd = sniffer.as_raw_fd();
+
+        // BPF program: single RET instruction that returns entire packet
+        let mut insn = BpfInsn { code: 0x0006, jt: 0, jf: 0, k: 0xffff_ffff };
+        let mut prog = BpfProgram { bf_len: 1, _pad: 0, bf_insns: &mut insn };
+
+        let rc = unsafe {
+            libc::ioctl(fd, BIOCSETF, &mut prog as *mut BpfProgram as *mut libc::c_void)
+        };
+        if rc < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        // Enable immediate mode: return each packet right away, don't buffer
+        let mut imm: libc::c_uint = 1;
+        unsafe { libc::ioctl(fd, BIOCIMMEDIATE, &mut imm as *mut libc::c_uint) };
+
+        Ok(())
+    }
+}
 
 // ── Open ──────────────────────────────────────────────────────────────────────
 
@@ -47,11 +103,18 @@ pub extern "C" fn jerboa_pcap_open(iface_ptr: *const u8, iface_len: usize) -> i6
             return -1;
         }
     };
-    // Activate with no filter (capture all packets)
-    if let Err(e) = sniffer.activate(None) {
+
+    // Activate: set accept-all filter and begin capturing
+    #[cfg(target_os = "macos")]
+    let activate_result = macos_bpf::activate(&sniffer);
+    #[cfg(not(target_os = "macos"))]
+    let activate_result = sniffer.activate(None);
+
+    if let Err(e) = activate_result {
         set_last_error(format!("pcap_open: activate failed: {e}"));
         return -1;
     }
+
     Box::into_raw(Box::new(sniffer)) as i64
 }
 
