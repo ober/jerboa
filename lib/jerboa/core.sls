@@ -170,29 +170,69 @@
 
   (meta define (generate-keyword-clause name-stx required optionals keywords body-stx)
     ;; Generate a single clause: (req1 req2 ... . kwargs)
-    ;; with let-bindings that extract keyword values from kwargs
+    ;; with a single-pass keyword extractor binding all kw vars at once.
+    ;;
+    ;; Before: k calls to keyword-arg-ref, each doing an independent linear
+    ;; scan of %kwargs — O(k * len(%kwargs)) work, k allocations.
+    ;; After: one named loop walks %kwargs once, dispatching to eq? arms,
+    ;; and each arm rebuilds the loop args with the matched position
+    ;; updated to (cadr rest) and all other positions passed through.
+    ;; Common case (no kwargs at all) short-circuits on the (null? rest)
+    ;; cond-head.
     (let* ([all-positional (append required (map car optionals))]
-           [kw-var-names (map cadr keywords)]
-           [kw-defaults (map caddr keywords)]
-           [kw-key-syms (map car keywords)]
-           ;; Build the keyword extraction let-bindings
-           [kw-bindings
-             (map (lambda (kw)
-                    (let ([key-sym (car kw)]
-                          [var-name (cadr kw)]
-                          [default (caddr kw)])
-                      (list var-name
-                            (list 'keyword-arg-ref '%kwargs
-                                  (list 'quote (string->symbol
-                                                 (string-append (symbol->string key-sym) ":")))
-                                  default))))
-                  keywords)])
-      ;; Build: ((req1 req2 ... . %kwargs) (let ([kw1 ...] ...) body ...))
+           [kw-var-names   (map cadr keywords)]
+           [kw-defaults    (map caddr keywords)]
+           [kw-key-syms    (map (lambda (kw)
+                                  (string->symbol
+                                    (string-append (symbol->string (car kw)) ":")))
+                                keywords)]
+           [loop-sym '%kw-loop]
+           [rest-sym '%kw-rest]
+           ;; Build match arms as raw datums: one per keyword.
+           ;; Arm i: ((eq? (car %kw-rest) 'kw-i:)
+           ;;          (%kw-loop (cddr %kw-rest) kv0 ... (cadr %kw-rest) ... kvN))
+           [arms
+             (let loop ([i 0] [ks kw-key-syms] [acc '()])
+               (cond
+                 [(null? ks) (reverse acc)]
+                 [else
+                  (let ([arm
+                          (list
+                            (list 'eq? (list 'car rest-sym) (list 'quote (car ks)))
+                            (cons loop-sym
+                                  (cons (list 'cddr rest-sym)
+                                        (let upd ([j 0] [vars kw-var-names])
+                                          (cond
+                                            [(null? vars) '()]
+                                            [(= j i)
+                                             (cons (list 'cadr rest-sym) (upd (+ j 1) (cdr vars)))]
+                                            [else
+                                             (cons (car vars) (upd (+ j 1) (cdr vars)))])))))])
+                    (loop (+ i 1) (cdr ks) (cons arm acc)))]))]
+           ;; Default (no-match) arm: skip two items, keep all kv's.
+           [skip-arm
+             (list 'else
+                   (cons loop-sym
+                         (cons (list 'cddr rest-sym) kw-var-names)))]
+           ;; Base cond arms (null? / odd-length check).
+           [base-arms
+             (list
+               (list (list 'null? rest-sym) (cons 'let (cons '() (syntax->datum body-stx))))
+               (list (list 'null? (list 'cdr rest-sym))
+                     (list 'error
+                           (list 'quote 'keyword-arg-ref)
+                           "odd number of keyword arguments (missing value for last key)"
+                           (list 'car rest-sym))))]
+           ;; Full body: named let with initial kv=defaults, then cond.
+           [loop-body
+             (list 'let loop-sym
+                   (cons (list rest-sym '%kwargs)
+                         (map (lambda (v d) (list v d)) kw-var-names kw-defaults))
+                   (cons 'cond (append base-arms arms (list skip-arm))))])
       (with-syntax ([(p ...) (datum->syntax name-stx all-positional)]
                     [rest-var (datum->syntax name-stx '%kwargs)]
-                    [((kv kx) ...) (datum->syntax name-stx kw-bindings)]
-                    [(b ...) body-stx])
-        (list #'((p ... . rest-var) (let ([kv kx] ...) b ...))))))
+                    [lb (datum->syntax name-stx loop-body)])
+        (list #'((p ... . rest-var) lb)))))
 
   (meta define (generate-case-lambda-clauses name-stx params-stx body-stx)
     (let ([params (syntax->datum params-stx)])
