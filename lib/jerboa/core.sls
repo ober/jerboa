@@ -400,6 +400,7 @@
                                             (gensym (symbol->string name-sym)))])
                  #'(begin
                      (define-record-type (hidden-name mid pid)
+                       (sealed #t)
                        (fields (mutable field iacc imut) ...))
                      (define tid (record-type-descriptor hidden-name))
                      (define acc iacc) ...

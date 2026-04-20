@@ -418,6 +418,7 @@
       [(_ name (field ...))
        (begin
          (define-record-type name
+           (sealed #t)
            (fields field ...))
          (defrecord-extras name (field ...)))]))
 
