@@ -28,7 +28,7 @@
 (library (std regex)
   (export
     ;; Compilation
-    re re?
+    re re? re-compile-uncached
     ;; Match test (2 args) and match-object predicate (1 arg)
     re-match?
     ;; Search
@@ -224,18 +224,47 @@
 
   ;; ========== Public API ==========
 
-  ;; re: compile a pattern to a re object. Idempotent on re-objects.
-  (define (re pat)
+  ;; Memoization caches for compiled patterns. Two layers:
+  ;;   re-cache-eq   — fast path, keyed by eq? (same object identity)
+  ;;   re-cache-equal — fallback, keyed by equal? (same value)
+  ;;
+  ;; In Chez, string/list literals inside a compiled file are shared by the
+  ;; reader, so a `(re-match? "\\d+" s)` inside a loop keeps hitting the eq
+  ;; cache with the same string object — O(1) lookup, no string compare.
+  ;; The equal cache handles cases where equal-but-not-eq patterns arise
+  ;; (e.g. dynamically constructed strings that happen to match a literal).
+  ;; Both caches are unbounded; literal pattern count in real programs is
+  ;; bounded by source size.
+  (define re-cache-eq (make-eq-hashtable))
+  (define re-cache-equal (make-hashtable equal-hash equal?))
+
+  (define (re-compile-uncached pat)
     (cond
-      [(re-object? pat) pat]
       [(string? pat) (make-re pat pat)]
       [(or (list? pat) (symbol? pat))
-       ;; For SRE forms, extract named-groups directly from the SRE tree
-       ;; so that (=> name ...) captures can be looked up by name.
        (let ([pat-str (sre->pattern-string pat)]
              [named   (sre->named-groups pat)])
          (make-re pat pat-str named))]
       [else (error 're "expected string, SRE, or re object" pat)]))
+
+  ;; re: compile a pattern to a re object. Idempotent on re-objects.
+  ;; Two-level memoization: eq cache (fast), then equal cache (thorough).
+  ;; Hot literal-reuse hits the eq cache with no string compare.
+  (define (re pat)
+    (cond
+      [(re-object? pat) pat]
+      [else
+       (or (eq-hashtable-ref re-cache-eq pat #f)
+           (let ([cached (hashtable-ref re-cache-equal pat #f)])
+             (cond
+               [cached
+                (eq-hashtable-set! re-cache-eq pat cached)
+                cached]
+               [else
+                (let ([r (re-compile-uncached pat)])
+                  (hashtable-set! re-cache-equal pat r)
+                  (eq-hashtable-set! re-cache-eq pat r)
+                  r)])))]))
 
   ;; re?: true only for compiled re objects (not match objects).
   (define (re? x) (re-object? x))
