@@ -159,7 +159,7 @@
           [(_ (clause ...) leaf-expr)
            (expand-clauses #'(clause ...) #'leaf-expr)]))))
 
-  ;; for — side-effecting iteration
+  ;; for — side-effecting iteration. Fuses in-range/in-vector/in-string.
   (define-syntax for
     (let ()
       (define (binding-id? s)
@@ -170,7 +170,49 @@
                      (or (= (string-length str) 0)
                          (not (char=? (string-ref str (- (string-length str) 1)) #\:))))))))
       (lambda (stx)
-        (syntax-case stx ()
+        (syntax-case stx (in-range in-vector in-string in-list)
+          ;; --- Fused iterators ---
+          [(_ ((var (in-range end))) body ...)
+           (binding-id? #'var)
+           #'(let ([n end])
+               (let loop ([i 0])
+                 (when (< i n)
+                   (let ([var i]) body ...)
+                   (loop (+ i 1)))))]
+          [(_ ((var (in-range start end))) body ...)
+           (binding-id? #'var)
+           #'(let ([s start] [e end])
+               (let loop ([i s])
+                 (when (< i e)
+                   (let ([var i]) body ...)
+                   (loop (+ i 1)))))]
+          [(_ ((var (in-range start end step))) body ...)
+           (binding-id? #'var)
+           #'(let ([s start] [e end] [stp step])
+               (let loop ([i s])
+                 (unless (if (positive? stp) (>= i e) (<= i e))
+                   (let ([var i]) body ...)
+                   (loop (+ i stp)))))]
+          [(_ ((var (in-vector vec-expr))) body ...)
+           (binding-id? #'var)
+           #'(let ([v vec-expr])
+               (let ([n (vector-length v)])
+                 (let loop ([i 0])
+                   (when (fx< i n)
+                     (let ([var (vector-ref v i)]) body ...)
+                     (loop (fx+ i 1))))))]
+          [(_ ((var (in-string str-expr))) body ...)
+           (binding-id? #'var)
+           #'(let ([s str-expr])
+               (let ([n (string-length s)])
+                 (let loop ([i 0])
+                   (when (fx< i n)
+                     (let ([var (string-ref s i)]) body ...)
+                     (loop (fx+ i 1))))))]
+          [(_ ((var (in-list lst-expr))) body ...)
+           (binding-id? #'var)
+           #'(for-each (lambda (var) body ...) lst-expr)]
+          ;; --- Unfused fallbacks ---
           [(_ ((var iter-expr)) body ...)
            (binding-id? #'var)
            #'(for-each (lambda (var) body ...) iter-expr)]
@@ -191,7 +233,10 @@
           [(_ (clause ...) body ...)
            #'(%clause-expand (clause ...) (begin body ...))]))))
 
-  ;; for/collect — collect results into a list
+  ;; for/collect — collect results into a list.
+  ;; Iterator fusion: when the iter-expr is syntactically (in-range ...),
+  ;; (in-vector ...), or (in-string ...), skip the materialize-list step
+  ;; and emit a direct index loop. Saves O(n) cons cells per fused iter.
   (define-syntax for/collect
     (let ()
       (define (binding-id? s)
@@ -202,7 +247,50 @@
                      (or (= (string-length str) 0)
                          (not (char=? (string-ref str (- (string-length str) 1)) #\:))))))))
       (lambda (stx)
-        (syntax-case stx ()
+        (syntax-case stx (in-range in-vector in-string in-list)
+          ;; --- Fused iterators (single-clause) ---
+          [(_ ((var (in-range end))) body ...)
+           (binding-id? #'var)
+           #'(let ([n end])
+               (let loop ([i 0] [acc '()])
+                 (if (>= i n) (reverse acc)
+                   (let ([var i])
+                     (loop (+ i 1) (cons (begin body ...) acc))))))]
+          [(_ ((var (in-range start end))) body ...)
+           (binding-id? #'var)
+           #'(let ([s start] [e end])
+               (let loop ([i s] [acc '()])
+                 (if (>= i e) (reverse acc)
+                   (let ([var i])
+                     (loop (+ i 1) (cons (begin body ...) acc))))))]
+          [(_ ((var (in-range start end step))) body ...)
+           (binding-id? #'var)
+           #'(let ([s start] [e end] [stp step])
+               (let loop ([i s] [acc '()])
+                 (if (if (positive? stp) (>= i e) (<= i e))
+                   (reverse acc)
+                   (let ([var i])
+                     (loop (+ i stp) (cons (begin body ...) acc))))))]
+          [(_ ((var (in-vector vec-expr))) body ...)
+           (binding-id? #'var)
+           #'(let ([v vec-expr])
+               (let ([n (vector-length v)])
+                 (let loop ([i 0] [acc '()])
+                   (if (fx>= i n) (reverse acc)
+                     (let ([var (vector-ref v i)])
+                       (loop (fx+ i 1) (cons (begin body ...) acc)))))))]
+          [(_ ((var (in-string str-expr))) body ...)
+           (binding-id? #'var)
+           #'(let ([s str-expr])
+               (let ([n (string-length s)])
+                 (let loop ([i 0] [acc '()])
+                   (if (fx>= i n) (reverse acc)
+                     (let ([var (string-ref s i)])
+                       (loop (fx+ i 1) (cons (begin body ...) acc)))))))]
+          [(_ ((var (in-list lst-expr))) body ...)
+           (binding-id? #'var)
+           #'(map (lambda (var) body ...) lst-expr)]
+          ;; --- Unfused fallback ---
           [(_ ((var iter-expr)) body ...)
            (binding-id? #'var)
            #'(map (lambda (var) body ...) iter-expr)]
@@ -219,7 +307,7 @@
                  (%clause-expand (clause ...) (set! %acc (cons (begin body ...) %acc)))
                  (reverse %acc)))]))))
 
-  ;; for/fold — fold with accumulator
+  ;; for/fold — fold with accumulator. Fuses in-range/in-vector/in-string.
   (define-syntax for/fold
     (let ()
       (define (binding-id? s)
@@ -230,7 +318,52 @@
                      (or (= (string-length str) 0)
                          (not (char=? (string-ref str (- (string-length str) 1)) #\:))))))))
       (lambda (stx)
-        (syntax-case stx ()
+        (syntax-case stx (in-range in-vector in-string in-list)
+          ;; --- Fused iterators ---
+          [(_ ((acc init)) ((var (in-range end))) body ...)
+           (binding-id? #'var)
+           #'(let ([n end])
+               (let loop ([i 0] [acc init])
+                 (if (>= i n) acc
+                   (let ([var i])
+                     (loop (+ i 1) (begin body ...))))))]
+          [(_ ((acc init)) ((var (in-range start end))) body ...)
+           (binding-id? #'var)
+           #'(let ([s start] [e end])
+               (let loop ([i s] [acc init])
+                 (if (>= i e) acc
+                   (let ([var i])
+                     (loop (+ i 1) (begin body ...))))))]
+          [(_ ((acc init)) ((var (in-range start end step))) body ...)
+           (binding-id? #'var)
+           #'(let ([s start] [e end] [stp step])
+               (let loop ([i s] [acc init])
+                 (if (if (positive? stp) (>= i e) (<= i e)) acc
+                   (let ([var i])
+                     (loop (+ i stp) (begin body ...))))))]
+          [(_ ((acc init)) ((var (in-vector vec-expr))) body ...)
+           (binding-id? #'var)
+           #'(let ([v vec-expr])
+               (let ([n (vector-length v)])
+                 (let loop ([i 0] [acc init])
+                   (if (fx>= i n) acc
+                     (let ([var (vector-ref v i)])
+                       (loop (fx+ i 1) (begin body ...)))))))]
+          [(_ ((acc init)) ((var (in-string str-expr))) body ...)
+           (binding-id? #'var)
+           #'(let ([s str-expr])
+               (let ([n (string-length s)])
+                 (let loop ([i 0] [acc init])
+                   (if (fx>= i n) acc
+                     (let ([var (string-ref s i)])
+                       (loop (fx+ i 1) (begin body ...)))))))]
+          [(_ ((acc init)) ((var (in-list lst-expr))) body ...)
+           (binding-id? #'var)
+           #'(let loop ([rest lst-expr] [acc init])
+               (if (null? rest) acc
+                 (let ([var (car rest)])
+                   (loop (cdr rest) (begin body ...)))))]
+          ;; --- Unfused fallbacks ---
           [(_ ((acc init)) ((var iter-expr)) body ...)
            (binding-id? #'var)
            #'(let loop ([rest iter-expr] [acc init])
