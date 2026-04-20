@@ -32,9 +32,19 @@
   (import (chezscheme))
 
   ;; --- Records ---
+  ;; Sealed + nongenerative so cp0/cptypes can treat ok? / err? as
+  ;; singleton RTD checks and fold (ok? (ok x)) at compile time.
+  ;; The UIDs are stable across boot/compile, which Chez requires for
+  ;; cross-module constant folding.
 
-  (define-record-type result-ok (fields value))
-  (define-record-type result-err (fields value))
+  (define-record-type result-ok
+    (nongenerative std-result-ok-0d2d7f13-8a44-4c5f-9f4e-ok)
+    (sealed #t)
+    (fields value))
+  (define-record-type result-err
+    (nongenerative std-result-err-0d2d7f13-8a44-4c5f-9f4e-err)
+    (sealed #t)
+    (fields value))
 
   ;; --- Constructors ---
 

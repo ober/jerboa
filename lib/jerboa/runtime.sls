@@ -79,8 +79,17 @@
           (error 'call-method "no method" name (record-type-name type))))))
 
   ;; ~ is the dispatch operator: (~ obj 'method args...)
-  (define (~ obj method-name . args)
+  ;; Expose an identifier macro so direct call sites inline to a plain
+  ;; call of call-method (no apply, no rest-list allocation), while a
+  ;; bare `~` still evaluates to a procedure value for higher-order use.
+  (define (~proc obj method-name . args)
     (apply call-method obj method-name args))
+  (define-syntax ~
+    (lambda (stx)
+      (syntax-case stx ()
+        [(_ obj method-name arg ...)
+         #'(call-method obj method-name arg ...)]
+        [id (identifier? #'id) #'~proc])))
 
   ;;;; ---- Hash tables (Gerbil API on Chez hashtables) ----
 
