@@ -361,18 +361,44 @@
 
   ;; --- String builder ---
 
-  ;; str: concatenate args, auto-coercing to strings
+  ;; str: concatenate args, auto-coercing to strings.
   ;; (str "hello " 42 " world") => "hello 42 world"
   ;; (str) => ""
+  ;;
+  ;; For each argument the macro emits one of three forms:
+  ;;   - string literal    → the literal itself (no call)
+  ;;   - number/char/symbol/boolean literal
+  ;;                       → the pre-converted string literal (expand-time
+  ;;                         constant fold; no runtime allocation)
+  ;;   - any other expression → (->string e) fallback
+  ;; cp0 then folds the resulting string-append over adjacent literals.
   (define-syntax str
-    (syntax-rules ()
-      [(_) ""]
-      [(_ arg args ...)
-       (string-append (->string arg) (->string args) ...)]))
+    (lambda (stx)
+      (define (lit->string d)
+        (cond
+          [(string? d) d]
+          [(number? d) (number->string d)]
+          [(char? d)   (string d)]
+          [(boolean? d) (if d "#t" "#f")]
+          [(and (pair? d) (eq? (car d) 'quote) (symbol? (cadr d)))
+           (symbol->string (cadr d))]
+          [else #f]))
+      (define (coerce-arg ctx arg-stx)
+        (let ([lit (lit->string (syntax->datum arg-stx))])
+          (if lit
+            (datum->syntax ctx lit)
+            #`(->string #,arg-stx))))
+      (syntax-case stx ()
+        [(_) #'""]
+        [(k arg args ...)
+         (with-syntax ([(e ...) (map (lambda (a) (coerce-arg #'k a))
+                                     (syntax->list #'(arg args ...)))])
+           #'(string-append e ...))])))
 
   (define (->string x)
     (cond
       [(string? x) x]
+      [(fixnum? x) (number->string x)]
       [(number? x) (number->string x)]
       [(symbol? x) (symbol->string x)]
       [(char? x) (string x)]
