@@ -163,6 +163,27 @@
              (let ([pred (cadr (syntax->list pat))])
                #`(if (#,pred #,val) #,success #,fail))]
 
+            ;; (: TypeName) or (: TypeName var) — fast RTD-eq? dispatch.
+            ;; Relies on defstruct binding TypeName::t to the RTD.
+            ;; For sealed records this is a single pointer compare, and
+            ;; cp0 CSEs (record-rtd val) across adjacent arms.
+            [(and (pair? d) (eq? (car d) ':) (or (= (length d) 2) (= (length d) 3)))
+             (let* ([parts (syntax->list pat)]
+                    [type-stx (cadr parts)]
+                    [rtd-id (datum->syntax type-stx
+                              (string->symbol
+                                (string-append
+                                  (symbol->string (syntax->datum type-stx))
+                                  "::t")))])
+               (if (= (length d) 2)
+                 #`(if (and (record? #,val) (eq? (record-rtd #,val) #,rtd-id))
+                       #,success
+                       #,fail)
+                 (let ([var (caddr parts)])
+                   #`(if (and (record? #,val) (eq? (record-rtd #,val) #,rtd-id))
+                         (let ([#,var #,val]) #,success)
+                         #,fail))))]
+
             ;; (? pred -> var)
             [(and (pair? d) (eq? (car d) '?) (= (length d) 4)
                   (eq? (caddr d) '->))
@@ -320,12 +341,84 @@
                      body)])
               (compile-pat pat val success-body rest-stx)))))
 
+      ;; Recognize (: Type) / (: Type var) clauses with no (where ...) guard.
+      ;; Fusion happens on those — a (where) or body with extra logic isn't
+      ;; excluded because the body is emitted verbatim inside the cond arm.
+      (define (colon-clause? clause)
+        (let ([parts (syntax->list clause)])
+          (and (pair? parts)
+               (let ([d (syntax->datum (car parts))])
+                 (and (pair? d)
+                      (eq? (car d) ':)
+                      (or (= (length d) 2) (= (length d) 3)))))))
+
+      ;; Collect the leading run of colon-clauses.  Returns (values run rest).
+      (define (split-colon-run clauses)
+        (let loop ([cs clauses] [run '()])
+          (if (and (pair? cs) (colon-clause? (car cs)))
+            (loop (cdr cs) (cons (car cs) run))
+            (values (reverse run) cs))))
+
+      ;; Emit a hoisted record-rtd dispatch for a run of colon-clauses.
+      ;; After this, each arm is just an (eq? rtd TypeN::t) check — the
+      ;; (record? val) check and (record-rtd val) fetch happen once.
+      (define (compile-colon-run run rest-stx val)
+        (let* ([arms
+                (map (lambda (clause)
+                       (let* ([parts (syntax->list clause)]
+                              [pat   (car parts)]
+                              [body-parts (cdr parts)]
+                              [pat-parts (syntax->list pat)]
+                              [type-stx  (cadr pat-parts)]
+                              [rtd-id (datum->syntax type-stx
+                                        (string->symbol
+                                          (string-append
+                                            (symbol->string (syntax->datum type-stx))
+                                            "::t")))]
+                              [bind-var (and (= (length pat-parts) 3)
+                                             (caddr pat-parts))]
+                              ;; Handle optional (where guard)
+                              [has-guard? (and (not (null? body-parts))
+                                               (let ([b0 (car body-parts)])
+                                                 (and (pair? (syntax->datum b0))
+                                                      (eq? (car (syntax->datum b0)) 'where))))]
+                              [guard-stx  (and has-guard?
+                                               (cadr (syntax->list (car body-parts))))]
+                              [body-exprs (if has-guard? (cdr body-parts) body-parts)]
+                              [body #`(begin #,@body-exprs)]
+                              [body-with-bind
+                               (if bind-var
+                                 #`(let ([#,bind-var #,val]) #,body)
+                                 body)]
+                              [arm-body
+                               (if guard-stx
+                                 #`(if #,guard-stx #,body-with-bind #,rest-stx)
+                                 body-with-bind)])
+                         #`[(eq? __rtd #,rtd-id) #,arm-body]))
+                     run)])
+          #`(if (record? #,val)
+                (let ([__rtd (record-rtd #,val)])
+                  (cond
+                    #,@arms
+                    [else #,rest-stx]))
+                #,rest-stx)))
+
       (define (compile-clauses clauses val)
-        (if (null? clauses)
-          #`(error 'match "no matching clause" #,val)
-          (compile-clause (car clauses)
-            (compile-clauses (cdr clauses) val)
-            val)))
+        (cond
+          [(null? clauses)
+           #`(error 'match "no matching clause" #,val)]
+          [(and (colon-clause? (car clauses))
+                ;; Need at least 2 to benefit from fusion — single-clause
+                ;; case falls through to the generic path, which compiles
+                ;; to the same shape via compile-pat.
+                (pair? (cdr clauses))
+                (colon-clause? (cadr clauses)))
+           (let-values ([(run rest) (split-colon-run clauses)])
+             (compile-colon-run run (compile-clauses rest val) val))]
+          [else
+           (compile-clause (car clauses)
+             (compile-clauses (cdr clauses) val)
+             val)]))
 
       (syntax-case stx ()
         [(_ expr clause ...)
