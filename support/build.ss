@@ -22,7 +22,12 @@
     (std regex)
     (std rx)
     (std rx patterns)
-    (std peg)))
+    (std peg)
+    ;; Prelude aggregator — importing it drags in every std/* module it
+    ;; re-exports, so putting it on the build list produces .so + .wpo
+    ;; for the entire transitively-referenced tree. User scripts that
+    ;; (import (jerboa prelude)) skip a large one-time compile at startup.
+    (jerboa prelude)))
 
 (define compiled 0)
 (define skipped 0)
