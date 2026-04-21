@@ -71,25 +71,52 @@
              (or (and table (hashtable-ref table name #f))
                  (loop (record-type-parent t)))))))
 
+  ;; Arity-specialized dispatch entry points.  Each is one straight-line
+  ;; lookup + direct call, so the compiler avoids the apply + rest-list
+  ;; allocation that the variadic form requires.  The error path is
+  ;; never-returning so the (or method ...) idiom keeps the fast path
+  ;; tight.
+  (define (%missing-method obj name)
+    (error 'call-method "no method" name
+      (record-type-name (record-rtd obj))))
+  (define (call-method-0 obj name)
+    ((or (find-method (record-rtd obj) name)
+         (%missing-method obj name)) obj))
+  (define (call-method-1 obj name a)
+    ((or (find-method (record-rtd obj) name)
+         (%missing-method obj name)) obj a))
+  (define (call-method-2 obj name a b)
+    ((or (find-method (record-rtd obj) name)
+         (%missing-method obj name)) obj a b))
+  (define (call-method-3 obj name a b c)
+    ((or (find-method (record-rtd obj) name)
+         (%missing-method obj name)) obj a b c))
+  (define (call-method-4 obj name a b c d)
+    ((or (find-method (record-rtd obj) name)
+         (%missing-method obj name)) obj a b c d))
   (define (call-method obj name . args)
-    (let ([type (record-rtd obj)])
-      (let ([method (find-method type name)])
-        (if method
-          (apply method obj args)
-          (error 'call-method "no method" name (record-type-name type))))))
+    (apply (or (find-method (record-rtd obj) name)
+               (%missing-method obj name))
+           obj args))
 
-  ;; ~ is the dispatch operator: (~ obj 'method args...)
-  ;; Expose an identifier macro so direct call sites inline to a plain
-  ;; call of call-method (no apply, no rest-list allocation), while a
-  ;; bare `~` still evaluates to a procedure value for higher-order use.
+  ;; ~ is the dispatch operator: (~ obj 'method args...).  Expand to
+  ;; the narrowest arity-specialized call-method-N so the compiler
+  ;; skips the apply + rest-list allocation on the common zero/one/two
+  ;; arg paths.  Fall back to variadic call-method for >4 args, which
+  ;; preserves rest-args semantics.  Bare `~` still evaluates to a
+  ;; procedure for higher-order use.
   (define (~proc obj method-name . args)
     (apply call-method obj method-name args))
   (define-syntax ~
     (lambda (stx)
       (syntax-case stx ()
-        [(_ obj method-name arg ...)
-         #'(call-method obj method-name arg ...)]
-        [id (identifier? #'id) #'~proc])))
+        [(_ obj name)             #'(call-method-0 obj name)]
+        [(_ obj name a)           #'(call-method-1 obj name a)]
+        [(_ obj name a b)         #'(call-method-2 obj name a b)]
+        [(_ obj name a b c)       #'(call-method-3 obj name a b c)]
+        [(_ obj name a b c d)     #'(call-method-4 obj name a b c d)]
+        [(_ obj name arg ...)     #'(call-method obj name arg ...)]
+        [id (identifier? #'id)    #'~proc])))
 
   ;;;; ---- Hash tables (Gerbil API on Chez hashtables) ----
 
