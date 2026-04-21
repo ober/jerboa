@@ -1,0 +1,1 @@
+((struct-pred . 386729/125000) (match . 3588623/500000) (str . 15769633/31250) (regex . 60620753/62500) (for-collect-range . 347346/3125) (for-collect-vector . 12403443/100000) (kwargs-none . 8684001/1000000) (kwargs-one . 13010051/1000000) (hashtable . 30695557/1000000) (method-dispatch . 11737773/250000))
