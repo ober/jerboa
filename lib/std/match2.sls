@@ -403,6 +403,104 @@
                     [else #,rest-stx]))
                 #,rest-stx)))
 
+      ;; Recognize (list 'TAG p ...) clauses with no (where ...) guard and
+      ;; with a literal symbol head.  These are the bread-and-butter of
+      ;; parser/evaluator matches, and fusing a run of them avoids
+      ;; re-checking list shape + re-dispatching on the head tag for
+      ;; every failing clause.
+      (define (tagged-list-clause? clause)
+        (let ([parts (syntax->list clause)])
+          (and (pair? parts)
+               (let ([d (syntax->datum (car parts))])
+                 (and (pair? d)
+                      (eq? (car d) 'list)
+                      (pair? (cdr d))
+                      ;; head is (quote SYMBOL)
+                      (let ([hd (cadr d)])
+                        (and (pair? hd)
+                             (eq? (car hd) 'quote)
+                             (pair? (cdr hd))
+                             (symbol? (cadr hd))))
+                      ;; no (where guard) at the start of the body
+                      (let ([body-parts (cdr parts)])
+                        (or (null? body-parts)
+                            (let ([b0 (syntax->datum (car body-parts))])
+                              (not (and (pair? b0) (eq? (car b0) 'where)))))))))))
+
+      (define (tagged-list-clause-length clause)
+        ;; Returns the clause's list pattern length (N in (list p1 ... pN)).
+        (length (cdr (syntax->datum (car (syntax->list clause))))))
+
+      (define (tagged-list-clause-tag-sym clause)
+        ;; Returns the literal symbol (as a plain symbol) from the head
+        ;; (quote TAG).  Used for uniqueness checks within a run.
+        (let* ([parts (syntax->list clause)]
+               [pat-datum (syntax->datum (car parts))])
+          (cadr (cadr pat-datum))))
+
+      (define (tagged-list-clause-tag-stx clause)
+        ;; Returns the (quote TAG) form as a syntax object so it can be
+        ;; spliced into emitted cond arms without a raw-symbol hygiene
+        ;; violation.
+        (let* ([parts (syntax->list clause)]
+               [pat (car parts)]
+               [pat-parts (syntax->list pat)])
+          ;; pat = (list (quote TAG) p ...); return the (quote TAG) stx.
+          (cadr pat-parts)))
+
+      (define (split-tagged-run clauses)
+        ;; Collect the leading run of tagged-list clauses sharing the
+        ;; same length, with distinct tags.  Returns (values run rest).
+        (if (not (and (pair? clauses) (tagged-list-clause? (car clauses))))
+          (values '() clauses)
+          (let ([n (tagged-list-clause-length (car clauses))])
+            (let loop ([cs (cdr clauses)]
+                       [run (list (car clauses))]
+                       [tags (list (tagged-list-clause-tag-sym (car clauses)))])
+              (if (and (pair? cs)
+                       (tagged-list-clause? (car cs))
+                       (= (tagged-list-clause-length (car cs)) n)
+                       (not (memq (tagged-list-clause-tag-sym (car cs)) tags)))
+                (loop (cdr cs)
+                      (cons (car cs) run)
+                      (cons (tagged-list-clause-tag-sym (car cs)) tags))
+                (values (reverse run) cs))))))
+
+      ;; Compile a run of tagged-list clauses into a single list-shape
+      ;; check + cond dispatch on the head tag.  Each arm still runs
+      ;; compile-pat over the remaining sub-patterns, so nested patterns
+      ;; behave identically to the unfused path.
+      (define (compile-tagged-run run rest-stx val)
+        (let* ([n (tagged-list-clause-length (car run))]
+               [hd-tmp (car (generate-temporaries '(hd)))]
+               [arms
+                (map (lambda (clause)
+                       (let* ([parts (syntax->list clause)]
+                              [pat (car parts)]
+                              [body-parts (cdr parts)]
+                              [body #`(begin #,@body-parts)]
+                              [pat-parts (syntax->list pat)]
+                              ;; sub-patterns after the (quote TAG) head
+                              [sub-pats (cddr pat-parts)]
+                              [tag-stx (tagged-list-clause-tag-stx clause)]
+                              ;; Match remaining elements at indices 1..N-1.
+                              [inner
+                               (let loop ([ps sub-pats] [i 1] [acc body])
+                                 (if (null? ps) acc
+                                   (loop (cdr ps) (+ i 1)
+                                     (compile-pat (car ps)
+                                       #`(list-ref #,val #,i)
+                                       acc
+                                       rest-stx))))])
+                         #`[(eq? #,hd-tmp #,tag-stx) #,inner]))
+                     run)])
+          #`(if (and (list? #,val) (= (length #,val) #,n))
+                (let ([#,hd-tmp (list-ref #,val 0)])
+                  (cond
+                    #,@arms
+                    [else #,rest-stx]))
+                #,rest-stx)))
+
       (define (compile-clauses clauses val)
         (cond
           [(null? clauses)
@@ -415,6 +513,17 @@
                 (colon-clause? (cadr clauses)))
            (let-values ([(run rest) (split-colon-run clauses)])
              (compile-colon-run run (compile-clauses rest val) val))]
+          [(and (tagged-list-clause? (car clauses))
+                (pair? (cdr clauses))
+                (tagged-list-clause? (cadr clauses))
+                (= (tagged-list-clause-length (car clauses))
+                   (tagged-list-clause-length (cadr clauses))))
+           (let-values ([(run rest) (split-tagged-run clauses)])
+             (if (>= (length run) 2)
+               (compile-tagged-run run (compile-clauses rest val) val)
+               (compile-clause (car clauses)
+                 (compile-clauses (cdr clauses) val)
+                 val)))]
           [else
            (compile-clause (car clauses)
              (compile-clauses (cdr clauses) val)
