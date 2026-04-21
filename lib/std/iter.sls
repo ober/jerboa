@@ -407,7 +407,9 @@
                (%clause-expand (clause ...) (set! acc (begin body ...)))
                acc)]))))
 
-  ;; for/or — return first truthy result
+  ;; for/or — return first truthy result.  Fuses in-range/in-vector/
+  ;; in-string/in-list parallel to for/fold so the iterator list
+  ;; never gets materialised.
   (define-syntax for/or
     (let ()
       (define (binding-id? s)
@@ -418,7 +420,52 @@
                      (or (= (string-length str) 0)
                          (not (char=? (string-ref str (- (string-length str) 1)) #\:))))))))
       (lambda (stx)
-        (syntax-case stx ()
+        (syntax-case stx (in-range in-vector in-string in-list)
+          ;; --- Fused iterators ---
+          [(_ ((var (in-range end))) body ...)
+           (binding-id? #'var)
+           #'(let ([n end])
+               (let loop ([i 0])
+                 (if (>= i n) #f
+                   (let ([var i])
+                     (or (begin body ...) (loop (+ i 1)))))))]
+          [(_ ((var (in-range start end))) body ...)
+           (binding-id? #'var)
+           #'(let ([s start] [e end])
+               (let loop ([i s])
+                 (if (>= i e) #f
+                   (let ([var i])
+                     (or (begin body ...) (loop (+ i 1)))))))]
+          [(_ ((var (in-range start end step))) body ...)
+           (binding-id? #'var)
+           #'(let ([s start] [e end] [stp step])
+               (let loop ([i s])
+                 (if (if (positive? stp) (>= i e) (<= i e)) #f
+                   (let ([var i])
+                     (or (begin body ...) (loop (+ i stp)))))))]
+          [(_ ((var (in-vector vec-expr))) body ...)
+           (binding-id? #'var)
+           #'(let ([v vec-expr])
+               (let ([n (vector-length v)])
+                 (let loop ([i 0])
+                   (if (fx>= i n) #f
+                     (let ([var (vector-ref v i)])
+                       (or (begin body ...) (loop (fx+ i 1))))))))]
+          [(_ ((var (in-string str-expr))) body ...)
+           (binding-id? #'var)
+           #'(let ([s str-expr])
+               (let ([n (string-length s)])
+                 (let loop ([i 0])
+                   (if (fx>= i n) #f
+                     (let ([var (string-ref s i)])
+                       (or (begin body ...) (loop (fx+ i 1))))))))]
+          [(_ ((var (in-list lst-expr))) body ...)
+           (binding-id? #'var)
+           #'(let loop ([rest lst-expr])
+               (if (null? rest) #f
+                 (let ([var (car rest)])
+                   (or (begin body ...) (loop (cdr rest))))))]
+          ;; --- Unfused fallback (single clause, list) ---
           [(_ ((var iter-expr)) body ...)
            (binding-id? #'var)
            #'(let loop ([rest iter-expr])
@@ -432,7 +479,8 @@
                    (when %result (return %result))))
                #f))]))))
 
-  ;; for/and — return #f if any result is #f
+  ;; for/and — return #f if any result is #f.  Fuses same iterators
+  ;; as for/or.
   (define-syntax for/and
     (let ()
       (define (binding-id? s)
@@ -443,7 +491,58 @@
                      (or (= (string-length str) 0)
                          (not (char=? (string-ref str (- (string-length str) 1)) #\:))))))))
       (lambda (stx)
-        (syntax-case stx ()
+        (syntax-case stx (in-range in-vector in-string in-list)
+          ;; --- Fused iterators ---
+          [(_ ((var (in-range end))) body ...)
+           (binding-id? #'var)
+           #'(let ([n end])
+               (let loop ([i 0] [last #t])
+                 (if (>= i n) last
+                   (let ([var i])
+                     (let ([%r (begin body ...)])
+                       (if %r (loop (+ i 1) %r) #f))))))]
+          [(_ ((var (in-range start end))) body ...)
+           (binding-id? #'var)
+           #'(let ([s start] [e end])
+               (let loop ([i s] [last #t])
+                 (if (>= i e) last
+                   (let ([var i])
+                     (let ([%r (begin body ...)])
+                       (if %r (loop (+ i 1) %r) #f))))))]
+          [(_ ((var (in-range start end step))) body ...)
+           (binding-id? #'var)
+           #'(let ([s start] [e end] [stp step])
+               (let loop ([i s] [last #t])
+                 (if (if (positive? stp) (>= i e) (<= i e)) last
+                   (let ([var i])
+                     (let ([%r (begin body ...)])
+                       (if %r (loop (+ i stp) %r) #f))))))]
+          [(_ ((var (in-vector vec-expr))) body ...)
+           (binding-id? #'var)
+           #'(let ([v vec-expr])
+               (let ([n (vector-length v)])
+                 (let loop ([i 0] [last #t])
+                   (if (fx>= i n) last
+                     (let ([var (vector-ref v i)])
+                       (let ([%r (begin body ...)])
+                         (if %r (loop (fx+ i 1) %r) #f)))))))]
+          [(_ ((var (in-string str-expr))) body ...)
+           (binding-id? #'var)
+           #'(let ([s str-expr])
+               (let ([n (string-length s)])
+                 (let loop ([i 0] [last #t])
+                   (if (fx>= i n) last
+                     (let ([var (string-ref s i)])
+                       (let ([%r (begin body ...)])
+                         (if %r (loop (fx+ i 1) %r) #f)))))))]
+          [(_ ((var (in-list lst-expr))) body ...)
+           (binding-id? #'var)
+           #'(let loop ([rest lst-expr] [last #t])
+               (if (null? rest) last
+                 (let ([var (car rest)])
+                   (let ([%r (begin body ...)])
+                     (if %r (loop (cdr rest) %r) #f)))))]
+          ;; --- Unfused fallback (single clause, list) ---
           [(_ ((var iter-expr)) body ...)
            (binding-id? #'var)
            #'(let loop ([rest iter-expr])
