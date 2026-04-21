@@ -247,7 +247,8 @@
                      (or (= (string-length str) 0)
                          (not (char=? (string-ref str (- (string-length str) 1)) #\:))))))))
       (lambda (stx)
-        (syntax-case stx (in-range in-vector in-string in-list)
+        (syntax-case stx (in-range in-vector in-string in-list
+                          in-hash-keys in-hash-values)
           ;; --- Fused iterators (single-clause) ---
           [(_ ((var (in-range end))) body ...)
            (binding-id? #'var)
@@ -290,6 +291,22 @@
           [(_ ((var (in-list lst-expr))) body ...)
            (binding-id? #'var)
            #'(map (lambda (var) body ...) lst-expr)]
+          [(_ ((var (in-hash-keys ht-expr))) body ...)
+           (binding-id? #'var)
+           #'(let ([ks (hashtable-keys ht-expr)])
+               (let ([n (vector-length ks)])
+                 (let loop ([i 0] [acc '()])
+                   (if (fx>= i n) (reverse acc)
+                     (let ([var (vector-ref ks i)])
+                       (loop (fx+ i 1) (cons (begin body ...) acc)))))))]
+          [(_ ((var (in-hash-values ht-expr))) body ...)
+           (binding-id? #'var)
+           #'(let-values ([(%ks vs) (hashtable-entries ht-expr)])
+               (let ([n (vector-length vs)])
+                 (let loop ([i 0] [acc '()])
+                   (if (fx>= i n) (reverse acc)
+                     (let ([var (vector-ref vs i)])
+                       (loop (fx+ i 1) (cons (begin body ...) acc)))))))]
           ;; --- Unfused fallback ---
           [(_ ((var iter-expr)) body ...)
            (binding-id? #'var)
