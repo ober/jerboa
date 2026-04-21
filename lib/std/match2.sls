@@ -449,30 +449,40 @@
           (cadr pat-parts)))
 
       (define (split-tagged-run clauses)
-        ;; Collect the leading run of tagged-list clauses sharing the
-        ;; same length, with distinct tags.  Returns (values run rest).
+        ;; Collect the leading run of tagged-list clauses with distinct
+        ;; head tags.  Clause lengths MAY vary — we factor the list? +
+        ;; head-extraction spine and per-arm-check the length when it
+        ;; differs across the run.  Returns (values run rest).
         (if (not (and (pair? clauses) (tagged-list-clause? (car clauses))))
           (values '() clauses)
-          (let ([n (tagged-list-clause-length (car clauses))])
-            (let loop ([cs (cdr clauses)]
-                       [run (list (car clauses))]
-                       [tags (list (tagged-list-clause-tag-sym (car clauses)))])
-              (if (and (pair? cs)
-                       (tagged-list-clause? (car cs))
-                       (= (tagged-list-clause-length (car cs)) n)
-                       (not (memq (tagged-list-clause-tag-sym (car cs)) tags)))
-                (loop (cdr cs)
-                      (cons (car cs) run)
-                      (cons (tagged-list-clause-tag-sym (car cs)) tags))
-                (values (reverse run) cs))))))
+          (let loop ([cs (cdr clauses)]
+                     [run (list (car clauses))]
+                     [tags (list (tagged-list-clause-tag-sym (car clauses)))])
+            (if (and (pair? cs)
+                     (tagged-list-clause? (car cs))
+                     (not (memq (tagged-list-clause-tag-sym (car cs)) tags)))
+              (loop (cdr cs)
+                    (cons (car cs) run)
+                    (cons (tagged-list-clause-tag-sym (car cs)) tags))
+              (values (reverse run) cs)))))
+
+      (define (uniform-length run)
+        ;; Returns the common length if all clauses share it, else #f.
+        (let ([n0 (tagged-list-clause-length (car run))])
+          (and (for-all (lambda (c)
+                          (= (tagged-list-clause-length c) n0))
+                        run)
+               n0)))
 
       ;; Compile a run of tagged-list clauses into a single list-shape
-      ;; check + cond dispatch on the head tag.  Each arm still runs
-      ;; compile-pat over the remaining sub-patterns, so nested patterns
-      ;; behave identically to the unfused path.
+      ;; check + cond dispatch on the head tag.  Uniform-length runs
+      ;; factor the length check too (single (= (length) N)); mixed-
+      ;; length runs still factor pair?+list?+head extraction but
+      ;; check each arm's length individually.  Nested patterns behave
+      ;; identically to the unfused path.
       (define (compile-tagged-run run rest-stx val)
-        (let* ([n (tagged-list-clause-length (car run))]
-               [hd-tmp (car (generate-temporaries '(hd)))]
+        (let* ([hd-tmp (car (generate-temporaries '(hd)))]
+               [uniform-n (uniform-length run)]
                [arms
                 (map (lambda (clause)
                        (let* ([parts (syntax->list clause)]
@@ -483,6 +493,7 @@
                               ;; sub-patterns after the (quote TAG) head
                               [sub-pats (cddr pat-parts)]
                               [tag-stx (tagged-list-clause-tag-stx clause)]
+                              [n (tagged-list-clause-length clause)]
                               ;; Match remaining elements at indices 1..N-1.
                               [inner
                                (let loop ([ps sub-pats] [i 1] [acc body])
@@ -492,14 +503,29 @@
                                        #`(list-ref #,val #,i)
                                        acc
                                        rest-stx))))])
-                         #`[(eq? #,hd-tmp #,tag-stx) #,inner]))
+                         (if uniform-n
+                           #`[(eq? #,hd-tmp #,tag-stx) #,inner]
+                           #`[(eq? #,hd-tmp #,tag-stx)
+                              (if (and (list? #,val) (= (length #,val) #,n))
+                                  #,inner
+                                  #,rest-stx)])))
                      run)])
-          #`(if (and (list? #,val) (= (length #,val) #,n))
-                (let ([#,hd-tmp (list-ref #,val 0)])
-                  (cond
-                    #,@arms
-                    [else #,rest-stx]))
-                #,rest-stx)))
+          (if uniform-n
+            #`(if (and (list? #,val) (= (length #,val) #,uniform-n))
+                  (let ([#,hd-tmp (list-ref #,val 0)])
+                    (cond
+                      #,@arms
+                      [else #,rest-stx]))
+                  #,rest-stx)
+            ;; Mixed length: factor pair? + head extraction only.
+            ;; Per-arm check list?+length before entering the body so
+            ;; improper lists fall through safely.
+            #`(if (pair? #,val)
+                  (let ([#,hd-tmp (car #,val)])
+                    (cond
+                      #,@arms
+                      [else #,rest-stx]))
+                  #,rest-stx))))
 
       (define (compile-clauses clauses val)
         (cond
@@ -516,8 +542,11 @@
           [(and (tagged-list-clause? (car clauses))
                 (pair? (cdr clauses))
                 (tagged-list-clause? (cadr clauses))
-                (= (tagged-list-clause-length (car clauses))
-                   (tagged-list-clause-length (cadr clauses))))
+                ;; Require distinct tags on the first two so the run
+                ;; has at least 2 arms to fuse — same-tag clauses end
+                ;; the run inside split-tagged-run anyway.
+                (not (eq? (tagged-list-clause-tag-sym (car clauses))
+                          (tagged-list-clause-tag-sym (cadr clauses)))))
            (let-values ([(run rest) (split-tagged-run clauses)])
              (if (>= (length run) 2)
                (compile-tagged-run run (compile-clauses rest val) val)

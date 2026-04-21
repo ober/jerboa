@@ -50,6 +50,15 @@
   (define (in-hash-values ht)
     (hash-values ht))
 
+  ;; Fusion helpers: return the raw vector from (hashtable-entries ht)
+  ;; without the (let-values ...) → call-with-values overhead that
+  ;; inlining hashtable-entries into each macro expansion would force
+  ;; on every enclosing call.  `(hashtable-keys ht)` already returns a
+  ;; single vector, so we only need a helper for values.
+  (define (%ht-values-vec ht)
+    (call-with-values (lambda () (hashtable-entries ht))
+      (lambda (_keys vals) vals)))
+
   (define (in-hash-pairs ht)
     (hash->list ht))
 
@@ -301,7 +310,7 @@
                        (loop (fx+ i 1) (cons (begin body ...) acc)))))))]
           [(_ ((var (in-hash-values ht-expr))) body ...)
            (binding-id? #'var)
-           #'(let-values ([(%ks vs) (hashtable-entries ht-expr)])
+           #'(let ([vs (%ht-values-vec ht-expr)])
                (let ([n (vector-length vs)])
                  (let loop ([i 0] [acc '()])
                    (if (fx>= i n) (reverse acc)

@@ -71,33 +71,46 @@
              (or (and table (hashtable-ref table name #f))
                  (loop (record-type-parent t)))))))
 
-  ;; Arity-specialized dispatch entry points.  Each is one straight-line
-  ;; lookup + direct call, so the compiler avoids the apply + rest-list
-  ;; allocation that the variadic form requires.  The error path is
-  ;; never-returning so the (or method ...) idiom keeps the fast path
-  ;; tight.
+  ;; Slow-path: called only after the own-RTD lookup misses.  Walks
+  ;; parents.  Receives the first parent directly to avoid re-checking
+  ;; the own RTD we already looked at.
+  (define (%find-method-parents parent name)
+    (and parent (find-method parent name)))
+
+  ;; Arity-specialized dispatch entry points.  Each inlines the common
+  ;; fast path: (1) own-RTD hashtable lookup, (2) method table lookup.
+  ;; Only on a miss do we call into the parent-walking slow path.  This
+  ;; avoids the find-method procedure-call frame on the hot path.
   (define (%missing-method obj name)
     (error 'call-method "no method" name
       (record-type-name (record-rtd obj))))
-  (define (call-method-0 obj name)
-    ((or (find-method (record-rtd obj) name)
-         (%missing-method obj name)) obj))
-  (define (call-method-1 obj name a)
-    ((or (find-method (record-rtd obj) name)
-         (%missing-method obj name)) obj a))
-  (define (call-method-2 obj name a b)
-    ((or (find-method (record-rtd obj) name)
-         (%missing-method obj name)) obj a b))
-  (define (call-method-3 obj name a b c)
-    ((or (find-method (record-rtd obj) name)
-         (%missing-method obj name)) obj a b c))
-  (define (call-method-4 obj name a b c d)
-    ((or (find-method (record-rtd obj) name)
-         (%missing-method obj name)) obj a b c d))
+  (define-syntax %dispatch-body
+    ;; (%dispatch-body obj name (arg ...))
+    (syntax-rules ()
+      [(_ obj-expr name-expr (arg ...))
+       (let* ([%o obj-expr]
+              [%rtd (record-rtd %o)]
+              [%tbl (hashtable-ref *method-tables* %rtd #f)]
+              [%m (and %tbl (hashtable-ref %tbl name-expr #f))])
+         (if %m
+           (%m %o arg ...)
+           ((or (%find-method-parents (record-type-parent %rtd) name-expr)
+                (%missing-method %o name-expr))
+            %o arg ...)))]))
+  (define (call-method-0 obj name)       (%dispatch-body obj name ()))
+  (define (call-method-1 obj name a)     (%dispatch-body obj name (a)))
+  (define (call-method-2 obj name a b)   (%dispatch-body obj name (a b)))
+  (define (call-method-3 obj name a b c) (%dispatch-body obj name (a b c)))
+  (define (call-method-4 obj name a b c d) (%dispatch-body obj name (a b c d)))
   (define (call-method obj name . args)
-    (apply (or (find-method (record-rtd obj) name)
-               (%missing-method obj name))
-           obj args))
+    (let* ([rtd (record-rtd obj)]
+           [tbl (hashtable-ref *method-tables* rtd #f)]
+           [m (and tbl (hashtable-ref tbl name #f))])
+      (if m
+        (apply m obj args)
+        (apply (or (%find-method-parents (record-type-parent rtd) name)
+                   (%missing-method obj name))
+               obj args))))
 
   ;; ~ is the dispatch operator: (~ obj 'method args...).  Expand to
   ;; the narrowest arity-specialized call-method-N so the compiler
@@ -107,14 +120,52 @@
   ;; procedure for higher-order use.
   (define (~proc obj method-name . args)
     (apply call-method obj method-name args))
+  ;; Expand ~ inline: direct own-RTD lookup avoids the call-method-N
+  ;; procedure-call frame on the fast path.  Miss falls through to
+  ;; call-method-N which re-does the lookup and walks parents.
   (define-syntax ~
     (lambda (stx)
       (syntax-case stx ()
-        [(_ obj name)             #'(call-method-0 obj name)]
-        [(_ obj name a)           #'(call-method-1 obj name a)]
-        [(_ obj name a b)         #'(call-method-2 obj name a b)]
-        [(_ obj name a b c)       #'(call-method-3 obj name a b c)]
-        [(_ obj name a b c d)     #'(call-method-4 obj name a b c d)]
+        [(_ obj name)
+         #'(let* ([%o obj]
+                  [%n name]
+                  [%rtd (record-rtd %o)]
+                  [%tbl (hashtable-ref *method-tables* %rtd #f)]
+                  [%m (and %tbl (hashtable-ref %tbl %n #f))])
+             (if %m (%m %o) (call-method-0 %o %n)))]
+        [(_ obj name a)
+         #'(let* ([%o obj]
+                  [%n name]
+                  [%a a]
+                  [%rtd (record-rtd %o)]
+                  [%tbl (hashtable-ref *method-tables* %rtd #f)]
+                  [%m (and %tbl (hashtable-ref %tbl %n #f))])
+             (if %m (%m %o %a) (call-method-1 %o %n %a)))]
+        [(_ obj name a b)
+         #'(let* ([%o obj]
+                  [%n name]
+                  [%a a] [%b b]
+                  [%rtd (record-rtd %o)]
+                  [%tbl (hashtable-ref *method-tables* %rtd #f)]
+                  [%m (and %tbl (hashtable-ref %tbl %n #f))])
+             (if %m (%m %o %a %b) (call-method-2 %o %n %a %b)))]
+        [(_ obj name a b c)
+         #'(let* ([%o obj]
+                  [%n name]
+                  [%a a] [%b b] [%c c]
+                  [%rtd (record-rtd %o)]
+                  [%tbl (hashtable-ref *method-tables* %rtd #f)]
+                  [%m (and %tbl (hashtable-ref %tbl %n #f))])
+             (if %m (%m %o %a %b %c) (call-method-3 %o %n %a %b %c)))]
+        [(_ obj name a b c d)
+         #'(let* ([%o obj]
+                  [%n name]
+                  [%a a] [%b b] [%c c] [%d d]
+                  [%rtd (record-rtd %o)]
+                  [%tbl (hashtable-ref *method-tables* %rtd #f)]
+                  [%m (and %tbl (hashtable-ref %tbl %n #f))])
+             (if %m (%m %o %a %b %c %d)
+                    (call-method-4 %o %n %a %b %c %d)))]
         [(_ obj name arg ...)     #'(call-method obj name arg ...)]
         [id (identifier? #'id)    #'~proc])))
 
