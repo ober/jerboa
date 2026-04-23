@@ -56,7 +56,11 @@
   ;; shift  — tree height in bits (BITS per level; starts at BITS, grows by BITS)
   ;; root   — trie root (pvec-node)
   ;; tail   — vector of the last up-to-32 elements (not in trie)
+  ;; nongenerative UID: pins the RTD across compilation units so cp0
+  ;; can fold (persistent-vector? x) when x's type is known statically.
+  ;; Round 4 Phase 29.
   (define-record-type %pvec
+    (nongenerative jerboa-pvec-v1)
     (fields count shift root tail))
 
   (define (persistent-vector? x) (%pvec? x))
@@ -277,6 +281,7 @@
   ;; Can be upgraded to a true transient trie for better performance.
 
   (define-record-type %transient
+    (nongenerative jerboa-pvec-transient-v1)
     (fields (mutable items) (mutable count) (mutable done?))
     (protocol (lambda (new)
       (lambda (items count) (new items count #f)))))

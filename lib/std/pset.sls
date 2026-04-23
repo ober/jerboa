@@ -67,7 +67,11 @@
 
   ;;; ========== Set record ==========
 
+  ;; nongenerative UID: pins the RTD across compilation units so cp0
+  ;; can fold (persistent-set? x) when x's type is known statically.
+  ;; Round 4 Phase 29.
   (define-record-type %pset
+    (nongenerative jerboa-pset-v1)
     (fields (immutable map)))     ;; wraps an underlying %pmap
 
   (define (persistent-set? x) (%pset? x))
@@ -215,6 +219,7 @@
   ;; keys are the set elements.
 
   (define-record-type %tset
+    (nongenerative jerboa-tset-v1)
     (fields (immutable tmap)))
 
   (define (transient-set s)

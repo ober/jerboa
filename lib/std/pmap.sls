@@ -91,7 +91,12 @@
     (fields (mutable edit) hash (mutable pairs)))  ; pairs = list of (key . val)
 
   ;;; ========== The map record ==========
+  ;; nongenerative UID pins the RTD across compilation units so
+  ;; cp0 can fold (persistent-map? x) when x's type is known and
+  ;; cptypes can (eventually) specialize persistent-map-ref / has?
+  ;; on known-pmap arguments.  Round 4 Phase 29.
   (define-record-type %pmap
+    (nongenerative jerboa-pmap-v1)
     (fields root size equal-proc hash-proc))
 
   (define (persistent-map? x) (%pmap? x))
@@ -576,6 +581,7 @@
   ;; with `eq?` identity comparison on the box itself.
 
   (define-record-type %tmap
+    (nongenerative jerboa-tmap-v1)
     (fields
       (mutable root)
       (mutable size)
