@@ -1,0 +1,35 @@
+name: Docs
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  check-doc-examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Chez Scheme
+        run: sudo apt-get update && sudo apt-get install -y chezscheme
+
+      - name: Parse-check every scheme fence in docs/ and examples/
+        run: make check-docs SCHEME=scheme
+
+  check-doc-examples-strict:
+    runs-on: ubuntu-latest
+    # Strict mode resolves imports (requires chez-sqlite/chez-httpd for some
+    # fences). Currently informational — does not block merges.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Chez Scheme
+        run: sudo apt-get update && sudo apt-get install -y chezscheme
+
+      - name: Build Jerboa libraries
+        run: make build SCHEME=scheme
+
+      - name: Strict-check every scheme fence (imports resolved)
+        run: make check-docs-strict SCHEME=scheme
