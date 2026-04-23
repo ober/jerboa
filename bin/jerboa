@@ -31,6 +31,8 @@ Commands:
   (no args)          Launch the Jerboa REPL
   repl               Launch the Jerboa REPL
   run <file>         Run a Scheme script
+  exec <file>        Run a self-contained script with a requires: header
+                     (auto-installs declared dependencies before running)
   eval '<expr>'      Evaluate a single expression
   test [dir]         Discover and run test files (default: tests/)
   build              Run make build in the project directory
@@ -67,6 +69,120 @@ cmd_run() {
         exit 1
     fi
     exec "$SCHEME" --libdirs "$LIBDIRS" --script "$file"
+}
+
+##
+## parse_requires_header <file>
+##
+## Extract dependency URLs from a ";;; jerboa-package" header block.
+## The header lives at the top of the file and looks like:
+##
+##     ;;; jerboa-package
+##     ;;; name:    my-app
+##     ;;; requires:
+##     ;;;   github.com/alice/jerboa-foo
+##     ;;;   github.com/bob/jerboa-bar
+##     ;;;
+##
+## The block ends at the first line that is not a ";;;" comment, or at a
+## bare ";;;" (blank comment) after the requires: key. Unknown keys are
+## ignored. Any line that isn't "requires:" or an entry under it is
+## skipped.
+##
+## Prints one URL per line. Prints nothing if no header is present.
+parse_requires_header() {
+    awk '
+        BEGIN { in_block = 0; in_requires = 0 }
+        # A line like ";;;" or ";;; " ends the requires sub-block.
+        /^;;;[[:space:]]*$/ {
+            if (in_block) { in_requires = 0; next }
+            exit
+        }
+        # Non-comment line: header is over.
+        !/^;;;/ {
+            if (in_block) exit
+            next
+        }
+        # Header marker
+        /^;;;[[:space:]]*jerboa-package[[:space:]]*$/ { in_block = 1; next }
+        # Only process comments inside the block
+        in_block == 0 { next }
+        # Key: value line
+        /^;;;[[:space:]]*[A-Za-z_-]+:[[:space:]]*/ {
+            # "requires:" with no value starts a sub-block
+            if ($0 ~ /^;;;[[:space:]]*requires:[[:space:]]*$/) {
+                in_requires = 1
+                next
+            }
+            # Any other key: line exits the requires sub-block
+            in_requires = 0
+            next
+        }
+        # Entry line under requires:
+        in_requires == 1 {
+            line = $0
+            sub(/^;;;[[:space:]]*/, "", line)
+            sub(/[[:space:]]+$/, "", line)
+            if (line != "") print line
+        }
+    ' "$1"
+}
+
+cmd_exec() {
+    if [ $# -eq 0 ]; then
+        echo "Error: jerboa exec requires a file argument" >&2
+        echo "Usage: jerboa exec <file>" >&2
+        exit 1
+    fi
+    local file="$1"
+    shift
+    if [ ! -f "$file" ]; then
+        echo "Error: file not found: $file" >&2
+        exit 1
+    fi
+
+    local -a deps=()
+    while IFS= read -r dep; do
+        [ -n "$dep" ] && deps+=("$dep")
+    done < <(parse_requires_header "$file")
+
+    if [ ${#deps[@]} -gt 0 ]; then
+        local -a missing=()
+        for dep in "${deps[@]}"; do
+            local name
+            name="$(basename "$dep")"
+            if ! "$SCHEME" --libdirs "$LIBDIRS" --program <(cat <<CHECK
+(import (jerboa registry))
+(exit (if (package-installed? "$name") 0 1))
+CHECK
+            ) >/dev/null 2>&1; then
+                missing+=("$dep")
+            fi
+        done
+
+        if [ ${#missing[@]} -gt 0 ]; then
+            echo "jerboa exec: $file declares ${#missing[@]} missing package(s):"
+            for dep in "${missing[@]}"; do
+                echo "  - $dep"
+            done
+            if [ "${JERBOA_EXEC_YES:-}" != "1" ]; then
+                printf "Install now? [y/N] "
+                read -r reply
+                case "$reply" in
+                    y|Y|yes|YES) ;;
+                    *) echo "Aborted." >&2; exit 1 ;;
+                esac
+            fi
+            for dep in "${missing[@]}"; do
+                "$0" install "$dep" || {
+                    echo "Failed to install $dep" >&2
+                    exit 1
+                }
+            done
+        fi
+    fi
+
+    exec "$SCHEME" --libdirs "$LIBDIRS" --script "$file" "$@"
 }
 
 cmd_eval() {
@@ -224,6 +340,10 @@ case "${1:-}" in
     run)
         shift
         cmd_run "$@"
+        ;;
+    exec)
+        shift
+        cmd_exec "$@"
         ;;
     eval)
         shift
