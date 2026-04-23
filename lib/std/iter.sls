@@ -18,11 +18,21 @@
     in-hash-keys in-hash-values in-hash-pairs
     in-naturals in-indexed
     ;; better2 #7: I/O iterators
-    in-port in-lines in-chars in-bytes in-producer)
+    in-port in-lines in-chars in-bytes in-producer
+    ;; Round 4 Phase 28: persistent-collection iterators (re-exported from
+    ;; (std pmap) / (std pvec) / (std pset) so syntax-case literal matching
+    ;; inside this library resolves to the same binding user code sees).
+    in-pmap in-pmap-keys in-pmap-values in-pmap-pairs
+    in-pvec in-pset)
 
   (import (except (chezscheme)
             make-hash-table hash-table? iota 1+ 1-)
-          (jerboa runtime))
+          (jerboa runtime)
+          (only (std pmap) in-pmap in-pmap-keys in-pmap-values in-pmap-pairs
+                           persistent-map-for-each)
+          (only (std pvec) in-pvec persistent-vector?
+                           persistent-vector-length persistent-vector-ref)
+          (only (std pset) in-pset persistent-set-for-each))
 
   ;; Iterator constructors — return plain lists for simplicity
 
@@ -179,8 +189,45 @@
                      (or (= (string-length str) 0)
                          (not (char=? (string-ref str (- (string-length str) 1)) #\:))))))))
       (lambda (stx)
-        (syntax-case stx (in-range in-vector in-string in-list)
+        (syntax-case stx (in-range in-vector in-string in-list
+                          in-pmap in-pmap-keys in-pmap-values in-pmap-pairs
+                          in-pvec in-pset)
           ;; --- Fused iterators ---
+          [(_ ((var (in-pvec pv-expr))) body ...)
+           (binding-id? #'var)
+           #'(let ([v pv-expr])
+               (let ([n (persistent-vector-length v)])
+                 (let loop ([i 0])
+                   (when (fx< i n)
+                     (let ([var (persistent-vector-ref v i)]) body ...)
+                     (loop (fx+ i 1))))))]
+          [(_ ((var (in-pmap m-expr))) body ...)
+           (binding-id? #'var)
+           #'(persistent-map-for-each
+               (lambda (__k __v)
+                 (let ([var (cons __k __v)]) body ...))
+               m-expr)]
+          [(_ ((var (in-pmap-pairs m-expr))) body ...)
+           (binding-id? #'var)
+           #'(persistent-map-for-each
+               (lambda (__k __v)
+                 (let ([var (cons __k __v)]) body ...))
+               m-expr)]
+          [(_ ((var (in-pmap-keys m-expr))) body ...)
+           (binding-id? #'var)
+           #'(persistent-map-for-each
+               (lambda (__k __v) (let ([var __k]) body ...))
+               m-expr)]
+          [(_ ((var (in-pmap-values m-expr))) body ...)
+           (binding-id? #'var)
+           #'(persistent-map-for-each
+               (lambda (__k __v) (let ([var __v]) body ...))
+               m-expr)]
+          [(_ ((var (in-pset s-expr))) body ...)
+           (binding-id? #'var)
+           #'(persistent-set-for-each
+               (lambda (__x) (let ([var __x]) body ...))
+               s-expr)]
           [(_ ((var (in-range end))) body ...)
            (binding-id? #'var)
            #'(let ([n end])
@@ -257,8 +304,63 @@
                          (not (char=? (string-ref str (- (string-length str) 1)) #\:))))))))
       (lambda (stx)
         (syntax-case stx (in-range in-vector in-string in-list
-                          in-hash-keys in-hash-values)
+                          in-hash-keys in-hash-values
+                          in-pmap in-pmap-keys in-pmap-values in-pmap-pairs
+                          in-pvec in-pset)
           ;; --- Fused iterators (single-clause) ---
+          [(_ ((var (in-pvec pv-expr))) body ...)
+           (binding-id? #'var)
+           #'(let ([v pv-expr])
+               (let ([n (persistent-vector-length v)])
+                 (let loop ([i 0] [acc '()])
+                   (if (fx>= i n) (reverse acc)
+                     (let ([var (persistent-vector-ref v i)])
+                       (loop (fx+ i 1) (cons (begin body ...) acc)))))))]
+          [(_ ((var (in-pmap m-expr))) body ...)
+           (binding-id? #'var)
+           #'(let ([acc '()])
+               (persistent-map-for-each
+                 (lambda (__k __v)
+                   (let ([var (cons __k __v)])
+                     (set! acc (cons (begin body ...) acc))))
+                 m-expr)
+               (reverse acc))]
+          [(_ ((var (in-pmap-pairs m-expr))) body ...)
+           (binding-id? #'var)
+           #'(let ([acc '()])
+               (persistent-map-for-each
+                 (lambda (__k __v)
+                   (let ([var (cons __k __v)])
+                     (set! acc (cons (begin body ...) acc))))
+                 m-expr)
+               (reverse acc))]
+          [(_ ((var (in-pmap-keys m-expr))) body ...)
+           (binding-id? #'var)
+           #'(let ([acc '()])
+               (persistent-map-for-each
+                 (lambda (__k __v)
+                   (let ([var __k])
+                     (set! acc (cons (begin body ...) acc))))
+                 m-expr)
+               (reverse acc))]
+          [(_ ((var (in-pmap-values m-expr))) body ...)
+           (binding-id? #'var)
+           #'(let ([acc '()])
+               (persistent-map-for-each
+                 (lambda (__k __v)
+                   (let ([var __v])
+                     (set! acc (cons (begin body ...) acc))))
+                 m-expr)
+               (reverse acc))]
+          [(_ ((var (in-pset s-expr))) body ...)
+           (binding-id? #'var)
+           #'(let ([acc '()])
+               (persistent-set-for-each
+                 (lambda (__x)
+                   (let ([var __x])
+                     (set! acc (cons (begin body ...) acc))))
+                 s-expr)
+               (reverse acc))]
           [(_ ((var (in-range end))) body ...)
            (binding-id? #'var)
            #'(let ([n end])
@@ -344,8 +446,60 @@
                      (or (= (string-length str) 0)
                          (not (char=? (string-ref str (- (string-length str) 1)) #\:))))))))
       (lambda (stx)
-        (syntax-case stx (in-range in-vector in-string in-list)
+        (syntax-case stx (in-range in-vector in-string in-list
+                          in-pmap in-pmap-keys in-pmap-values in-pmap-pairs
+                          in-pvec in-pset)
           ;; --- Fused iterators ---
+          [(_ ((acc init)) ((var (in-pvec pv-expr))) body ...)
+           (binding-id? #'var)
+           #'(let ([v pv-expr])
+               (let ([n (persistent-vector-length v)])
+                 (let loop ([i 0] [acc init])
+                   (if (fx>= i n) acc
+                     (let ([var (persistent-vector-ref v i)])
+                       (loop (fx+ i 1) (begin body ...)))))))]
+          [(_ ((acc init)) ((var (in-pmap m-expr))) body ...)
+           (binding-id? #'var)
+           #'(let ([acc init])
+               (persistent-map-for-each
+                 (lambda (__k __v)
+                   (let ([var (cons __k __v)])
+                     (set! acc (begin body ...))))
+                 m-expr)
+               acc)]
+          [(_ ((acc init)) ((var (in-pmap-pairs m-expr))) body ...)
+           (binding-id? #'var)
+           #'(let ([acc init])
+               (persistent-map-for-each
+                 (lambda (__k __v)
+                   (let ([var (cons __k __v)])
+                     (set! acc (begin body ...))))
+                 m-expr)
+               acc)]
+          [(_ ((acc init)) ((var (in-pmap-keys m-expr))) body ...)
+           (binding-id? #'var)
+           #'(let ([acc init])
+               (persistent-map-for-each
+                 (lambda (__k __v)
+                   (let ([var __k]) (set! acc (begin body ...))))
+                 m-expr)
+               acc)]
+          [(_ ((acc init)) ((var (in-pmap-values m-expr))) body ...)
+           (binding-id? #'var)
+           #'(let ([acc init])
+               (persistent-map-for-each
+                 (lambda (__k __v)
+                   (let ([var __v]) (set! acc (begin body ...))))
+                 m-expr)
+               acc)]
+          [(_ ((acc init)) ((var (in-pset s-expr))) body ...)
+           (binding-id? #'var)
+           #'(let ([acc init])
+               (persistent-set-for-each
+                 (lambda (__x)
+                   (let ([var __x]) (set! acc (begin body ...))))
+                 s-expr)
+               acc)]
           [(_ ((acc init)) ((var (in-range end))) body ...)
            (binding-id? #'var)
            #'(let ([n end])

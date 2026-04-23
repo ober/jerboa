@@ -21,6 +21,7 @@
     persistent-vector->list persistent-vector-for-each
     persistent-vector-map persistent-vector-fold persistent-vector-filter
     persistent-vector-concat persistent-vector-slice persistent-vector-prepend
+    in-pvec
     ;; Transients: batch mutation without per-step copying
     transient transient? transient-ref transient-set! transient-append! persistent!
     ;; Structural equality / hashing
@@ -220,6 +221,11 @@
       (do ([i 0 (+ i 1)])
           ((= i count))
         (proc (persistent-vector-ref v i)))))
+
+  ;; `in-pvec` — iterator compatible with (std iter).
+  ;; Unfused path materialises a list; iter.sls's fused clauses for
+  ;; `in-pvec` skip the materialise step entirely.
+  (define (in-pvec v) (persistent-vector->list v))
 
   (define (persistent-vector-map proc v)
     (let ([count (%pvec-count v)])
