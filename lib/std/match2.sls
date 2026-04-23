@@ -47,7 +47,10 @@
     match
     define-match-type)
 
-  (import (chezscheme))
+  (import (chezscheme)
+          (only (std pmap) persistent-map? persistent-map-has? persistent-map-ref)
+          (only (std pvec) persistent-vector? persistent-vector-length persistent-vector-ref)
+          (only (std pset) persistent-set? persistent-set-contains?))
 
   ;; ========== Global Registries ==========
 
@@ -292,6 +295,67 @@
                #`(if (box? #,val)
                    #,(compile-pat sub #`(unbox #,val) success fail)
                    #,fail))]
+
+            ;; (persistent-map | pmap | imap k1 p1 k2 p2 ...) — pmap destructure.
+            ;; Alternating key/value-pattern pairs. Keys are evaluated as
+            ;; expressions at match time (usually 'quoted symbols or literals).
+            ;; Compiles to persistent-map? guard + N persistent-map-has? +
+            ;; persistent-map-ref lookups, short-circuiting on first missing
+            ;; key. Subpatterns see the referenced value and can themselves
+            ;; be further patterns.
+            [(and (pair? d) (symbol? (car d))
+                  (memq (car d) '(persistent-map pmap imap))
+                  (even? (length (cdr d))))
+             (let ([chain
+                    (let loop ([kps (cdr (syntax->list pat))] [inner success])
+                      (if (null? kps)
+                        inner
+                        (let ([k (car kps)]
+                              [p (cadr kps)]
+                              [rest (cddr kps)])
+                          (let ([slot (car (generate-temporaries '(pm-slot)))])
+                            #`(if (persistent-map-has? #,val #,k)
+                                  (let ([#,slot (persistent-map-ref #,val #,k)])
+                                    #,(compile-pat p slot
+                                        (loop rest inner)
+                                        fail))
+                                  #,fail)))))])
+               #`(if (persistent-map? #,val) #,chain #,fail))]
+
+            ;; (persistent-vector | pvec | ivec p1 p2 ...) — pvec destructure.
+            ;; Length must match exactly (no rest-pattern support yet).
+            ;; Compiles to length check + N persistent-vector-ref lookups.
+            [(and (pair? d) (symbol? (car d))
+                  (memq (car d) '(persistent-vector pvec ivec)))
+             (let* ([pats (cdr (syntax->list pat))]
+                    [n (length pats)])
+               (let compile-pv ([pats pats] [i 0] [inner success])
+                 (if (null? pats)
+                   #`(if (and (persistent-vector? #,val)
+                              (= (persistent-vector-length #,val) #,n))
+                         #,inner
+                         #,fail)
+                   (compile-pv
+                     (cdr pats) (+ i 1)
+                     (compile-pat (car pats)
+                       #`(persistent-vector-ref #,val #,i)
+                       inner fail)))))]
+
+            ;; (persistent-set | pset x1 x2 ...) — pset membership check.
+            ;; All listed elements must be members. Size can still be larger
+            ;; (superset allowed) — tighter shape checks are explicit via
+            ;; (and (? predicate) ...). Elements are evaluated, not bound.
+            [(and (pair? d) (symbol? (car d))
+                  (memq (car d) '(persistent-set pset)))
+             (let ([elems (cdr (syntax->list pat))])
+               (let ([chain
+                      (let loop ([es elems] [inner success])
+                        (if (null? es)
+                          inner
+                          #`(if (persistent-set-contains? #,val #,(car es))
+                                #,(loop (cdr es) inner)
+                                #,fail)))])
+                 #`(if (persistent-set? #,val) #,chain #,fail)))]
 
             ;; (name p1 ...) — struct type or active pattern (runtime dispatch)
             [(and (pair? d) (symbol? (car d)))
