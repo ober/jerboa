@@ -250,4 +250,26 @@
     (tset-check 'persistent-set! t)
     (make-%pset (persistent-map! (%tset-tmap t))))
 
+  ;;; ========== Chez equal? / equal-hash integration ==========
+  ;; Two sets with the same elements compare equal via (equal? s1 s2)
+  ;; and hash to the same value, so a pset can key an equal-hashtable.
+  (record-type-equal-procedure (record-type-descriptor %pset)
+    (lambda (a b rec-equal?) (persistent-set=? a b)))
+  (record-type-hash-procedure (record-type-descriptor %pset)
+    (lambda (s rec-hash) (persistent-set-hash s)))
+
+  ;;; ========== Printer ==========
+  ;; Surface form: #{e1 e2 e3}. Matches Clojure set literal syntax.
+  (record-writer (record-type-descriptor %pset)
+    (lambda (s port wr)
+      (write-char #\# port)
+      (write-char #\{ port)
+      (let ([first? #t])
+        (persistent-set-for-each
+          (lambda (x)
+            (if first? (set! first? #f) (write-char #\space port))
+            (wr x port))
+          s))
+      (write-char #\} port)))
+
 ) ;; end library

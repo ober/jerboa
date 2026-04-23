@@ -865,4 +865,29 @@
   ;; transient version re-uses a single %tmap wrapper end-to-end and
   ;; produces the final %pmap only once, in persistent-map!.
 
+  ;;; ========== Chez equal? / equal-hash integration ==========
+  ;; Plumbs persistent-map=? / persistent-map-hash into Chez's generic
+  ;; equality protocol so that (equal? pm1 pm2) holds when the two
+  ;; maps have the same entries regardless of insertion order, and a
+  ;; pmap can be used as a key in an equal-hashtable.
+  (record-type-equal-procedure (record-type-descriptor %pmap)
+    (lambda (a b rec-equal?) (persistent-map=? a b)))
+  (record-type-hash-procedure (record-type-descriptor %pmap)
+    (lambda (m rec-hash) (persistent-map-hash m)))
+
+  ;;; ========== Printer ==========
+  ;; Surface form: {k1 v1 k2 v2}. No commas, matching Clojure minus
+  ;; keyword colons. Not round-trippable without a reader macro, but
+  ;; readable for REPL / debugging / logs.
+  (record-writer (record-type-descriptor %pmap)
+    (lambda (pm port wr)
+      (write-char #\{ port)
+      (let ([first? #t])
+        (persistent-map-for-each
+          (lambda (k v)
+            (if first? (set! first? #f) (write-char #\space port))
+            (wr k port) (write-char #\space port) (wr v port))
+          pm))
+      (write-char #\} port)))
+
 ) ;; end library

@@ -22,7 +22,9 @@
     persistent-vector-map persistent-vector-fold persistent-vector-filter
     persistent-vector-concat persistent-vector-slice persistent-vector-prepend
     ;; Transients: batch mutation without per-step copying
-    transient transient? transient-ref transient-set! transient-append! persistent!)
+    transient transient? transient-ref transient-set! transient-append! persistent!
+    ;; Structural equality / hashing
+    persistent-vector=? persistent-vector-hash)
 
   (import (chezscheme))
 
@@ -324,5 +326,91 @@
         (if (= i count)
           v
           (loop (+ i 1) (persistent-vector-append v (vector-ref items i)))))))
+
+  ;;; ========== Structural equality ==========
+  ;; Element order matters: two pvecs are equal iff they have the same
+  ;; length and corresponding elements are pvec-val=?.
+  (define (pvec-val=? a b)
+    (cond
+      [(and (%pvec? a) (%pvec? b)) (persistent-vector=? a b)]
+      [(and (pair? a) (pair? b))
+       (and (pvec-val=? (car a) (car b))
+            (pvec-val=? (cdr a) (cdr b)))]
+      [(and (vector? a) (vector? b))
+       (let ([la (vector-length a)])
+         (and (= la (vector-length b))
+              (let loop ([i 0])
+                (cond
+                  [(= i la) #t]
+                  [(pvec-val=? (vector-ref a i) (vector-ref b i))
+                   (loop (+ i 1))]
+                  [else #f]))))]
+      [else (equal? a b)]))
+
+  (define (persistent-vector=? v1 v2)
+    (cond
+      [(eq? v1 v2) #t]
+      [(not (%pvec? v1)) #f]
+      [(not (%pvec? v2)) #f]
+      [(not (= (%pvec-count v1) (%pvec-count v2))) #f]
+      [else
+       (let ([n (%pvec-count v1)])
+         (let loop ([i 0])
+           (cond
+             [(= i n) #t]
+             [(pvec-val=? (persistent-vector-ref v1 i)
+                          (persistent-vector-ref v2 i))
+              (loop (+ i 1))]
+             [else #f])))]))
+
+  ;;; ========== Structural hash ==========
+  ;; Order-dependent: each element's hash is position-mixed so that
+  ;; reversing the vector changes the hash.
+  (define (pvec-val-hash x)
+    (cond
+      [(%pvec? x) (persistent-vector-hash x)]
+      [(pair? x)
+       (bitwise-xor (pvec-val-hash (car x))
+                    (bitwise-arithmetic-shift (pvec-val-hash (cdr x)) 1))]
+      [(vector? x)
+       (let ([len (vector-length x)])
+         (let loop ([i 0] [h len])
+           (if (= i len)
+               h
+               (loop (+ i 1)
+                     (bitwise-xor h
+                       (bitwise-arithmetic-shift
+                         (pvec-val-hash (vector-ref x i)) 3))))))]
+      [else (equal-hash x)]))
+
+  (define (persistent-vector-hash v)
+    (let ([n (%pvec-count v)])
+      (let loop ([i 0] [h n])
+        (if (= i n)
+            h
+            (loop (+ i 1)
+                  (bitwise-xor
+                    (bitwise-arithmetic-shift h 5)
+                    (pvec-val-hash (persistent-vector-ref v i))))))))
+
+  ;;; ========== Chez equal? / equal-hash integration ==========
+  (record-type-equal-procedure (record-type-descriptor %pvec)
+    (lambda (a b rec-equal?) (persistent-vector=? a b)))
+  (record-type-hash-procedure (record-type-descriptor %pvec)
+    (lambda (v rec-hash) (persistent-vector-hash v)))
+
+  ;;; ========== Printer ==========
+  ;; Surface form: [e1 e2 e3]. Square brackets distinguish from plain
+  ;; Chez vectors (#(...)). Not round-trippable without a reader macro.
+  (record-writer (record-type-descriptor %pvec)
+    (lambda (v port wr)
+      (write-char #\[ port)
+      (let ([n (%pvec-count v)])
+        (let loop ([i 0])
+          (when (< i n)
+            (unless (= i 0) (write-char #\space port))
+            (wr (persistent-vector-ref v i) port)
+            (loop (+ i 1)))))
+      (write-char #\] port)))
 
 ) ;; end library
