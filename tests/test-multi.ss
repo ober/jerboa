@@ -182,6 +182,146 @@
     (get-method car 'x))
   'raised)
 
+;;; ---- Hierarchy (Round 5 §35) -----------------------------------
+
+(test "fresh hierarchy has no parents for unknown tag"
+  (parents (make-hierarchy) 'anything)
+  '())
+
+(test "derive adds parent relationship"
+  (let ([h (make-hierarchy)])
+    (derive h 'dog 'mammal)
+    (parents h 'dog))
+  '(mammal))
+
+(test "derive transitive ancestors via BFS"
+  (let ([h (make-hierarchy)])
+    (derive h 'corgi 'dog)
+    (derive h 'dog 'mammal)
+    (derive h 'mammal 'animal)
+    (ancestors h 'corgi))
+  '(dog mammal animal))
+
+(test "derive transitive descendants"
+  (let ([h (make-hierarchy)])
+    (derive h 'corgi 'dog)
+    (derive h 'dog 'mammal)
+    (derive h 'poodle 'dog)
+    (list-sort (lambda (a b) (string<? (symbol->string a) (symbol->string b)))
+               (descendants h 'mammal)))
+  '(corgi dog poodle))
+
+(test "isa? direct parent"
+  (let ([h (make-hierarchy)])
+    (derive h 'dog 'mammal)
+    (isa? h 'dog 'mammal))
+  #t)
+
+(test "isa? transitive"
+  (let ([h (make-hierarchy)])
+    (derive h 'corgi 'dog)
+    (derive h 'dog 'mammal)
+    (isa? h 'corgi 'mammal))
+  #t)
+
+(test "isa? self"
+  (isa? (make-hierarchy) 'x 'x)
+  #t)
+
+(test "isa? negative"
+  (isa? (make-hierarchy) 'cat 'dog)
+  #f)
+
+(test "derive rejects self-cycle"
+  (guard (_ [else 'raised])
+    (derive (make-hierarchy) 'a 'a))
+  'raised)
+
+(test "derive rejects indirect cycle"
+  (guard (_ [else 'raised])
+    (let ([h (make-hierarchy)])
+      (derive h 'a 'b)
+      (derive h 'b 'a)))
+  'raised)
+
+(test "underive removes relation"
+  (let ([h (make-hierarchy)])
+    (derive h 'dog 'mammal)
+    (underive h 'dog 'mammal)
+    (parents h 'dog))
+  '())
+
+;;; ---- Hierarchy dispatch (multimethod walks ancestors) ----------
+
+(derive 'corgi 'dog)
+(derive 'dog 'mammal)
+
+(defmulti legs (lambda (animal) animal))
+(defmethod legs 'mammal (a) 4)
+(defmethod legs 'bird (a) 2)
+
+(test "exact match wins over hierarchy"
+  (begin
+    (defmethod legs 'corgi (a) 'stubby)
+    (legs 'corgi))
+  'stubby)
+
+(test "hierarchy match: dog -> mammal"
+  (legs 'dog)
+  4)
+
+(test "hierarchy match: corgi falls back to mammal when corgi removed"
+  (begin
+    (remove-method legs 'corgi)
+    (legs 'corgi))
+  4)
+
+(test "dispatch raises on unrelated dispatch value with no default"
+  (guard (_ [else 'raised])
+    (legs 'sparrow-type-that-doesnt-exist))
+  'raised)
+
+;;; ---- prefer-method / preferred-methods -------------------------
+
+(defmulti describe (lambda (x) x))
+(defmethod describe 'swimmer (x) "swims")
+(defmethod describe 'flyer (x) "flies")
+(derive 'duck 'swimmer)
+(derive 'duck 'flyer)
+
+(test "ambiguous dispatch raises without preference"
+  (guard (_ [else 'raised])
+    (describe 'duck))
+  'raised)
+
+(test "prefer-method resolves ambiguity"
+  (begin
+    (prefer-method describe 'swimmer 'flyer)
+    (describe 'duck))
+  "swims")
+
+(test "preferred-methods lists installed preferences"
+  (let ([prefs (preferred-methods describe)])
+    (and (member '(swimmer . flyer) prefs) #t))
+  #t)
+
+(test "prefer-method is idempotent"
+  (begin
+    (prefer-method describe 'swimmer 'flyer)
+    (prefer-method describe 'swimmer 'flyer)
+    (length (preferred-methods describe)))
+  1)
+
+(test "prefer-method rejects self"
+  (guard (_ [else 'raised])
+    (prefer-method describe 'a 'a))
+  'raised)
+
+(test "prefer-method rejects cycle"
+  (guard (_ [else 'raised])
+    (prefer-method describe 'flyer 'swimmer))
+  'raised)
+
 ;;; ---- Summary ----
 (printf "~%std/multi: ~a passed, ~a failed~%" pass fail)
 (when (> fail 0) (exit 1))

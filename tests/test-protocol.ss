@@ -256,6 +256,59 @@
     (protocol-methods Three))
   '(a b c))
 
+;;; ---- extenders / extends? (Round 5 §34) ------------------------
+
+(defprotocol MyShape
+  (my-area (self))
+  (my-perimeter (self)))
+
+(extend-protocol MyShape
+  ('string (my-area (s) (string-length s))
+           (my-perimeter (s) (* 4 (string-length s))))
+  ('pair   (my-area (p) (length p))
+           (my-perimeter (p) (* 2 (length p)))))
+
+(test "extends? reports covered type"
+  (extends? MyShape 'string)
+  #t)
+
+(test "extends? rejects unrelated type"
+  (extends? MyShape 'vector)
+  #f)
+
+(test "extends? rejects partial coverage"
+  (let ()
+    (defprotocol Partial
+      (p-a (self))
+      (p-b (self)))
+    (extend-type 'symbol Partial (p-a (s) s))  ;; only p-a
+    (extends? Partial 'symbol))
+  #f)
+
+(test "extenders lists all fully-covered type keys"
+  (let ([ex (extenders MyShape)])
+    (and (memq 'string ex) (memq 'pair ex) #t))
+  #t)
+
+(test "extenders excludes partial coverage"
+  (let ()
+    (defprotocol Partial2
+      (pp-a (self))
+      (pp-b (self)))
+    (extend-type 'bytevector Partial2 (pp-a (n) n))
+    (memq 'bytevector (extenders Partial2)))
+  #f)
+
+(test "extends? errors on non-protocol"
+  (guard (exn [else 'caught])
+    (extends? 'not-a-proto 'string))
+  'caught)
+
+(test "extenders errors on non-protocol"
+  (guard (exn [else 'caught])
+    (extenders 'not-a-proto))
+  'caught)
+
 ;;; ---- Summary ---------------------------------------------------
 (printf "~%std/protocol: ~a passed, ~a failed~%" pass fail)
 (when (> fail 0) (exit 1))

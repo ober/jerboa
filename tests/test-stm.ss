@@ -163,6 +163,38 @@
       (assert-equal val 'fallback "got fallback from or-else"))))
 
 ;; =========================================================================
+;; io! — block side-effecting code inside transactions
+;; =========================================================================
+
+(test "io! body runs when called outside dosync"
+  (let ([seen 0])
+    (io! (set! seen 7))
+    (assert-equal seen 7 "body ran outside txn")))
+
+(test "io! returns body's value outside dosync"
+  (assert-equal (io! (+ 1 2 3)) 6 "value returned"))
+
+(test "io! inside dosync raises"
+  (let ([r (make-ref 0)])
+    (let ([caught
+           (guard (exn [#t 'caught])
+             (dosync
+               (alter r + 1)
+               (io! (displayln "should not print"))
+               (alter r + 1))
+             'finished)])
+      (assert-equal caught 'caught "io! raised inside dosync")
+      (assert-equal (ref-deref r) 0 "dosync rolled back"))))
+
+(test "io! inside nested dosync also raises"
+  (let ([caught
+         (guard (exn [#t 'caught])
+           (dosync
+             (dosync (io! (+ 1 1)))
+             'finished))])
+    (assert-equal caught 'caught "io! raised inside nested dosync")))
+
+;; =========================================================================
 ;; Summary
 ;; =========================================================================
 (newline)

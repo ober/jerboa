@@ -37,9 +37,154 @@
     defmulti defmethod
     ;; Introspection / mutation
     multimethod? multimethod-name
-    get-method remove-method methods)
+    get-method remove-method methods
+    ;; Hierarchy (Round 5 §35)
+    make-hierarchy
+    derive underive
+    parents ancestors descendants
+    isa?
+    prefer-method preferred-methods
+    global-hierarchy)
 
   (import (chezscheme))
+
+  ;; --- Hierarchy (Round 5 §35) --------------------------------
+  ;;
+  ;; A hierarchy records user-defined `isa?` relations over arbitrary
+  ;; dispatch values. Clojure's default hierarchy is a shared mutable
+  ;; structure seeded empty and populated by `derive`. We expose both
+  ;; `global-hierarchy` (the default) and `make-hierarchy` for isolated
+  ;; hierarchies used by tests or libraries that want to avoid leaking
+  ;; `derive` calls into a shared table.
+
+  (define-record-type %hierarchy
+    (fields (immutable parents-ht)      ;; eqv? hashtable: tag -> list of direct parents
+            (immutable descendants-ht)  ;; eqv? hashtable: tag -> list of direct children
+            (immutable lock))
+    (sealed #t))
+
+  (define (make-hierarchy)
+    (make-%hierarchy
+      (make-hashtable equal-hash equal?)
+      (make-hashtable equal-hash equal?)
+      (make-mutex)))
+
+  (define global-hierarchy (make-hierarchy))
+
+  (define (%parents-of h tag)
+    (hashtable-ref (%hierarchy-parents-ht h) tag '()))
+
+  (define (%children-of h tag)
+    (hashtable-ref (%hierarchy-descendants-ht h) tag '()))
+
+  (define (%add-once! ht k v)
+    (let ([cur (hashtable-ref ht k '())])
+      (unless (member v cur)
+        (hashtable-set! ht k (cons v cur)))))
+
+  (define (%remove-once! ht k v)
+    (let ([cur (hashtable-ref ht k '())])
+      (hashtable-set! ht k
+        (filter (lambda (x) (not (equal? x v))) cur))))
+
+  ;; derive: register child -> parent. Accepts 2 or 3 args:
+  ;;   (derive child parent)      ;; mutates global-hierarchy
+  ;;   (derive h child parent)    ;; mutates given hierarchy
+  ;; Rejects cycles.
+  (define derive
+    (case-lambda
+      [(child parent) (derive global-hierarchy child parent)]
+      [(h child parent)
+       (unless (%hierarchy? h)
+         (error 'derive "not a hierarchy" h))
+       (when (equal? child parent)
+         (error 'derive "cannot derive tag from itself" child))
+       (with-mutex (%hierarchy-lock h)
+         (when (%isa?/locked h parent child)
+           (error 'derive "cycle: parent already derives from child"
+                  (list child '-> parent)))
+         (%add-once! (%hierarchy-parents-ht h) child parent)
+         (%add-once! (%hierarchy-descendants-ht h) parent child))
+       h]))
+
+  (define underive
+    (case-lambda
+      [(child parent) (underive global-hierarchy child parent)]
+      [(h child parent)
+       (unless (%hierarchy? h)
+         (error 'underive "not a hierarchy" h))
+       (with-mutex (%hierarchy-lock h)
+         (%remove-once! (%hierarchy-parents-ht h) child parent)
+         (%remove-once! (%hierarchy-descendants-ht h) parent child))
+       h]))
+
+  (define parents
+    (case-lambda
+      [(tag) (parents global-hierarchy tag)]
+      [(h tag)
+       (unless (%hierarchy? h)
+         (error 'parents "not a hierarchy" h))
+       (with-mutex (%hierarchy-lock h) (%parents-of h tag))]))
+
+  ;; Breadth-first reachable from `tag` via parents (ancestors)
+  ;; or descendants (children). Unique, self-excluded.
+  (define (%bfs step h tag)
+    (let loop ([frontier (step h tag)] [seen '()] [acc '()])
+      (cond
+        [(null? frontier) (reverse acc)]
+        [else
+         (let ([t (car frontier)])
+           (cond
+             [(member t seen) (loop (cdr frontier) seen acc)]
+             [else
+              (loop (append (cdr frontier) (step h t))
+                    (cons t seen)
+                    (cons t acc))]))])))
+
+  (define ancestors
+    (case-lambda
+      [(tag) (ancestors global-hierarchy tag)]
+      [(h tag)
+       (unless (%hierarchy? h)
+         (error 'ancestors "not a hierarchy" h))
+       (with-mutex (%hierarchy-lock h)
+         (%bfs %parents-of h tag))]))
+
+  (define descendants
+    (case-lambda
+      [(tag) (descendants global-hierarchy tag)]
+      [(h tag)
+       (unless (%hierarchy? h)
+         (error 'descendants "not a hierarchy" h))
+       (with-mutex (%hierarchy-lock h)
+         (%bfs %children-of h tag))]))
+
+  ;; isa? — Clojure returns #t when:
+  ;;   - x equal? y, or
+  ;;   - y appears in the ancestor closure of x
+  ;; We do not model class inheritance here; for records, callers should
+  ;; pass the rtd as the tag if they want record-type derivation.
+  (define (%isa?/locked h x y)
+    (cond
+      [(equal? x y) #t]
+      [else
+       (let loop ([frontier (%parents-of h x)] [seen '()])
+         (cond
+           [(null? frontier) #f]
+           [(equal? (car frontier) y) #t]
+           [(member (car frontier) seen) (loop (cdr frontier) seen)]
+           [else
+            (loop (append (cdr frontier)
+                          (%parents-of h (car frontier)))
+                  (cons (car frontier) seen))]))]))
+
+  (define isa?
+    (case-lambda
+      [(x y) (isa? global-hierarchy x y)]
+      [(h x y)
+       (unless (%hierarchy? h)
+         (error 'isa? "not a hierarchy" h))
+       (with-mutex (%hierarchy-lock h) (%isa?/locked h x y))]))
 
   ;; --- Record -----------------------------------------------
   ;;
@@ -54,13 +199,17 @@
             (immutable dispatch-fn)
             (immutable methods)        ;; hashtable, equal? keys
             (mutable   default-method)
-            (immutable lock))          ;; guards methods + default
+            (immutable hierarchy)      ;; %hierarchy used for isa? walks
+            (mutable   preferences)    ;; alist of (a . b) meaning prefer a over b
+            (immutable lock))          ;; guards methods + default + prefs
     (sealed #t))
 
   (define (%new-multimethod name dispatch-fn)
     (make-%mm name dispatch-fn
               (make-hashtable equal-hash equal?)
               #f
+              global-hierarchy
+              '()
               (make-mutex)))
 
   ;; --- Registry linking procedure -> multimethod ------------
@@ -84,16 +233,88 @@
 
   ;; --- Dispatch ---------------------------------------------
 
+  ;; Dispatch:
+  ;;   1. Try exact match on dispatch value.
+  ;;   2. Fall back to any registered method whose key is an ancestor
+  ;;      of the dispatch value (via the multimethod's hierarchy).
+  ;;      Multiple matches are disambiguated by `prefer-method`;
+  ;;      remaining ambiguity raises.
+  ;;   3. Fall back to the default method.
   (define (%invoke mm args)
     (let* ([k  (apply (%mm-dispatch-fn mm) args)]
            [mn (with-mutex (%mm-lock mm)
                  (or (hashtable-ref (%mm-methods mm) k #f)
+                     (%hierarchy-dispatch mm k)
                      (%mm-default-method mm)))])
       (cond
         [mn (apply mn args)]
         [else
          (error (%mm-name mm)
                 "no method for dispatch value" k)])))
+
+  ;; Inner-lock helper — assumes caller already holds (%mm-lock mm).
+  (define (%hierarchy-dispatch mm k)
+    (let ([h (%mm-hierarchy mm)])
+      (let-values ([(keys _) (hashtable-entries (%mm-methods mm))])
+        (with-mutex (%hierarchy-lock h)
+          (let ([applicable
+                 (let loop ([i 0] [acc '()])
+                   (cond
+                     [(= i (vector-length keys)) acc]
+                     [(%isa?/locked h k (vector-ref keys i))
+                      (loop (+ i 1) (cons (vector-ref keys i) acc))]
+                     [else (loop (+ i 1) acc)]))])
+            (cond
+              [(null? applicable) #f]
+              [(null? (cdr applicable))
+               (hashtable-ref (%mm-methods mm) (car applicable) #f)]
+              [else
+               (let ([winner (%resolve-preferences mm applicable)])
+                 (hashtable-ref (%mm-methods mm) winner #f))]))))))
+
+  ;; Given ≥2 applicable dispatch keys, pick the one preferred by
+  ;; `prefer-method`. If no preference resolves the conflict, raise.
+  (define (%resolve-preferences mm applicable)
+    (let ([prefs (%mm-preferences mm)])
+      (let loop ([cands applicable])
+        (cond
+          [(null? (cdr cands)) (car cands)]
+          [(%preferred? prefs (car cands) (cadr cands))
+           (loop (cons (car cands) (cddr cands)))]
+          [(%preferred? prefs (cadr cands) (car cands))
+           (loop (cdr cands))]
+          [else
+           (error (%mm-name mm)
+                  "multiple methods match and none is preferred"
+                  applicable)]))))
+
+  (define (%preferred? prefs a b)
+    ;; a is preferred over b iff (a . b) is reachable via prefs
+    ;; walked transitively.
+    (let loop ([frontier (list a)] [seen '()])
+      (cond
+        [(null? frontier) #f]
+        [else
+         (let ([x (car frontier)])
+           (cond
+             [(member x seen) (loop (cdr frontier) seen)]
+             [else
+              (let ([next (filter-map
+                            (lambda (p)
+                              (and (equal? (car p) x) (cdr p)))
+                            prefs)])
+                (cond
+                  [(member b next) #t]
+                  [else (loop (append (cdr frontier) next)
+                              (cons x seen))]))]))])))
+
+  (define (filter-map f lst)
+    (let loop ([xs lst] [acc '()])
+      (cond
+        [(null? xs) (reverse acc)]
+        [else
+         (let ([v (f (car xs))])
+           (loop (cdr xs) (if v (cons v acc) acc)))])))
 
   (define (%install name dispatch-fn)
     (let* ([mm   (%new-multimethod name dispatch-fn)]
@@ -195,5 +416,31 @@
                      (cons (cons (vector-ref keys i)
                                  (vector-ref vals i))
                            acc))]))))))
+
+  ;; (prefer-method mm a b) — when both a and b apply via the
+  ;; hierarchy, pick the method registered for `a`. Idempotent;
+  ;; refuses to install cycles.
+  (define (prefer-method proc a b)
+    (let ([mm (%lookup proc)])
+      (unless mm
+        (error 'prefer-method "not a multimethod" proc))
+      (when (equal? a b)
+        (error 'prefer-method "cannot prefer a tag over itself" a))
+      (with-mutex (%mm-lock mm)
+        (when (%preferred? (%mm-preferences mm) b a)
+          (error 'prefer-method
+                 "cycle: b is already preferred over a"
+                 (list a '-> b)))
+        (let ([prefs (%mm-preferences mm)])
+          (unless (member (cons a b) prefs)
+            (%mm-preferences-set! mm (cons (cons a b) prefs)))))
+      proc))
+
+  ;; (preferred-methods mm) => alist of preferred (a . b) pairs.
+  (define (preferred-methods proc)
+    (let ([mm (%lookup proc)])
+      (unless mm
+        (error 'preferred-methods "not a multimethod" proc))
+      (with-mutex (%mm-lock mm) (%mm-preferences mm))))
 
 ) ;; end library

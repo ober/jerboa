@@ -33,6 +33,8 @@
     s-valid? s-conform s-explain s-explain-str s-assert
     ;; Function specs
     s-fdef s-check-fn
+    ;; Instrumentation (Round 5 §36)
+    s-instrument s-unstrument s-instrumented?
     ;; Generation (basic)
     s-exercise)
 
@@ -344,23 +346,34 @@
 
   ;; s-fdef — register a function spec
   ;; (s-fdef my-fn :args args-spec :ret ret-spec)
+  ;;
+  ;; The keyword alternates with the spec *expression* (evaluated at
+  ;; call site). We iterate by recursing the macro so that each spec
+  ;; is evaluated in the s-fdef's enclosing environment — storing the
+  ;; raw syntax would yield quoted forms that validate can't run.
   (define *fspec-registry* (make-hashtable equal-hash equal?))
 
-  (define-syntax s-fdef
-    (syntax-rules ()
-      [(_ name kv ...)
-       (hashtable-set! *fspec-registry* 'name
-         (parse-fspec 'kv ...))]))
+  (define (%fspec-entry name)
+    (or (hashtable-ref *fspec-registry* name #f)
+        (let ([e (list (cons 'args #f) (cons 'ret #f))])
+          (hashtable-set! *fspec-registry* name e)
+          e)))
 
-  (define (parse-fspec . kvs)
-    (let lp ([rest kvs] [args #f] [ret #f])
-      (cond
-        [(null? rest) (list (cons 'args args) (cons 'ret ret))]
-        [(eq? (car rest) ':args)
-         (lp (cddr rest) (cadr rest) ret)]
-        [(eq? (car rest) ':ret)
-         (lp (cddr rest) args (cadr rest))]
-        [else (error 'parse-fspec "unknown key" (car rest))])))
+  (define (%fspec-set! name key val)
+    (let* ([e (%fspec-entry name)]
+           [slot (assq key e)])
+      (when slot (set-cdr! slot val))))
+
+  (define-syntax s-fdef
+    (lambda (stx)
+      (syntax-case stx ()
+        [(_ name)
+         #'(begin (%fspec-entry 'name) (void))]
+        [(_ name key spec rest ...)
+         (memq (syntax->datum #'key) '(:args :ret :fn))
+         #'(begin
+             (%fspec-set! 'name 'key spec)
+             (s-fdef name rest ...))])))
 
   ;; s-check-fn — validate a function against its fspec
   (define (s-check-fn name f sample-args)
@@ -383,6 +396,75 @@
                  (unless (eq? result #t)
                    (error 's-check-fn "return doesn't conform" name result))))
              ret))])))
+
+  ;; ================================================================
+  ;; Instrumentation (Round 5 §36)
+  ;; ================================================================
+  ;;
+  ;; (s-instrument 'name) wraps the top-level procedure bound to NAME
+  ;; with an arg/ret validator derived from its s-fdef registration.
+  ;; (s-unstrument 'name) restores the original procedure.
+  ;;
+  ;; Limitation: only works on identifiers bound at the interactive
+  ;; top level (e.g. in a script or REPL). Library-interior bindings
+  ;; are sealed by the module system and cannot be rewired from the
+  ;; outside — matches Clojure's behaviour where instrumenting a
+  ;; symbol only affects the var indirection, not inlined call sites.
+  ;;
+  ;; Calling s-instrument on an already-instrumented name is a no-op
+  ;; (silently returns NAME) so scripts can make instrument calls
+  ;; idempotent during reload.
+
+  (define *instrumented* (make-hashtable equal-hash equal?))
+
+  (define (s-instrumented? name)
+    (hashtable-contains? *instrumented* name))
+
+  (define (%lookup-fspec who name)
+    (or (hashtable-ref *fspec-registry* name #f)
+        (error who "no fspec for" name)))
+
+  (define (%make-wrapper name original args-spec ret-spec)
+    (lambda args
+      (when args-spec
+        (let ([r (validate args-spec args)])
+          (unless (eq? r #t)
+            (error name "args don't conform" r))))
+      (let ([ret (apply original args)])
+        (when ret-spec
+          (let ([r (validate ret-spec ret)])
+            (unless (eq? r #t)
+              (error name "return doesn't conform" r))))
+        ret)))
+
+  (define (s-instrument name)
+    (unless (symbol? name)
+      (error 's-instrument "name must be a symbol" name))
+    (cond
+      [(hashtable-contains? *instrumented* name) name]
+      [else
+       (let ([fspec (%lookup-fspec 's-instrument name)])
+         (let ([original
+                (guard (exn [else
+                             (error 's-instrument
+                                    "no top-level binding for name"
+                                    name)])
+                  (top-level-value name))])
+           (unless (procedure? original)
+             (error 's-instrument "binding is not a procedure" name))
+           (let ([args-spec (cdr (assq 'args fspec))]
+                 [ret-spec  (cdr (assq 'ret fspec))])
+             (hashtable-set! *instrumented* name original)
+             (set-top-level-value! name
+               (%make-wrapper name original args-spec ret-spec))
+             name)))]))
+
+  (define (s-unstrument name)
+    (let ([orig (hashtable-ref *instrumented* name #f)])
+      (when orig
+        (set-top-level-value! name orig)
+        (hashtable-delete! *instrumented* name))
+      name))
 
   ;; ================================================================
   ;; Generation (basic exercise)

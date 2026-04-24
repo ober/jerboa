@@ -40,7 +40,7 @@
 
     ;; Clojure-style aliases
     make-ref ref? ref-deref
-    dosync alter ref-set commute ensure)
+    dosync alter ref-set commute ensure io!)
 
   (import (chezscheme)
           (std fiber))
@@ -351,5 +351,18 @@
 
   (define (ensure r)
     (tvar-read r))
+
+  ;; ========== io! — guard side-effecting code from retry ==========
+  ;;
+  ;; Clojure's io! form raises when evaluated inside a dosync, preventing
+  ;; callers from accidentally performing side effects that would be
+  ;; replayed on retry. Outside a transaction the body runs unguarded.
+  (define-syntax io!
+    (syntax-rules ()
+      [(_ body ...)
+       (begin
+         (when (*current-tx*)
+           (error 'io! "io! forms are not allowed inside a transaction"))
+         body ...)]))
 
 ) ;; end library

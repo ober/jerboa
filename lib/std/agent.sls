@@ -39,7 +39,9 @@
     send send-off
     agent-value agent-error
     clear-agent-errors restart-agent
-    await shutdown-agent!)
+    await await-for shutdown-agent!
+    set-error-handler! set-error-mode!
+    agent-error-mode agent-error-handler)
 
   (import (chezscheme)
           (std csp)
@@ -51,7 +53,9 @@
     (fields (mutable val)
             (mutable err)
             (immutable action-ch)
-            (immutable fiber-mode?))   ;; #t if backed by fiber
+            (immutable fiber-mode?)       ;; #t if backed by fiber
+            (mutable error-mode)          ;; 'fail (default) | 'continue
+            (mutable error-handler))      ;; #f or (a exn) -> ignored
     (sealed #t))
 
   (define (agent? x) (%agent? x))
@@ -74,14 +78,28 @@
          (if rt
            ;; Fiber mode: fiber-channel + fiber worker
            (let* ([ch (make-fiber-channel buf-size)]
-                  [a  (make-%agent initial #f ch #t)])
+                  [a  (make-%agent initial #f ch #t 'fail #f)])
              (fiber-spawn rt (%make-fiber-worker-loop a ch))
              a)
            ;; Thread mode: OS channel + OS thread worker
            (let* ([ch (make-channel buf-size)]
-                  [a  (make-%agent initial #f ch #f)])
+                  [a  (make-%agent initial #f ch #f 'fail #f)])
              (fork-thread (%make-thread-worker-loop a ch))
              a)))]))
+
+  ;; --- Error policy helpers -----------------------------------
+
+  (define (%run-error-handler! a exn)
+    (let ([h (%agent-error-handler a)])
+      (when h
+        (guard (_ [else #f])   ;; swallow handler exceptions
+          (h a exn)))))
+
+  (define (%on-action-error! a exn)
+    (%run-error-handler! a exn)
+    (case (%agent-error-mode a)
+      [(continue) #f]                     ;; drop the error, keep going
+      [else (%agent-err-set! a exn)]))    ;; 'fail — latch the error
 
   ;; --- Worker loops -------------------------------------------
 
@@ -94,7 +112,7 @@
             [(eof-object? action) #f]
             [else
              (unless (%agent-err a)
-               (guard (exn [else (%agent-err-set! a exn)])
+               (guard (exn [else (%on-action-error! a exn)])
                  (let ([new-val (apply (car action)
                                        (%agent-val a)
                                        (cdr action))])
@@ -110,7 +128,7 @@
             [(eof-object? action) #f]
             [else
              (unless (%agent-err a)
-               (guard (exn [else (%agent-err-set! a exn)])
+               (guard (exn [else (%on-action-error! a exn)])
                  (let ([new-val (apply (car action)
                                        (%agent-val a)
                                        (cdr action))])
@@ -200,5 +218,71 @@
         (fiber-channel-close ch)
         (chan-close! ch)))
     a)
+
+  ;; (await-for ms a) — like `await` but gives up after ms milliseconds.
+  ;; Returns #t if the queue drained in time, #f on timeout.
+  ;; Implemented by sending a marker action and polling for its completion.
+  (define (await-for ms a)
+    (unless (%agent? a) (error 'await-for "not an agent" a))
+    (unless (and (integer? ms) (>= ms 0))
+      (error 'await-for "ms must be a non-negative integer" ms))
+    (when (%agent-err a)
+      (error 'await-for "agent has error; call restart-agent to clear"
+             (%agent-err a)))
+    (let ([done-box (list 'pending)]
+          [ch (%agent-action-ch a)])
+      ;; Action that marks completion by mutating the box.
+      ;; Capture: cons on first slot so the caller can observe via eq?.
+      (let ([marker (cons (lambda (v)
+                            (set-car! done-box 'done)
+                            v)
+                          '())])
+        (if (%agent-fiber-mode? a)
+          (begin
+            (when (fiber-channel-closed? ch)
+              (error 'await-for "agent has been shut down" a))
+            (fiber-channel-send ch marker))
+          (begin
+            (when (chan-closed? ch)
+              (error 'await-for "agent has been shut down" a))
+            (chan-put! ch marker))))
+      ;; Poll for completion. 5ms steps keeps overhead low.
+      (let loop ([remaining ms])
+        (cond
+          [(eq? (car done-box) 'done) #t]
+          [(<= remaining 0) #f]
+          [else
+           (sleep (make-time 'time-duration 5000000 0))
+           (loop (- remaining 5))]))))
+
+  ;; (set-error-handler! a fn) — install a handler called with
+  ;; (fn agent exception) each time an action throws. Handler runs
+  ;; after the action failure and before the latched-error logic.
+  ;; Pass #f to clear. Handler exceptions are swallowed.
+  (define (set-error-handler! a fn)
+    (unless (%agent? a) (error 'set-error-handler! "not an agent" a))
+    (unless (or (not fn) (procedure? fn))
+      (error 'set-error-handler! "handler must be a procedure or #f" fn))
+    (%agent-error-handler-set! a fn)
+    a)
+
+  ;; (set-error-mode! a mode) — mode is 'fail (default) or 'continue.
+  ;; In 'continue mode, action errors do not latch, so subsequent sends
+  ;; proceed (paired with set-error-handler! for observability).
+  (define (set-error-mode! a mode)
+    (unless (%agent? a) (error 'set-error-mode! "not an agent" a))
+    (unless (memq mode '(fail continue))
+      (error 'set-error-mode! "mode must be 'fail or 'continue" mode))
+    (%agent-error-mode-set! a mode)
+    a)
+
+  ;; Accessors (documented surface — useful for assertions/tests).
+  (define (agent-error-mode a)
+    (unless (%agent? a) (error 'agent-error-mode "not an agent" a))
+    (%agent-error-mode a))
+
+  (define (agent-error-handler a)
+    (unless (%agent? a) (error 'agent-error-handler "not an agent" a))
+    (%agent-error-handler a))
 
 ) ;; end library

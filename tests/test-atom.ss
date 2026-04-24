@@ -203,6 +203,100 @@
   (not (atom? (volatile! 0)))
   #t)
 
+;;; ---- Validators (Round 5 §31) ----
+
+(import (only (std misc atom) set-validator! get-validator))
+
+(test "get-validator default is #f"
+  (get-validator (atom 0))
+  #f)
+
+(test "set-validator! then get-validator round-trips"
+  (let ([a (atom 0)]
+        [v (lambda (n) (and (integer? n) (>= n 0)))])
+    (set-validator! a v)
+    (eq? (get-validator a) v))
+  #t)
+
+(test "set-validator! rejects installing on value that fails predicate"
+  (let ([a (atom -1)])
+    (guard (exn [else 'caught])
+      (set-validator! a (lambda (n) (>= n 0)))
+      'passed))
+  'caught)
+
+(test "reset! honors validator (accept)"
+  (let ([a (atom 0)])
+    (set-validator! a (lambda (n) (integer? n)))
+    (reset! a 42))
+  42)
+
+(test "reset! honors validator (reject)"
+  (let ([a (atom 0)])
+    (set-validator! a (lambda (n) (integer? n)))
+    (guard (exn [else 'caught])
+      (reset! a "not-an-int")
+      'passed))
+  'caught)
+
+(test "reset! rejection leaves old value"
+  (let ([a (atom 7)])
+    (set-validator! a (lambda (n) (integer? n)))
+    (guard (exn [else (deref a)])
+      (reset! a "bad")
+      'impossible))
+  7)
+
+(test "swap! honors validator"
+  (let ([a (atom 5)])
+    (set-validator! a (lambda (n) (and (integer? n) (< n 10))))
+    (swap! a + 3))
+  8)
+
+(test "swap! rejects and keeps old value"
+  (let ([a (atom 5)])
+    (set-validator! a (lambda (n) (< n 10)))
+    (guard (exn [else (deref a)])
+      (swap! a + 100)))
+  5)
+
+(test "compare-and-set! honors validator (reject)"
+  (let ([a (atom 1)])
+    (set-validator! a (lambda (n) (odd? n)))
+    (guard (exn [else (deref a)])
+      (compare-and-set! a 1 2)
+      'impossible))
+  1)
+
+(test "clearing validator by setting to #f"
+  (let ([a (atom 0)])
+    (set-validator! a (lambda (n) (>= n 0)))
+    (set-validator! a #f)
+    (reset! a -42))
+  -42)
+
+(test "validator that throws treated as rejection"
+  ;; Validator throws on the *new* value only; the current value
+  ;; passes so set-validator! installs cleanly. The throw then
+  ;; surfaces on reset!, which must leave the old value in place.
+  (let ([a (atom 1)])
+    (set-validator! a (lambda (n) (if (= n 1) #t (error 'v "nope"))))
+    (guard (exn [else (deref a)])
+      (reset! a 2)
+      'impossible))
+  1)
+
+(test "validator not called on failing CAS"
+  ;; Install the validator first, then zero the counter, then test
+  ;; that CAS with a wrong `expected` skips the validator entirely.
+  (let ([a (atom 1)]
+        [calls 0])
+    (set-validator! a (lambda (n) (set! calls (+ calls 1)) #t))
+    (set! calls 0)
+    (compare-and-set! a 99 100)  ;; current is 1, expected 99 — CAS fails
+    calls)
+  0)
+
 ;;; ---- Summary ----
 (printf "~%atom: ~a passed, ~a failed~%" pass fail)
 (when (> fail 0) (exit 1))

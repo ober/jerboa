@@ -62,7 +62,7 @@
   (export
     defprotocol extend-type extend-protocol
     protocol? protocol-name protocol-methods
-    satisfies?)
+    satisfies? extenders extends?)
 
   (import (chezscheme))
 
@@ -219,5 +219,45 @@
       (for-all
         (lambda (name) (%has-impl-for? name type-key))
         (%protocol-methods p))))
+
+  ;; (extenders PROTOCOL)
+  ;;
+  ;; Returns the list of type-keys (rtds or symbols) that have
+  ;; registered implementations for EVERY method in PROTOCOL.
+  ;; Types with partial coverage are excluded — mirrors Clojure's
+  ;; contract that a type either satisfies the protocol or it doesn't.
+  ;; Order is unspecified.
+  (define (extenders p)
+    (unless (%protocol? p)
+      (error 'extenders "not a protocol" p))
+    (let ([methods (%protocol-methods p)])
+      (with-mutex %dispatch-lock
+        (let-values ([(tks _) (hashtable-entries %dispatch)])
+          (let loop ([i 0] [acc '()])
+            (cond
+              [(= i (vector-length tks)) acc]
+              [else
+               (let* ([tk (vector-ref tks i)]
+                      [inner (eq-hashtable-ref %dispatch tk #f)]
+                      [covers-all?
+                       (and inner
+                            (for-all
+                              (lambda (m)
+                                (and (eq-hashtable-ref inner m #f) #t))
+                              methods))])
+                 (loop (+ i 1)
+                       (if covers-all? (cons tk acc) acc)))]))))))
+
+  ;; (extends? PROTOCOL TYPE-KEY)
+  ;;
+  ;; True iff TYPE-KEY has implementations for every method in PROTOCOL.
+  ;; Accepts either an rtd or a symbol; distinct from `satisfies?`,
+  ;; which takes an instance.
+  (define (extends? p type-key)
+    (unless (%protocol? p)
+      (error 'extends? "not a protocol" p))
+    (for-all
+      (lambda (m) (%has-impl-for? m type-key))
+      (%protocol-methods p)))
 
 ) ;; end library

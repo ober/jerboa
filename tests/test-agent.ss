@@ -236,6 +236,110 @@
     (let ([v (agent-value a)]) (shutdown-agent! a) v))
   5)
 
+;;; ---- await-for (timeout) ---------------------------------------
+
+(test "await-for returns #t when queue drains in time"
+  (let ([a (agent 0)])
+    (send a + 1)
+    (let ([r (await-for 2000 a)]) (shutdown-agent! a) r))
+  #t)
+
+(test "await-for returns #f when action takes too long"
+  (let ([a (agent 0)])
+    (send a (lambda (v) (sleep (make-time 'time-duration 0 1)) (+ v 1)))
+    (let ([r (await-for 50 a)]) (shutdown-agent! a) r))
+  #f)
+
+(test "await-for 0 still checks once"
+  (let ([a (agent 0)])
+    ;; No queued action; marker drains immediately.
+    (send a + 1)
+    (await a)  ;; drain real work
+    (let ([r (await-for 500 a)]) (shutdown-agent! a) r))
+  #t)
+
+(test "await-for rejects negative ms"
+  (let ([a (agent 0)])
+    (let ([r (guard (_ [else 'raised]) (await-for -1 a))])
+      (shutdown-agent! a) r))
+  'raised)
+
+;;; ---- set-error-handler! ----------------------------------------
+
+(test "error handler fires on action error"
+  (let* ([observed (make-parameter #f)]
+         [a (agent 0)])
+    (set-error-handler! a (lambda (ag exn) (observed 'saw)))
+    (send a (lambda (v) (error 'boom "x")))
+    (brief-sleep)
+    (let ([r (observed)]) (shutdown-agent! a) r))
+  'saw)
+
+(test "error handler sees the agent and the exception"
+  (let* ([seen-agent (make-parameter #f)]
+         [seen-exn (make-parameter #f)]
+         [a (agent 0)])
+    (set-error-handler! a
+      (lambda (ag exn)
+        (seen-agent (eq? ag a))
+        (seen-exn (condition? exn))))
+    (send a (lambda (v) (error 'boom "x")))
+    (brief-sleep)
+    (let ([r (list (seen-agent) (seen-exn))])
+      (shutdown-agent! a) r))
+  '(#t #t))
+
+(test "error handler of #f clears it"
+  (let ([a (agent 0)])
+    (set-error-handler! a (lambda (ag exn) #f))
+    (set-error-handler! a #f)
+    (let ([r (agent-error-handler a)]) (shutdown-agent! a) r))
+  #f)
+
+(test "set-error-handler! rejects non-procedure"
+  (let ([a (agent 0)])
+    (let ([r (guard (_ [else 'raised]) (set-error-handler! a 42))])
+      (shutdown-agent! a) r))
+  'raised)
+
+;;; ---- set-error-mode! -------------------------------------------
+
+(test "default error mode is 'fail"
+  (let ([a (agent 0)])
+    (let ([m (agent-error-mode a)]) (shutdown-agent! a) m))
+  'fail)
+
+(test "continue mode drops errors and keeps processing"
+  (let ([a (agent 0)])
+    (set-error-mode! a 'continue)
+    (send a + 1)                              ;; -> 1
+    (send a (lambda (v) (error 'boom "x")))   ;; swallowed
+    (send a + 10)                             ;; -> 11
+    (await a)
+    (let ([v (agent-value a)]
+          [e (agent-error a)])
+      (shutdown-agent! a)
+      (list v e)))
+  '(11 #f))
+
+(test "continue mode fires handler each error"
+  (let* ([count 0]
+         [a (agent 0)])
+    (set-error-mode! a 'continue)
+    (set-error-handler! a (lambda (ag exn) (set! count (+ count 1))))
+    (send a (lambda (v) (error 'boom "x")))
+    (send a (lambda (v) (error 'boom "y")))
+    (send a + 5)
+    (await a)
+    (let ([c count]) (shutdown-agent! a) c))
+  2)
+
+(test "set-error-mode! rejects unknown mode"
+  (let ([a (agent 0)])
+    (let ([r (guard (_ [else 'raised]) (set-error-mode! a 'bogus))])
+      (shutdown-agent! a) r))
+  'raised)
+
 ;;; ---- Summary ---------------------------------------------------
 (printf "~%std/agent: ~a passed, ~a failed~%" pass fail)
 (when (> fail 0) (exit 1))

@@ -54,6 +54,8 @@
     deref reset! swap! compare-and-set!
     ;; ---- Watches (§4.7) ----
     add-watch! remove-watch!
+    ;; ---- Validators (Round 5 §31) ----
+    set-validator! get-validator
     ;; ---- Volatiles (§4.7) ----
     volatile! volatile? vreset! vswap! vderef)
 
@@ -63,11 +65,23 @@
     (fields
       (mutable val)
       (immutable mtx)
-      (mutable watches))  ;; alist of (key . (lambda (k atom old new) ...))
+      (mutable watches)     ;; alist of (key . (lambda (k atom old new) ...))
+      (mutable validator))  ;; either #f or a (lambda (new-val) -> truthy/false)
     (sealed #t))
 
   (define (atom initial-value)
-    (make-atom-rec initial-value (make-mutex) '()))
+    (make-atom-rec initial-value (make-mutex) '() #f))
+
+  ;; Run validator outside the mutex so nested atom ops don't deadlock.
+  ;; Raises if the validator returns #f or itself raises. Called BEFORE
+  ;; the new value is installed (matches Clojure: invalid values never
+  ;; make it into the atom).
+  (define (%check-validator! a new-val)
+    (let ([v (atom-rec-validator a)])
+      (when v
+        (guard (exn [else (error 'atom "validator threw" exn new-val)])
+          (unless (v new-val)
+            (error 'atom "invalid state" new-val))))))
 
   (define (atom? x) (atom-rec? x))
 
@@ -86,6 +100,7 @@
       watches))
 
   (define (atom-reset! a new-val)
+    (%check-validator! a new-val)
     (let-values ([(old watches)
                   (with-mutex (atom-rec-mtx a)
                     (let ([o (atom-rec-val a)])
@@ -96,10 +111,13 @@
 
   (define (atom-swap! a fn)
     ;; Atomically apply fn to current value, store and return result.
+    ;; Validator runs inside the mutex (between fn and install) so
+    ;; a failed validation leaves the old value in place.
     (let-values ([(old new watches)
                   (with-mutex (atom-rec-mtx a)
                     (let* ([o (atom-rec-val a)]
                            [n (fn o)])
+                      (%check-validator! a n)
                       (atom-rec-val-set! a n)
                       (values o n (atom-rec-watches a))))])
       (%fire-watches! a old new watches)
@@ -111,6 +129,7 @@
                   (with-mutex (atom-rec-mtx a)
                     (let* ([o (atom-rec-val a)]
                            [n (apply fn o args)])
+                      (%check-validator! a n)
                       (atom-rec-val-set! a n)
                       (values o n (atom-rec-watches a))))])
       (%fire-watches! a old new watches)
@@ -137,11 +156,12 @@
   (define (compare-and-set! a expected new-val)
     ;; Atomically: if current value is equal? to expected, replace
     ;; with new-val and return #t. Otherwise return #f. Fires watches
-    ;; ONLY on successful swap.
+    ;; ONLY on successful swap. Validator runs inside the mutex.
     (let-values ([(swapped? old watches)
                   (with-mutex (atom-rec-mtx a)
                     (cond
                       [(equal? (atom-rec-val a) expected)
+                       (%check-validator! a new-val)
                        (let ([o (atom-rec-val a)])
                          (atom-rec-val-set! a new-val)
                          (values #t o (atom-rec-watches a)))]
@@ -149,6 +169,40 @@
       (when swapped?
         (%fire-watches! a old new-val watches))
       swapped?))
+
+  ;; =========================================================================
+  ;; Validators (Round 5 §31)
+  ;;
+  ;; Matches Clojure semantics: the validator is a (lambda (new-val) …)
+  ;; predicate applied to every proposed new value before it is
+  ;; installed. Returning #f or raising from the validator causes the
+  ;; state change to fail (old value stays). set-validator! verifies
+  ;; the current value passes before installing the validator so an
+  ;; atom never holds a value its validator rejects.
+  ;; =========================================================================
+
+  (define (set-validator! a pred)
+    (unless (atom? a)
+      (error 'set-validator! "not an atom" a))
+    (unless (or (not pred) (procedure? pred))
+      (error 'set-validator! "validator must be a procedure or #f" pred))
+    (with-mutex (atom-rec-mtx a)
+      (when pred
+        (let ([v (atom-rec-val a)])
+          (guard (exn [else (error 'set-validator!
+                                   "validator rejects current value"
+                                   v)])
+            (unless (pred v)
+              (error 'set-validator!
+                     "validator rejects current value"
+                     v)))))
+      (atom-rec-validator-set! a pred))
+    a)
+
+  (define (get-validator a)
+    (unless (atom? a)
+      (error 'get-validator "not an atom" a))
+    (atom-rec-validator a))
 
   ;; =========================================================================
   ;; Watches (§4.7)
