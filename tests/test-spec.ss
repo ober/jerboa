@@ -254,6 +254,67 @@
     (s-instrument 'nonexistent-fn))
   'caught)
 
+;;; ---- s-defn — script-safe speced define ------------------------
+
+(s-defn sd-both (x y)
+  :args (s-cat ':x integer? ':y integer?)
+  :ret  integer?
+  (+ x y))
+
+(test "s-defn :args+:ret accepts valid call"
+  (sd-both 2 3)
+  5)
+
+(test "s-defn :args rejects bad args"
+  (guard (exn [else 'caught])
+    (sd-both "bad" 3))
+  'caught)
+
+(s-defn sd-ret-bad (x) :ret integer? "not-an-int")
+
+(test "s-defn :ret rejects bad return"
+  (guard (exn [else 'caught])
+    (sd-ret-bad 1))
+  'caught)
+
+(s-defn sd-args-only (x)
+  :args (s-cat ':x string?)
+  (string-upcase x))
+
+(test "s-defn :args only passes valid"
+  (sd-args-only "hi")
+  "HI")
+
+(test "s-defn :args only rejects invalid"
+  (guard (exn [else 'caught])
+    (sd-args-only 99))
+  'caught)
+
+(s-defn sd-ret-only (x) :ret symbol? (string->symbol x))
+
+(test "s-defn :ret only passes valid"
+  (sd-ret-only "sym")
+  'sym)
+
+(s-defn sd-bare (x y) (* x y))
+
+(test "s-defn with no specs behaves like def"
+  (sd-bare 4 5)
+  20)
+
+(s-defn sd-reverse (x)
+  :ret symbol?
+  :args (s-cat ':x string?)
+  (string->symbol x))
+
+(test "s-defn accepts :ret before :args"
+  (sd-reverse "ok")
+  'ok)
+
+(test "s-defn registers s-fdef for s-check-fn"
+  (s-check-fn 'sd-both sd-both '(10 20))
+  30)
+
 ;;; ---- Summary ----
 
 (printf "~%std/spec: ~a passed, ~a failed~%" pass fail)

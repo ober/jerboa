@@ -171,7 +171,10 @@
 
     ;; ---- FFI ----
     c-lambda define-c-lambda
-    begin-ffi c-declare)
+    begin-ffi c-declare
+
+    ;; ---- Timing helpers ----
+    sleep-ms)
 
   (import
     (except (chezscheme)
@@ -183,6 +186,10 @@
             iota 1+ 1-
             partition
             make-date make-time)
+    ;; Private access to Chez's make-time (shadowed above) so we can
+    ;; build a time-duration record for the sleep-ms wrapper.
+    (rename (only (chezscheme) make-time)
+            (make-time %chez-make-time))
     (only (jerboa core)
       def def* defrule defrules
       defstruct defclass defmethod
@@ -212,5 +219,17 @@
     (std datetime)
     (std debug pp)
     (std csv))
+
+  ;; ---- Timing helpers ----
+  ;; (sleep-ms ms) sleeps for MS milliseconds. Wraps Chez's
+  ;; `(sleep (make-time 'time-duration ns sec))` so users never have
+  ;; to reach for `make-time` (which the prelude shadows with a
+  ;; date-style constructor). MS must be a non-negative integer.
+  (define (sleep-ms ms)
+    (unless (and (integer? ms) (>= ms 0))
+      (error 'sleep-ms "ms must be a non-negative integer" ms))
+    (let ([sec (quotient ms 1000)]
+          [ns  (* (remainder ms 1000) 1000000)])
+      (sleep (%chez-make-time 'time-duration ns sec))))
 
   ) ;; end library

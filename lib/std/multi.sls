@@ -44,7 +44,9 @@
     parents ancestors descendants
     isa?
     prefer-method preferred-methods
-    global-hierarchy)
+    global-hierarchy
+    ;; Auxiliary keyword for (defmulti name dispatch :hierarchy h)
+    :hierarchy)
 
   (import (chezscheme))
 
@@ -204,11 +206,13 @@
             (immutable lock))          ;; guards methods + default + prefs
     (sealed #t))
 
-  (define (%new-multimethod name dispatch-fn)
+  (define (%new-multimethod name dispatch-fn hierarchy)
+    (unless (%hierarchy? hierarchy)
+      (error 'defmulti "not a hierarchy" hierarchy))
     (make-%mm name dispatch-fn
               (make-hashtable equal-hash equal?)
               #f
-              global-hierarchy
+              hierarchy
               '()
               (make-mutex)))
 
@@ -316,23 +320,41 @@
          (let ([v (f (car xs))])
            (loop (cdr xs) (if v (cons v acc) acc)))])))
 
-  (define (%install name dispatch-fn)
-    (let* ([mm   (%new-multimethod name dispatch-fn)]
+  (define (%install name dispatch-fn hierarchy)
+    (let* ([mm   (%new-multimethod name dispatch-fn hierarchy)]
            [proc (lambda args (%invoke mm args))])
       (%register! proc mm)
       proc))
 
   ;; --- Public API -------------------------------------------
 
+  ;; Auxiliary keyword used by defmulti. Exported so that a literal
+  ;; `:hierarchy` at a use site refers to the same binding as the
+  ;; literal in this library (R6RS `syntax-rules` literal matching
+  ;; requires matching bindings across library boundaries).
+  (define-syntax :hierarchy
+    (lambda (x)
+      (syntax-violation ':hierarchy
+        "misplaced auxiliary keyword" x)))
+
   ;; (defmulti NAME DISPATCH-FN)
+  ;; (defmulti NAME DISPATCH-FN :hierarchy HIERARCHY-EXPR)
   ;;
   ;; Binds NAME to a procedure that, when called, applies DISPATCH-FN
   ;; to its arguments, looks up the resulting key in the multimethod's
   ;; methods table, and invokes the registered method.
+  ;;
+  ;; When the optional `:hierarchy` form is supplied, HIERARCHY-EXPR
+  ;; must evaluate to a hierarchy (from `make-hierarchy`) and is used
+  ;; for ancestor-walk dispatch. Otherwise the multimethod uses
+  ;; `global-hierarchy`. This is the moral equivalent of Clojure's
+  ;; `(defmulti name dispatch-fn :hierarchy #'my-h)`.
   (define-syntax defmulti
-    (syntax-rules ()
+    (syntax-rules (:hierarchy)
       [(_ name dispatch-fn)
-       (define name (%install 'name dispatch-fn))]))
+       (define name (%install 'name dispatch-fn global-hierarchy))]
+      [(_ name dispatch-fn :hierarchy h-expr)
+       (define name (%install 'name dispatch-fn h-expr))]))
 
   ;; (defmethod NAME DISPATCH-VAL (arg ...) body ...)
   ;;

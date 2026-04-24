@@ -322,6 +322,40 @@
     (prefer-method describe 'flyer 'swimmer))
   'raised)
 
+;;; ---- :hierarchy keyword on defmulti -----------------------
+
+;; defmulti can take a custom hierarchy so tests/libraries don't
+;; have to mutate the shared global-hierarchy.
+
+(def hh (make-hierarchy))
+(derive hh 'goldfish 'fish)
+(derive hh 'fish     'aquatic)
+
+(defmulti swim (lambda (x) x) :hierarchy hh)
+(defmethod swim 'aquatic (x) 'splash)
+(defmethod swim 'fish    (x) 'swim!)
+
+(prefer-method swim 'fish 'aquatic)
+
+(test ":hierarchy dispatch: goldfish -> fish"
+  (swim 'goldfish)
+  'swim!)
+
+;; Separate defmulti using default (global) hierarchy knows
+;; nothing about 'goldfish — confirming hh is isolated.
+(defmulti swim-g (lambda (x) x))
+(defmethod swim-g 'default (x) 'unknown)
+
+(test ":hierarchy dispatch is isolated from global-hierarchy"
+  (swim-g 'goldfish)
+  'unknown)
+
+(test ":hierarchy rejects non-hierarchy value"
+  (guard (_ [else 'raised])
+    (eval '(defmulti bad-mm (lambda (x) x) :hierarchy 42)
+          (interaction-environment)))
+  'raised)
+
 ;;; ---- Summary ----
 (printf "~%std/multi: ~a passed, ~a failed~%" pass fail)
 (when (> fail 0) (exit 1))

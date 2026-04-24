@@ -33,6 +33,8 @@
     s-valid? s-conform s-explain s-explain-str s-assert
     ;; Function specs
     s-fdef s-check-fn
+    ;; Script-safe speced define (Round 7 §42)
+    s-defn
     ;; Instrumentation (Round 5 §36)
     s-instrument s-unstrument s-instrumented?
     ;; Generation (basic)
@@ -374,6 +376,100 @@
          #'(begin
              (%fspec-set! 'name 'key spec)
              (s-fdef name rest ...))])))
+
+  ;; s-defn — a `define` that embeds arg/ret validation into the body.
+  ;;
+  ;; Why this exists: `s-instrument` rewires the top-level binding of a
+  ;; name after definition, which works in a REPL but loses the race in
+  ;; `--script` programs where the speced name has already been closed
+  ;; over by other top-level code by the time `s-instrument` runs.
+  ;; `s-defn` sidesteps the indirection by baking the validation into
+  ;; the function body at expansion time, so validation fires no matter
+  ;; how the binding is resolved. The function is also registered with
+  ;; `s-fdef` so `s-check-fn` still works.
+  ;;
+  ;; Forms:
+  ;;   (s-defn name (args ...) body ...)
+  ;;   (s-defn name (args ...) :args args-spec body ...)
+  ;;   (s-defn name (args ...) :ret  ret-spec  body ...)
+  ;;   (s-defn name (args ...) :args args-spec :ret ret-spec body ...)
+  ;;   (s-defn name (args ...) :ret  ret-spec  :args args-spec body ...)
+  ;;
+  ;; args-spec is validated against the list of argument values.
+  ;; ret-spec is validated against the return value.
+  (define-syntax s-defn
+    (lambda (stx)
+      (syntax-case stx ()
+        [(_ name (arg ...) form0 form1 ...)
+         (identifier? #'name)
+         (let loop ([rest #'(form0 form1 ...)]
+                    [args-spec #f]
+                    [ret-spec #f])
+           (syntax-case rest ()
+             [(kw spec-expr more ...)
+              (and (identifier? #'kw)
+                   (memq (syntax->datum #'kw) '(:args :ret)))
+              (case (syntax->datum #'kw)
+                [(:args)
+                 (when args-spec
+                   (syntax-violation 's-defn ":args supplied twice" stx))
+                 (loop #'(more ...) #'spec-expr ret-spec)]
+                [(:ret)
+                 (when ret-spec
+                   (syntax-violation 's-defn ":ret supplied twice" stx))
+                 (loop #'(more ...) args-spec #'spec-expr)])]
+             [(body0 body1 ...)
+              (with-syntax
+                ([(arg* ...) #'(arg ...)]
+                 [(body ...) rest]
+                 [as-expr (or args-spec #'#f)]
+                 [rs-expr (or ret-spec #'#f)]
+                 [args? (if args-spec #t #f)]
+                 [ret?  (if ret-spec  #t #f)])
+                #'(%s-defn-emit name (arg* ...)
+                    args? as-expr ret? rs-expr
+                    (body ...)))]
+             [()
+              (syntax-violation 's-defn "s-defn requires a body" stx)]))])))
+
+  ;; Internal helper that emits the final `define`. Separated so the
+  ;; outer macro can pick a simple syntax-rules dispatch on the
+  ;; args?/ret? booleans.
+  (define-syntax %s-defn-emit
+    (syntax-rules ()
+      [(_ name (arg ...) #f _as #f _rs (body ...))
+       (define (name arg ...) body ...)]
+      [(_ name (arg ...) #t as #f _rs (body ...))
+       (begin
+         (s-fdef name :args as)
+         (define (name arg ...)
+           (let ([%args (list arg ...)])
+             (unless (s-valid? as %args)
+               (error 'name "args don't conform"
+                      (s-explain-str as %args))))
+           body ...))]
+      [(_ name (arg ...) #f _as #t rs (body ...))
+       (begin
+         (s-fdef name :ret rs)
+         (define (name arg ...)
+           (let ([%ret (begin body ...)])
+             (unless (s-valid? rs %ret)
+               (error 'name "return doesn't conform"
+                      (s-explain-str rs %ret)))
+             %ret)))]
+      [(_ name (arg ...) #t as #t rs (body ...))
+       (begin
+         (s-fdef name :args as :ret rs)
+         (define (name arg ...)
+           (let ([%args (list arg ...)])
+             (unless (s-valid? as %args)
+               (error 'name "args don't conform"
+                      (s-explain-str as %args))))
+           (let ([%ret (begin body ...)])
+             (unless (s-valid? rs %ret)
+               (error 'name "return doesn't conform"
+                      (s-explain-str rs %ret)))
+             %ret)))]))
 
   ;; s-check-fn — validate a function against its fspec
   (define (s-check-fn name f sample-args)

@@ -71,6 +71,17 @@
 (defn (double [x number?]) (* x 2))
 (chk (double 5) => 10)
 
+;; sleep-ms — arg validation
+(chk
+  (guard (_ [else 'rejected]) (sleep-ms -1))
+  => 'rejected)
+(chk
+  (guard (_ [else 'rejected]) (sleep-ms "not-a-number"))
+  => 'rejected)
+;; Zero-ms is a valid no-op
+(sleep-ms 0)
+(chk #t => #t)
+
 ;; Summary
 (newline)
 (display "prelude: ")
