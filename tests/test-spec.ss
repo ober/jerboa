@@ -315,6 +315,58 @@
   (s-check-fn 'sd-both sd-both '(10 20))
   30)
 
+;;; ---- Round 11 Phase 62: generator integration ----
+
+(test "s-gen integer? produces an integer"
+  (integer? ((s-gen integer?)))
+  #t)
+
+(test "s-gen string? produces a string"
+  (string? ((s-gen string?)))
+  #t)
+
+(test "s-gen on s-and respects predicates"
+  (let ([v ((s-gen (s-and integer? positive?)))])
+    (and (integer? v) (positive? v)))
+  #t)
+
+(test "s-gen on s-or returns one of the branches"
+  (let ([v ((s-gen (s-or integer? string?)))])
+    (or (integer? v) (string? v)))
+  #t)
+
+(test "s-gen s-tuple has correct shape"
+  (let ([v ((s-gen (s-tuple integer? string?)))])
+    (and (list? v)
+         (= 2 (length v))
+         (integer? (car v))
+         (string? (cadr v))))
+  #t)
+
+(test "s-gen s-coll-of yields list of integers"
+  (let ([v ((s-gen (s-coll-of integer?)))])
+    (and (list? v) (for-all integer? v)))
+  #t)
+
+(test "s-gen s-enum picks an enum value"
+  (and (memv ((s-gen (s-enum 'red 'green 'blue)))
+             '(red green blue))
+       #t)
+  #t)
+
+(test "s-sample returns 5 results"
+  (length (s-sample integer? 5))
+  5)
+
+(test "s-sample default count is 10"
+  (length (s-sample integer?))
+  10)
+
+(test "s-gen s-nilable produces values of expected shape"
+  (let ([vals (s-sample (s-nilable integer?) 20)])
+    (for-all (lambda (v) (or (not v) (integer? v))) vals))
+  #t)
+
 ;;; ---- Summary ----
 
 (printf "~%std/spec: ~a passed, ~a failed~%" pass fail)

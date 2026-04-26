@@ -2057,14 +2057,22 @@
   ;; (map-indexed (lambda (i x) ...) coll)  → list
   ;; (keep-indexed F coll) — drop entries where F returns #f.
 
+  (define (%coerce-to-seq coll)
+    (cond
+      [(list? coll) coll]
+      [(vector? coll) (vector->list coll)]
+      [(persistent-vector? coll) (persistent-vector->list coll)]
+      [(string? coll) (string->list coll)]
+      [else (error 'map-indexed "unsupported collection" coll)]))
+
   (define (map-indexed f coll)
-    (let loop ([i 0] [xs coll] [acc '()])
+    (let loop ([i 0] [xs (%coerce-to-seq coll)] [acc '()])
       (cond
         [(null? xs) (reverse acc)]
         [else (loop (+ i 1) (cdr xs) (cons (f i (car xs)) acc))])))
 
   (define (keep-indexed f coll)
-    (let loop ([i 0] [xs coll] [acc '()])
+    (let loop ([i 0] [xs (%coerce-to-seq coll)] [acc '()])
       (cond
         [(null? xs) (reverse acc)]
         [else
@@ -2102,11 +2110,20 @@
   ;; the `:>>` form is used).  The trailing single expression is the
   ;; default; an absent default raises.
 
+  ;; The Clojure-native `:>>` literal is unreachable in default
+  ;; Jerboa reader mode (`:>>` reads as a Gerbil-style module path),
+  ;; so we additionally accept `=>` — already familiar from `cond`'s
+  ;; bind-arrow.  Both literals are equivalent.
   (define-syntax condp
-    (syntax-rules (:>>)
+    (syntax-rules (:>> =>)
       [(_ pred expr default)
        default]
       [(_ pred expr test :>> handler more ...)
+       (let ([%v ((lambda (p e t) (p t e)) pred expr test)])
+         (if %v
+             (handler %v)
+             (condp pred expr more ...)))]
+      [(_ pred expr test => handler more ...)
        (let ([%v ((lambda (p e t) (p t e)) pred expr test)])
          (if %v
              (handler %v)

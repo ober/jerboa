@@ -37,8 +37,8 @@
     s-defn
     ;; Instrumentation (Round 5 §36)
     s-instrument s-unstrument s-instrumented?
-    ;; Generation (basic)
-    s-exercise)
+    ;; Generation (basic + composite)
+    s-exercise s-gen s-sample)
 
   (import (chezscheme))
 
@@ -601,6 +601,155 @@
            (cdar generators)
            (find-generator spec (cdr generators)))]
       [else #f]))
+
+  ;; ---- composite generation (s-gen / s-sample) -----------------
+  ;;
+  ;; (s-gen spec) returns a thunk that, when called, produces a
+  ;; value conforming to `spec`.  Composite specs (s-and, s-or,
+  ;; s-tuple, s-coll-of, s-map-of, s-nilable, s-enum, s-keys) are
+  ;; handled by recursing into their components.  Bare predicates
+  ;; consult a fixed table of built-in generators.
+  ;;
+  ;; (s-sample spec)         → 10 samples
+  ;; (s-sample spec n)       → n samples
+  ;;
+  ;; Property-style usage:
+  ;;
+  ;;   (for-each
+  ;;     (lambda (v)
+  ;;       (assert (= (string-length (str v))
+  ;;                  (string-length (str v)))))
+  ;;     (s-sample (s-or :s string? :i integer?) 100))
+
+  (define %builtin-generators
+    (list
+      (cons integer?  (lambda () (- (random 200) 100)))
+      (cons number?   (lambda () (* (random 1000) 0.01)))
+      (cons real?     (lambda () (* (random 1000) 0.01)))
+      (cons string?   (lambda () (list-ref '("foo" "bar" "baz" "hello" "world" "" "x")
+                                            (random 7))))
+      (cons symbol?   (lambda () (list-ref '(a b c x y z) (random 6))))
+      (cons boolean?  (lambda () (= (random 2) 0)))
+      (cons positive? (lambda () (+ 1 (random 100))))
+      (cons negative? (lambda () (- (- 1 (random 100)))))
+      (cons zero?     (lambda () 0))
+      (cons char?     (lambda () (integer->char (+ 65 (random 26)))))
+      (cons null?     (lambda () '()))
+      (cons pair?     (lambda () (cons (random 100) (random 100))))))
+
+  (define (%pred-gen pred)
+    (cond
+      [(assq pred %builtin-generators) => cdr]
+      [else
+       (lambda ()
+         ;; Last-ditch: try a few random scalars and return one;
+         ;; the caller's accept/reject loop will discard mismatches.
+         (case (random 4)
+           [(0) (random 100)]
+           [(1) (* (random 100) 0.5)]
+           [(2) (list-ref '(a b "s" #t #f) (random 5))]
+           [else 0]))]))
+
+  (define (s-gen spec)
+    (let ([s (resolve-spec-or-pred spec)])
+      (cond
+        [(procedure? s) (%pred-gen s)]
+        [(spec-record? s)
+         (case (spec-record-kind s)
+           [(pred)
+            (%pred-gen (spec-record-data s))]
+           [(and)
+            ;; Generate from the first component, then accept/reject
+            ;; against the full conjunction (capped at 200 retries).
+            (let ([sub-gen (s-gen (car (spec-record-data s)))])
+              (lambda ()
+                (let lp ([tries 0])
+                  (let ([v (sub-gen)])
+                    (cond
+                      [(s-valid? s v) v]
+                      [(>= tries 200)
+                       (error 's-gen "could not generate after 200 tries"
+                              spec)]
+                      [else (lp (+ tries 1))])))))]
+           [(or)
+            ;; Pick one alternative uniformly at random.
+            (let* ([pairs (spec-record-data s)]
+                   [alts  (let lp ([p pairs] [acc '()])
+                            (cond
+                              [(null? p) (reverse acc)]
+                              [else
+                               (lp (cddr p)
+                                   (cons (s-gen (cadr p)) acc))]))]
+                   [n (length alts)])
+              (lambda () ((list-ref alts (random n)))))]
+           [(nilable)
+            (let ([sub-gen (s-gen (spec-record-data s))])
+              (lambda ()
+                (if (zero? (random 4)) #f (sub-gen))))]
+           [(enum)
+            (let* ([vals (spec-record-data s)]
+                   [n    (length vals)])
+              (lambda () (list-ref vals (random n))))]
+           [(tuple)
+            (let ([sub-gens (map s-gen (spec-record-data s))])
+              (lambda () (map (lambda (g) (g)) sub-gens)))]
+           [(coll-of)
+            (let ([elem-gen (s-gen (spec-record-data s))])
+              (lambda ()
+                (let ([n (random 6)])
+                  (let lp ([i 0] [acc '()])
+                    (if (= i n) (reverse acc)
+                        (lp (+ i 1) (cons (elem-gen) acc)))))))]
+           [(map-of)
+            (let* ([data (spec-record-data s)]
+                   [kgen (s-gen (car data))]
+                   [vgen (s-gen (cadr data))])
+              (lambda ()
+                (let ([n (random 5)] [ht (make-hashtable equal-hash equal?)])
+                  (let lp ([i 0])
+                    (cond
+                      [(= i n) ht]
+                      [else (hashtable-set! ht (kgen) (vgen))
+                            (lp (+ i 1))])))))]
+           [(keys)
+            ;; For each required key, look up its registered spec and
+            ;; generate; assemble into an alist.  Skip keys with no
+            ;; spec — they'd otherwise need user-supplied generators.
+            (let* ([keys (spec-record-data s)]
+                   [pairs
+                     (let lp ([ks keys] [acc '()])
+                       (cond
+                         [(null? ks) (reverse acc)]
+                         [else
+                          (let* ([k (car ks)]
+                                 [ks-spec (s-get-spec k)])
+                            (cond
+                              [ks-spec
+                               (lp (cdr ks)
+                                   (cons (cons k (s-gen ks-spec)) acc))]
+                              [else (lp (cdr ks) acc)]))]))])
+              (lambda ()
+                (map (lambda (p) (cons (car p) ((cdr p)))) pairs)))]
+           [else
+            (error 's-gen "unsupported spec kind"
+                   (spec-record-kind s))])]
+        [else (error 's-gen "not a spec" spec)])))
+
+  (define s-sample
+    (case-lambda
+      [(spec) (s-sample spec 10)]
+      [(spec n)
+       (let ([gen (s-gen spec)])
+         (let lp ([i 0] [acc '()] [tries 0])
+           (cond
+             [(= i n) (reverse acc)]
+             [(>= tries (* n 50))
+              (error 's-sample "could not produce enough samples" spec)]
+             [else
+              (let ([v (gen)])
+                (if (s-valid? spec v)
+                    (lp (+ i 1) (cons v acc) (+ tries 1))
+                    (lp i acc (+ tries 1))))])))]))
 
   ;; ================================================================
   ;; Map helpers — work with alists and hash tables
