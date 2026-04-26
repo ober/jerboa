@@ -309,6 +309,46 @@
     (extenders 'not-a-proto))
   'caught)
 
+;;; ---- reify (anonymous protocol implementation) -----------------
+
+(defprotocol Greeter
+  (greet1 (self n)))
+
+(test "reify single-method dispatch"
+  (let ([r (reify (greet1 (self n) (string-append "hi " n)))])
+    (greet1 r "world"))
+  "hi world")
+
+(test "reify multiple methods on same instance"
+  (let ([r (reify
+             (greet1 (self n) (string-append "hello " n))
+             (my-area (self) 99))])
+    (list (greet1 r "alice") (my-area r)))
+  '("hello alice" 99))
+
+(test "reify closes over lexical scope"
+  (let* ([prefix "yo "]
+         [r (reify (greet1 (self n) (string-append prefix n)))])
+    (greet1 r "bob"))
+  "yo bob")
+
+(test "satisfies? true for reify instance"
+  (let ([r (reify (greet1 (self n) n))])
+    (satisfies? Greeter r))
+  #t)
+
+(test "two reify instances dispatch independently"
+  (let ([r1 (reify (greet1 (self n) (list 'r1 n)))]
+        [r2 (reify (greet1 (self n) (list 'r2 n)))])
+    (list (greet1 r1 "x") (greet1 r2 "x")))
+  '((r1 "x") (r2 "x")))
+
+(test "two reify instances are not eq?"
+  (let ([r1 (reify (greet1 (self n) n))]
+        [r2 (reify (greet1 (self n) n))])
+    (eq? r1 r2))
+  #f)
+
 ;;; ---- Summary ---------------------------------------------------
 (printf "~%std/protocol: ~a passed, ~a failed~%" pass fail)
 (when (> fail 0) (exit 1))

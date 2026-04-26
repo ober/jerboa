@@ -112,6 +112,18 @@
     clj-promise promise? deliver
     deref
 
+    ;; ---- Anonymous protocol implementation ----
+    reify
+
+    ;; ---- Clojure 1.11+ conveniences ----
+    parse-long parse-double parse-boolean parse-uuid
+    random-uuid
+    update-vals update-keys
+    map-indexed keep-indexed
+    if-some when-some
+    condp letfn case-let
+    NaN? abs iteration not-empty
+
     ;; ---- Re-exports from (std misc meta) ----
     with-meta meta vary-meta meta-wrapped? strip-meta
 
@@ -171,6 +183,7 @@
           (only (std misc list) iterate-n)
           (std pqueue)
           (std sorted-set)
+          (only (std protocol) reify)
           (except (std seq) into sequence transduce
                   ;; Exclude transducer + parallel collection exports
                   ;; that clash or aren't needed here
@@ -1920,5 +1933,270 @@
                                   [(_ arg (... ...))
                                    (%lp arg (... ...))])])
                  body ...)))])))
+
+  ;; =========================================================================
+  ;; Clojure 1.11+ conveniences
+  ;; =========================================================================
+
+  ;; ---- parse-long / parse-double / parse-boolean / parse-uuid ----
+  ;;
+  ;; All return `#f` (Clojure's `nil`) when the input is not a valid
+  ;; representation, matching Clojure's `clojure.core/parse-*`.
+
+  (define (parse-long s)
+    (and (string? s)
+         (let ([n (string->number s 10)])
+           (and (integer? n) (exact? n) n))))
+
+  (define (parse-double s)
+    (and (string? s)
+         (let ([n (string->number s)])
+           (and (number? n) (real? n) (inexact? n) n))))
+
+  (define (parse-boolean s)
+    (cond
+      [(equal? s "true") #t]
+      [(equal? s "false") #f]
+      [else #f]))   ;; Clojure returns nil for non-matches; we use #f.
+
+  ;; UUID v4 helpers — pure Scheme so no FFI dependency at parse time.
+  (define (parse-uuid s)
+    (and (string? s)
+         (= (string-length s) 36)
+         (char=? (string-ref s 8) #\-)
+         (char=? (string-ref s 13) #\-)
+         (char=? (string-ref s 18) #\-)
+         (char=? (string-ref s 23) #\-)
+         (let ([hex
+                (string-append
+                  (substring s 0 8)
+                  (substring s 9 13)
+                  (substring s 14 18)
+                  (substring s 19 23)
+                  (substring s 24 36))])
+           (and (= (string-length hex) 32)
+                (let loop ([i 0])
+                  (cond
+                    [(= i 32) s]
+                    [else
+                     (let ([c (string-ref hex i)])
+                       (and (or (char<=? #\0 c #\9)
+                                (char<=? #\a c #\f)
+                                (char<=? #\A c #\F))
+                            (loop (+ i 1))))]))))))
+
+  ;; (random-uuid) returns a fresh v4 UUID as a 36-char string.
+  ;; Uses Chez's `random` so it does not require crypto-grade entropy
+  ;; — sufficient for local IDs, not for security tokens.  For a CSPRNG
+  ;; UUID, use `(std crypto rand)`.
+  (define (random-uuid)
+    (define (hex-pad n width)
+      (let* ([s (number->string n 16)]
+             [pad (- width (string-length s))])
+        (if (positive? pad)
+            (string-append (make-string pad #\0) s)
+            s)))
+    (define (rand-hex n) (hex-pad (random (expt 16 n)) n))
+    (let* ([a (rand-hex 8)]
+           [b (rand-hex 4)]
+           ;; v4: block 3 starts with "4"
+           [c (string-append "4" (rand-hex 3))]
+           ;; variant: block 4 starts with one of 8 9 a b
+           [d (string-append
+                (string (string-ref "89ab" (random 4)))
+                (rand-hex 3))]
+           [e (rand-hex 12)])
+      (string-append a "-" b "-" c "-" d "-" e)))
+
+  ;; ---- update-vals / update-keys --------------------------------
+  ;;
+  ;; Apply a function to every value (resp. key) of a map.  Operate
+  ;; polymorphically across persistent-maps and hash-tables — the
+  ;; output container kind matches the input.
+
+  (define (update-vals m f)
+    (cond
+      [(persistent-map? m)
+       (let loop ([pairs (persistent-map->list m)]
+                  [acc (persistent-map)])
+         (cond
+           [(null? pairs) acc]
+           [else
+            (let ([kv (car pairs)])
+              (loop (cdr pairs)
+                    (persistent-map-set acc (car kv) (f (cdr kv)))))]))]
+      [(hash-table? m)
+       (let ([new (make-hash-table)])
+         (for-each
+           (lambda (k) (hash-put! new k (f (hash-ref m k))))
+           (hash-keys m))
+         new)]
+      [else (error 'update-vals "not a map" m)]))
+
+  (define (update-keys m f)
+    (cond
+      [(persistent-map? m)
+       (let loop ([pairs (persistent-map->list m)]
+                  [acc (persistent-map)])
+         (cond
+           [(null? pairs) acc]
+           [else
+            (let ([kv (car pairs)])
+              (loop (cdr pairs)
+                    (persistent-map-set acc (f (car kv)) (cdr kv))))]))]
+      [(hash-table? m)
+       (let ([new (make-hash-table)])
+         (for-each
+           (lambda (k) (hash-put! new (f k) (hash-ref m k)))
+           (hash-keys m))
+         new)]
+      [else (error 'update-keys "not a map" m)]))
+
+  ;; ---- map-indexed / keep-indexed -------------------------------
+  ;;
+  ;; (map-indexed (lambda (i x) ...) coll)  → list
+  ;; (keep-indexed F coll) — drop entries where F returns #f.
+
+  (define (map-indexed f coll)
+    (let loop ([i 0] [xs coll] [acc '()])
+      (cond
+        [(null? xs) (reverse acc)]
+        [else (loop (+ i 1) (cdr xs) (cons (f i (car xs)) acc))])))
+
+  (define (keep-indexed f coll)
+    (let loop ([i 0] [xs coll] [acc '()])
+      (cond
+        [(null? xs) (reverse acc)]
+        [else
+         (let ([v (f i (car xs))])
+           (loop (+ i 1) (cdr xs)
+                 (if v (cons v acc) acc)))])))
+
+  ;; ---- if-some / when-some -------------------------------------
+  ;;
+  ;; Same shape as if-let / when-let, but the binding is non-#f only
+  ;; — useful when `#f` itself is a meaningful value in the falsy slot.
+
+  (define-syntax if-some
+    (syntax-rules ()
+      [(_ (var expr) then) (if-some (var expr) then (if #f #f))]
+      [(_ (var expr) then else)
+       (let ([var expr])
+         (if (eq? var #f) else then))]))
+
+  (define-syntax when-some
+    (syntax-rules ()
+      [(_ (var expr) body ...)
+       (let ([var expr])
+         (if (eq? var #f) (if #f #f) (begin body ...)))]))
+
+  ;; ---- condp ---------------------------------------------------
+  ;;
+  ;; (condp PRED EXPR
+  ;;    test1 result1
+  ;;    test2 :>> handler2
+  ;;    default)
+  ;;
+  ;; Each test is fed to (PRED test EXPR).  If truthy, the matching
+  ;; result is returned (or the truthy value is fed into handler2 when
+  ;; the `:>>` form is used).  The trailing single expression is the
+  ;; default; an absent default raises.
+
+  (define-syntax condp
+    (syntax-rules (:>>)
+      [(_ pred expr default)
+       default]
+      [(_ pred expr test :>> handler more ...)
+       (let ([%v ((lambda (p e t) (p t e)) pred expr test)])
+         (if %v
+             (handler %v)
+             (condp pred expr more ...)))]
+      [(_ pred expr test result more ...)
+       (if ((lambda (p e t) (p t e)) pred expr test)
+           result
+           (condp pred expr more ...))]
+      [(_ pred expr)
+       (error 'condp "no matching clause")]))
+
+  ;; ---- letfn ---------------------------------------------------
+  ;;
+  ;; Mutual recursion sugar: (letfn [(f [x] ...) (g [x] ...)] body ...)
+
+  (define-syntax letfn
+    (syntax-rules ()
+      [(_ ((name (arg ...) body ...) ...) expr ...)
+       (letrec ((name (lambda (arg ...) body ...)) ...)
+         expr ...)]))
+
+  ;; ---- case-let ------------------------------------------------
+  ;;
+  ;; (case-let [v expr] (k1 r1) ... (else d))
+  ;; Equivalent to (let ([v expr]) (case v ...))
+
+  (define-syntax case-let
+    (syntax-rules ()
+      [(_ (var expr) clause ...)
+       (let ([var expr]) (case var clause ...))]))
+
+  ;; ---- NaN? / abs / not-empty / iteration ----------------------
+
+  (define (NaN? x)
+    (and (number? x) (or (and (real? x) (nan? x))
+                         (and (complex? x)
+                              (or (nan? (real-part x))
+                                  (nan? (imag-part x)))))))
+
+  ;; Chez has `abs` already; re-export under the same name so users
+  ;; pulling (std clojure) get it without a separate (chezscheme) import.
+  ;; (chezscheme) re-imports already in this library make this a no-op
+  ;; if `abs` was not excluded — it was not, so the binding is just
+  ;; re-exported.
+  ;; (No explicit definition needed.)
+
+  (define (not-empty x)
+    (cond
+      [(null? x) #f]
+      [(string? x) (and (not (zero? (string-length x))) x)]
+      [(vector? x) (and (not (zero? (vector-length x))) x)]
+      [(persistent-map? x)
+       (and (not (zero? (persistent-map-size x))) x)]
+      [(persistent-vector? x)
+       (and (not (zero? (persistent-vector-length x))) x)]
+      [(persistent-set? x)
+       (and (not (zero? (persistent-set-size x))) x)]
+      [(hash-table? x)
+       (and (not (zero? (length (hash-keys x)))) x)]
+      [(pair? x) x]
+      [else x]))
+
+  ;; ---- iteration -----------------------------------------------
+  ;;
+  ;; (iteration step :somef pred :vf project :kf next-key :initk k0)
+  ;;
+  ;; Returns a lazy sequence of items by repeatedly calling
+  ;;   (step k)
+  ;; whose result is fed through :somef? to detect end, :vf to project
+  ;; the page into a value, and :kf to compute the next key.  Mirrors
+  ;; clojure.core/iteration (Clojure 1.11) for paginated APIs.
+  ;;
+  ;; Returns a plain list of projected items because Jerboa's
+  ;; (std clojure) lazy-seq surface is already a separate package; we
+  ;; eagerly materialise.  Replace with (lazy-seq ...) wrapper if a
+  ;; truly lazy iteration is needed.
+
+  (define iteration
+    (case-lambda
+      [(step) (iteration step (lambda (x) #t) (lambda (x) x) (lambda (x) #f) #f)]
+      [(step somef vf kf initk)
+       (let loop ([k initk] [acc '()])
+         (let ([page (step k)])
+           (cond
+             [(somef page)
+              (let ([item (vf page)]
+                    [next (kf page)])
+                (cond
+                  [next (loop next (cons item acc))]
+                  [else (reverse (cons item acc))]))]
+             [else (reverse acc)])))]))
 
 ) ;; end library

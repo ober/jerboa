@@ -62,7 +62,8 @@
   (export
     defprotocol extend-type extend-protocol
     protocol? protocol-name protocol-methods
-    satisfies? extenders extends?)
+    satisfies? extenders extends?
+    reify)
 
   (import (chezscheme))
 
@@ -259,5 +260,49 @@
     (for-all
       (lambda (m) (%has-impl-for? m type-key))
       (%protocol-methods p)))
+
+  ;; (reify (method-name (arg ...) body ...) ...)
+  ;;
+  ;; Anonymous protocol implementation, à la Clojure's `reify`.  Each
+  ;; call allocates a fresh record-type descriptor, registers the
+  ;; supplied method bodies against it in the protocol dispatch table,
+  ;; and returns a unique instance whose first-argument dispatch fires
+  ;; the supplied bodies.  Method bodies close over the surrounding
+  ;; lexical scope, mirroring Clojure semantics.
+  ;;
+  ;;   (def r (reify
+  ;;            (greet (self n) (string-append "hi " n))
+  ;;            (size  (self)   42)))
+  ;;   (greet r "world")  ;; => "hi world"
+  ;;   (size r)           ;; => 42
+  ;;
+  ;; Notes:
+  ;; - One rtd is allocated per call.  In hot loops, lift the reify out
+  ;;   of the loop or use defstruct + extend-type for a stable type.
+  ;; - The first parameter of each method is bound to the reify instance
+  ;;   itself (Clojure's `this`).  Any parameter name works.
+  ;; - Methods may reference other methods on the same instance — calls
+  ;;   resolve through the global dispatch table just like ordinary
+  ;;   protocol methods.
+  (define (%reify-make method-impls)
+    (let* ([rtd (make-record-type-descriptor
+                  '%reify-instance #f #f #f #f
+                  '#())]
+           [rcd (make-record-constructor-descriptor rtd #f #f)]
+           [ctor (record-constructor rcd)]
+           [instance (ctor)])
+      (for-each
+        (lambda (impl)
+          (%register-impl! (car impl) rtd (cdr impl)))
+        method-impls)
+      instance))
+
+  (define-syntax reify
+    (syntax-rules ()
+      [(_ (method-name (arg ...) body ...) ...)
+       (%reify-make
+         (list (cons 'method-name
+                     (lambda (arg ...) body ...))
+               ...))]))
 
 ) ;; end library
