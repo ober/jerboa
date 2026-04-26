@@ -39,9 +39,9 @@ mod wasm;
 #[cfg(feature = "spidermonkey")]
 mod wasm_sm;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod epoll;
-#[cfg(all(target_os = "linux", feature = "tls"))]
+#[cfg(all(any(target_os = "linux", target_os = "android"), feature = "tls"))]
 mod http_parse;
 #[cfg(target_os = "linux")]
 mod inotify_native;

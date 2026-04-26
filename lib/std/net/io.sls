@@ -222,7 +222,11 @@
         (when (io-poller-running? poller)
           ;; Block until events (or wakefd signal).
           ;; Use 100ms timeout as safety net so we re-check running?.
-          (let ([events (epoll-wait epfd *max-events* 100)])
+          ;; epoll_wait can return -1/EINTR on Termux when a signal
+          ;; arrives mid-syscall; treat that as an empty event list and
+          ;; re-enter the loop instead of letting the poller die.
+          (let ([events (guard (exn [#t '()])
+                          (epoll-wait epfd *max-events* 100))])
             (for-each
               (lambda (ev)
                 (let ([fd (car ev)]

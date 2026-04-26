@@ -323,10 +323,18 @@
   (define (write-edn-list lst port)
     (put-char port #\()
     (let loop ([l lst] [first? #t])
-      (unless (null? l)
-        (unless first? (put-char port #\space))
-        (write-edn (car l) port)
-        (loop (cdr l) #f)))
+      (cond
+        [(null? l) (void)]
+        [(pair? l)
+         (unless first? (put-char port #\space))
+         (write-edn (car l) port)
+         (loop (cdr l) #f)]
+        [else
+         ;; Improper / dotted pair: emit final element as if it were the
+         ;; second member of a 2-list.  Lossy for cons cells with non-list
+         ;; cdrs, but keeps EDN spec-compliant and avoids a crash.
+         (unless first? (put-char port #\space))
+         (write-edn l port)]))
     (put-char port #\)))
 
   (define (write-edn-vector vec port)

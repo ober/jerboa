@@ -55,16 +55,21 @@ pub extern "C" fn jerboa_epoll_wait(
             libc::epoll_event { events: 0, u64: 0 };
             max_events as usize
         ];
-        let n = unsafe {
-            libc::epoll_wait(epfd, events.as_mut_ptr(), max_events, timeout_ms)
+        let n = loop {
+            let r = unsafe {
+                libc::epoll_wait(epfd, events.as_mut_ptr(), max_events, timeout_ms)
+            };
+            if r < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::EINTR) {
+                    // Interrupted by signal — retry transparently.
+                    continue;
+                }
+                crate::panic::set_last_error(format!("epoll_wait: {}", err));
+                return -1;
+            }
+            break r;
         };
-        if n < 0 {
-            crate::panic::set_last_error(format!(
-                "epoll_wait: {}",
-                std::io::Error::last_os_error()
-            ));
-            return -1;
-        }
         // Copy results to output buffer: each entry is (fd:i32, events:u32) = 8 bytes
         let out = unsafe {
             std::slice::from_raw_parts_mut(events_out, (max_events as usize) * 8)
