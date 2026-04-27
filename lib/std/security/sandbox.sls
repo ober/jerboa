@@ -313,10 +313,8 @@
             (loop (+ offset n)))))))
 
   (define (subbytevector bv start end)
-    (let* ([len (- end start)]
-           [result (make-bytevector len)])
-      (bytevector-copy! bv start result 0 len)
-      result))
+    ;; Chez core bytevector-slice (Phase 67) — no manual copy needed.
+    (bytevector-slice bv start end))
 
   (define (fd-read-all fd max-size)
     ;; Read up to max-size bytes from fd until EOF

@@ -348,18 +348,16 @@
            (fprintf port "  name: ~a~n" info)))]
       [(and (record? v) (not (condition? v)))
        (guard (exn [#t (void)])
-         (let* ([rtd (record-rtd v)]
-                [names (record-type-field-names rtd)]
-                [n (vector-length names)])
-           (fprintf port "  fields:~n")
-           (do ([i 0 (+ i 1)])
-               ((= i n))
-             (fprintf port "    ~a: " (vector-ref names i))
-             (write ((record-accessor rtd i) v) port)
+         (fprintf port "  fields:~n")
+         (for-each
+           (lambda (pair)
+             (fprintf port "    ~a: " (car pair))
+             (write (cdr pair) port)
              (newline port))
-           (let ([parent (record-type-parent rtd)])
-             (when parent
-               (fprintf port "  parent: ~a~n" (record-type-name parent))))))]
+           (record->alist v))
+         (let ([parent (record-type-parent (record-rtd v))])
+           (when parent
+             (fprintf port "  parent: ~a~n" (record-type-name parent)))))]
       [(condition? v)
        (when (message-condition? v)
          (fprintf port "  message: ~a~n" (condition-message v)))

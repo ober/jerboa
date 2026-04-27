@@ -192,7 +192,7 @@
                  [b64-clean (list->string
                               (filter (lambda (c) (not (char-whitespace? c)))
                                       (string->list b64-text)))]
-                 [decoded (base64-decode-simple b64-clean)])
+                 [decoded (base64-decode b64-clean)])
             (extract-ed25519-seed-from-decoded decoded))))))
 
   (define (string-search haystack needle)
@@ -251,57 +251,7 @@
       (bytevector-copy! bv off data 0 len)
       (cons data (+ off len))))
 
-  (define (base64-decode-simple s)
-    (let ([table (make-vector 128 -1)]
-          [chars "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"])
-      (do ([i 0 (+ i 1)])
-        ((>= i 64))
-        (vector-set! table (char->integer (string-ref chars i)) i))
-      (let ([vals (let loop ([i 0] [acc '()])
-                    (if (>= i (string-length s))
-                      (reverse acc)
-                      (let ([c (string-ref s i)])
-                        (if (char=? c #\=)
-                          (reverse acc)
-                          (let ([v (and (< (char->integer c) 128)
-                                       (vector-ref table (char->integer c)))])
-                            (if (and v (>= v 0))
-                              (loop (+ i 1) (cons v acc))
-                              (loop (+ i 1) acc)))))))])
-        (let* ([nvals (length vals)]
-               [nbytes (- (quotient (* nvals 3) 4)
-                          (cond [(= (modulo nvals 4) 2) 1]
-                                [(= (modulo nvals 4) 3) 0]
-                                [else 0]))])
-          (let loop ([vs vals] [acc '()])
-            (cond
-              [(null? vs)
-               (u8-list->bytevector (reverse acc))]
-              [(>= (length vs) 4)
-               (let ([a (car vs)] [b (cadr vs)] [c (caddr vs)] [d (cadddr vs)])
-                 (loop (cddddr vs)
-                       (cons (bitwise-and #xff (bitwise-ior (bitwise-arithmetic-shift-left c 6) d))
-                         (cons (bitwise-and #xff (bitwise-ior (bitwise-arithmetic-shift-left b 4)
-                                                              (bitwise-arithmetic-shift-right c 2)))
-                           (cons (bitwise-and #xff (bitwise-ior (bitwise-arithmetic-shift-left a 2)
-                                                                (bitwise-arithmetic-shift-right b 4)))
-                             acc)))))]
-              [(= (length vs) 3)
-               (let ([a (car vs)] [b (cadr vs)] [c (caddr vs)])
-                 (let ([acc (cons (bitwise-and #xff (bitwise-ior (bitwise-arithmetic-shift-left b 4)
-                                                                (bitwise-arithmetic-shift-right c 2)))
-                              (cons (bitwise-and #xff (bitwise-ior (bitwise-arithmetic-shift-left a 2)
-                                                                   (bitwise-arithmetic-shift-right b 4)))
-                                acc))])
-                   (u8-list->bytevector (reverse acc))))]
-              [(= (length vs) 2)
-               (let ([a (car vs)] [b (cadr vs)])
-                 (let ([acc (cons (bitwise-and #xff (bitwise-ior (bitwise-arithmetic-shift-left a 2)
-                                                                (bitwise-arithmetic-shift-right b 4)))
-                              acc)])
-                   (u8-list->bytevector (reverse acc))))]
-              [else
-               (u8-list->bytevector (reverse acc))]))))))
+  ;; base64-decode now comes from (chezscheme) core (Phase 66, Round 12).
 
   (define (find-default-key)
     (let ([home (or (getenv "HOME") "")])

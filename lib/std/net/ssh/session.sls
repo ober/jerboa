@@ -19,17 +19,7 @@
           (std net ssh channel)
           (std net ssh conditions))
 
-  ;; ---- Helpers ----
-
-  (define (bytevector-append . bvs)
-    (let* ([total (apply + (map bytevector-length bvs))]
-           [result (make-bytevector total)])
-      (let loop ([bvs bvs] [off 0])
-        (unless (null? bvs)
-          (let ([bv (car bvs)])
-            (bytevector-copy! bv 0 result off (bytevector-length bv))
-            (loop (cdr bvs) (+ off (bytevector-length bv))))))
-      result))
+  ;; bytevector-append is in (chezscheme) core — no shim needed.
 
   ;; ---- Exec ----
 

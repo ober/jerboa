@@ -274,12 +274,9 @@
            [str (utf8->string (subbytevector bv (+ offset 1) (+ offset 1 len)))])
       (cons str (+ offset 1 len))))
 
-  ;; Helper: extract sub-bytevector
+  ;; Helper: extract sub-bytevector — Chez core bytevector-slice (Phase 67).
   (define (subbytevector bv start end)
-    (let* ([len (- end start)]
-           [out (make-bytevector len)])
-      (bytevector-copy! bv start out 0 len)
-      out))
+    (bytevector-slice bv start end))
 
   ;; HPACK context (dynamic table as alist, max size)
   (define-record-type hpack-context-rec

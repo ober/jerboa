@@ -414,12 +414,9 @@
 
   ;;; ========== Low-level decoding helpers ==========
 
-  ;; Extract a sub-range of a bytevector (Chez bytevector-copy takes only 1 arg)
+  ;; Extract a sub-range — Chez core bytevector-slice (Phase 67).
   (define (subbytevector bv start end)
-    (let* ([len (- end start)]
-           [out (make-bytevector len)])
-      (bytevector-copy! bv start out 0 len)
-      out))
+    (bytevector-slice bv start end))
 
   (define (decode-u8 bv pos)
     (values (bytevector-u8-ref bv pos) (+ pos 1)))

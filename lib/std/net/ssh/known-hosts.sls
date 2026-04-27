@@ -16,115 +16,20 @@
 
   (import (chezscheme)
           (std net ssh wire)
-          (std net ssh conditions)
-          (chez-ssh crypto))
+          (std net ssh conditions))
 
-  ;; ---- Base64 encode ----
-  (define b64-chars "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
-
-  (define (base64-encode bv)
-    (let* ([len (bytevector-length bv)]
-           [out '()])
-      (let loop ([i 0] [acc out])
-        (cond
-          [(>= i len)
-           (list->string (reverse acc))]
-          [else
-           (let* ([b0 (bytevector-u8-ref bv i)]
-                  [b1 (if (< (+ i 1) len) (bytevector-u8-ref bv (+ i 1)) 0)]
-                  [b2 (if (< (+ i 2) len) (bytevector-u8-ref bv (+ i 2)) 0)]
-                  [remaining (- len i)]
-                  [c0 (string-ref b64-chars (bitwise-arithmetic-shift-right b0 2))]
-                  [c1 (string-ref b64-chars
-                        (bitwise-ior
-                          (bitwise-arithmetic-shift-left (bitwise-and b0 3) 4)
-                          (bitwise-arithmetic-shift-right b1 4)))]
-                  [c2 (if (>= remaining 2)
-                        (string-ref b64-chars
-                          (bitwise-ior
-                            (bitwise-arithmetic-shift-left (bitwise-and b1 #xf) 2)
-                            (bitwise-arithmetic-shift-right b2 6)))
-                        #\=)]
-                  [c3 (if (>= remaining 3)
-                        (string-ref b64-chars (bitwise-and b2 #x3f))
-                        #\=)])
-             (loop (+ i 3)
-                   (cons c3 (cons c2 (cons c1 (cons c0 acc))))))]))))
-
-  ;; ---- Base64 decode ----
-  (define (base64-decode-char c)
-    (cond
-      [(and (char>=? c #\A) (char<=? c #\Z)) (- (char->integer c) (char->integer #\A))]
-      [(and (char>=? c #\a) (char<=? c #\z)) (+ 26 (- (char->integer c) (char->integer #\a)))]
-      [(and (char>=? c #\0) (char<=? c #\9)) (+ 52 (- (char->integer c) (char->integer #\0)))]
-      [(char=? c #\+) 62]
-      [(char=? c #\/) 63]
-      [else #f]))
-
-  (define (base64-decode s)
-    (let ([chars (string->list (string-filter (lambda (c) (not (char-whitespace? c))) s))]
-          [out '()])
-      (let loop ([cs chars] [acc '()])
-        (cond
-          [(null? cs)
-           (list->bytevector (reverse acc))]
-          [else
-           (let* ([c0 (base64-decode-char (car cs))]
-                  [c1 (if (null? (cdr cs)) 0 (base64-decode-char (cadr cs)))]
-                  [c2 (if (or (null? (cdr cs)) (null? (cddr cs))
-                              (char=? (caddr cs) #\=))
-                        #f
-                        (base64-decode-char (caddr cs)))]
-                  [c3 (if (or (null? (cdr cs)) (null? (cddr cs)) (null? (cdddr cs))
-                              (char=? (cadddr cs) #\=))
-                        #f
-                        (base64-decode-char (cadddr cs)))])
-             (when (and c0 c1)
-               (let ([b0 (bitwise-ior
-                           (bitwise-arithmetic-shift-left c0 2)
-                           (bitwise-arithmetic-shift-right c1 4))])
-                 (set! acc (cons b0 acc))))
-             (when (and c1 c2)
-               (let ([b1 (bitwise-and #xff
-                           (bitwise-ior
-                             (bitwise-arithmetic-shift-left c1 4)
-                             (bitwise-arithmetic-shift-right c2 2)))])
-                 (set! acc (cons b1 acc))))
-             (when (and c2 c3)
-               (let ([b2 (bitwise-and #xff
-                           (bitwise-ior
-                             (bitwise-arithmetic-shift-left c2 6)
-                             c3))])
-                 (set! acc (cons b2 acc))))
-             (let ([advance (min 4 (length cs))])
-               (loop (list-tail cs advance) acc)))]))))
-
-  (define (string-filter pred s)
-    (list->string (filter pred (string->list s))))
-
-  (define (list->bytevector lst)
-    (let* ([len (length lst)]
-           [bv (make-bytevector len)])
-      (let loop ([l lst] [i 0])
-        (unless (null? l)
-          (bytevector-u8-set! bv i (car l))
-          (loop (cdr l) (+ i 1))))
-      bv))
+  ;; base64-encode/decode and sha256-bytevector come from (chezscheme) core
+  ;; (Phases 66/67, Round 12).  No more need for chez-ssh crypto FFI.
 
   ;; ---- Fingerprint ----
 
   (define (ssh-host-key-fingerprint host-key-blob)
-    (let ([hash (make-bytevector 32)])
-      (ssh-crypto-sha256 host-key-blob (bytevector-length host-key-blob) hash)
-      (string-append "SHA256:" (base64-encode-no-pad hash))))
+    (string-append "SHA256:"
+                   (base64-encode-no-pad (sha256-bytevector host-key-blob))))
 
   (define (base64-encode-no-pad bv)
-    (let ([s (base64-encode bv)])
-      (let loop ([i (- (string-length s) 1)])
-        (cond
-          [(< i 0) ""]
-          [(char=? (string-ref s i) #\=) (loop (- i 1))]
-          [else (substring s 0 (+ i 1))]))))
+    ;; OpenSSH SHA256: prints base64 without trailing '=' padding.
+    (base64-encode bv #f #f))
 
   ;; ---- Known hosts file ----
 
@@ -191,7 +96,7 @@
                    (if (bytevector=? (caddr parsed) host-key-blob)
                      'ok
                      'changed)]
-                  [else (loop (cdr lines))])))])))]))
+                  [else (loop (cdr lines))]))])))]))
 
   (define (host-matches? file-pattern our-pattern)
     (let ([parts (string-split file-pattern #\,)])

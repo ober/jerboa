@@ -108,20 +108,12 @@
              (lambda (k)
                ;; Try to get the name field from an effect descriptor record
                (guard (exn [#t k])  ; fallback: use the key itself as name
-                 ;; effect-descriptor from (std effect) has a 'name' accessor
-                 ;; We can use the record inspection API
+                 ;; effect-descriptor from (std effect) has a 'name' field.
+                 ;; Chez core record->alist (Phase 72) walks parents — the
+                 ;; assq returns the field's value or #f if absent.
                  (if (record? k)
-                   (let* ([rtd (record-rtd k)]
-                          [fields (record-type-field-names rtd)]
-                          [name-idx
-                           (let loop ([i 0] [flds (vector->list fields)])
-                             (cond
-                               [(null? flds) #f]
-                               [(eq? (car flds) 'name) i]
-                               [else (loop (+ i 1) (cdr flds))]))])
-                     (if name-idx
-                       ((record-accessor rtd name-idx) k)
-                       k))
+                   (let ([pair (assq 'name (record->alist k))])
+                     (if pair (cdr pair) k))
                    k)))
              keys)))]
       [else

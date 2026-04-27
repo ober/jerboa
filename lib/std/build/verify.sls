@@ -37,55 +37,69 @@
       (immutable actual verification-result-actual)))     ;; actual hash or error message
 
   ;; ========== SHA-256 Hex ==========
+  ;;
+  ;; sha256-bytevector landed in Chez core (Phase 67, Round 12).  This
+  ;; replaces the previous sha256sum/find/xargs shell pipeline, which had
+  ;; shell-quote injection surface and required two process spawns per
+  ;; verification.  Pure-Scheme path now: read file → hash → hex-encode.
+
+  (define hex-chars "0123456789abcdef")
+
+  (define (bv->hex bv)
+    (let* ([n (bytevector-length bv)]
+           [out (make-string (fx* 2 n))])
+      (let loop ([i 0])
+        (when (fx< i n)
+          (let ([b (bytevector-u8-ref bv i)])
+            (string-set! out (fx* 2 i)
+              (string-ref hex-chars (fxarithmetic-shift-right b 4)))
+            (string-set! out (fx+ (fx* 2 i) 1)
+              (string-ref hex-chars (fxand b #xf))))
+          (loop (fx+ i 1))))
+      out))
+
+  (define (read-file-bytevector path)
+    (let* ([port (open-file-input-port path)]
+           [bv (get-bytevector-all port)])
+      (close-port port)
+      (if (eof-object? bv) #vu8() bv)))
 
   (define (file-sha256-hex path)
-    ;; Compute SHA-256 hex digest of a file using sha256sum.
+    ;; SHA-256 hex digest of a file using Chez-core sha256-bytevector.
     ;; Returns hex string or #f on error.
     (guard (exn [#t #f])
       (unless (file-exists? path)
         (error 'file-sha256-hex "file not found" path))
-      (let-values ([(to-stdin from-stdout from-stderr pid)
-                    (open-process-ports
-                      (string-append "sha256sum " (shell-quote path))
-                      (buffer-mode block)
-                      (make-transcoder (utf-8-codec)))])
-        (close-port to-stdin)
-        (let ([output (get-string-all from-stdout)])
-          (close-port from-stdout)
-          (close-port from-stderr)
-          (and (string? output)
-               (>= (string-length output) 64)
-               (substring output 0 64))))))
-
-  (define (shell-quote s)
-    ;; Basic shell quoting — wrap in single quotes, escape existing quotes.
-    (string-append "'"
-      (let loop ([i 0] [out '()])
-        (if (= i (string-length s))
-          (list->string (reverse out))
-          (let ([c (string-ref s i)])
-            (if (char=? c #\')
-              (loop (+ i 1) (append (reverse (string->list "'\\''")) out))
-              (loop (+ i 1) (cons c out))))))
-      "'"))
+      (bv->hex (sha256-bytevector (read-file-bytevector path)))))
 
   (define (directory-hash dir)
-    ;; Hash all files in a directory recursively.
-    ;; Returns a combined hex hash or #f.
+    ;; Hash all files in a directory recursively, sorted by relative path.
+    ;; Mirrors `find … -type f | sort | xargs sha256sum | sha256sum` but
+    ;; entirely in-process — no shell, no quoting.
     (guard (exn [#t #f])
-      (let-values ([(to-stdin from-stdout from-stderr pid)
-                    (open-process-ports
-                      (string-append "find " (shell-quote dir)
-                                     " -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum")
-                      (buffer-mode block)
-                      (make-transcoder (utf-8-codec)))])
-        (close-port to-stdin)
-        (let ([output (get-string-all from-stdout)])
-          (close-port from-stdout)
-          (close-port from-stderr)
-          (and (string? output)
-               (>= (string-length output) 64)
-               (substring output 0 64))))))
+      (let* ([files (sort string<?
+                          (collect-files dir (string-length dir)))]
+             [parts (map (lambda (rel)
+                           (let* ([full (string-append dir "/" rel)]
+                                  [h (file-sha256-hex full)])
+                             (string->utf8
+                              (string-append h "  " rel "\n"))))
+                         files)]
+             [combined (apply bytevector-append parts)])
+        (bv->hex (sha256-bytevector combined)))))
+
+  (define (collect-files root prefix-len)
+    ;; Returns a list of paths relative to root (no leading slash).
+    (let loop ([dir root] [acc '()])
+      (fold-left
+        (lambda (a entry)
+          (let ([full (string-append dir "/" entry)])
+            (cond
+              [(file-directory? full) (loop full a)]
+              [else (cons (substring full (fx+ prefix-len 1)
+                                     (string-length full)) a)])))
+        acc
+        (directory-list dir))))
 
   ;; ========== Single Dependency Verification ==========
 

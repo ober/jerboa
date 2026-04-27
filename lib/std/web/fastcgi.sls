@@ -277,23 +277,8 @@
           (bytevector-u8-set! bv 3 (bitwise-and n #xff))
           bv)))
 
-  ;; Slice a bytevector
-  (define (bytevector-slice bv start end)
-    (let* ((len (- end start))
-           (result (make-bytevector len)))
-      (bytevector-copy! bv start result 0 len)
-      result))
-
-  ;; Concatenate bytevectors
-  (define (bytevector-append . bvs)
-    (let ((total (apply + (map bytevector-length bvs))))
-      (let ((result (make-bytevector total)))
-        (let lp ((bvs bvs) (pos 0))
-          (if (null? bvs)
-              result
-              (let ((bv (car bvs)))
-                (bytevector-copy! bv 0 result pos (bytevector-length bv))
-                (lp (cdr bvs) (+ pos (bytevector-length bv)))))))))
+  ;; bytevector-slice and bytevector-append are both in (chezscheme) core —
+  ;; no shims needed.
 
   ;; ========== FastCGI record writing ==========
 

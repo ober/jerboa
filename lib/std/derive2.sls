@@ -32,35 +32,36 @@
   (define (protocol-registry) *protocols*)
 
   ;; ========== Record introspection helpers ==========
+  ;;
+  ;; The parent-walk helpers below now route through Chez core primitives
+  ;; (record-fields / record->alist, Phase 72 — landed 2026-04-26).  Where we
+  ;; only have an rtd (no instance), we still walk the chain locally because
+  ;; the core prims are instance-based.  Local walk is parents-first to match
+  ;; the core contract.
+
+  (define (rtd-chain rtd)
+    (let loop ([r rtd] [acc '()])
+      (if r (loop (record-type-parent r) (cons r acc)) acc)))
 
   (define (record-field-names-of rtd)
-    (let loop ([r rtd] [fields '()])
-      (if (not r)
-        fields
-        (loop (record-type-parent r)
-              (append (vector->list (record-type-field-names r)) fields)))))
+    (apply append
+           (map (lambda (r) (vector->list (record-type-field-names r)))
+                (rtd-chain rtd))))
 
   (define (record-field-values obj)
-    (let* ([rtd (record-rtd obj)]
-           [names (record-field-names-of rtd)])
-      (map (lambda (name)
-             (let ([acc (record-accessor rtd (field-index rtd name))])
-               (acc obj)))
-           (vector->list (record-type-field-names rtd)))))
-
-  (define (field-index rtd name)
-    (let ([names (vector->list (record-type-field-names rtd))])
-      (let loop ([ns names] [i 0])
-        (cond
-          [(null? ns) (error 'field-index "field not found" name)]
-          [(eq? (car ns) name) i]
-          [else (loop (cdr ns) (+ i 1))]))))
+    ;; Chez core: parents-first list of (name . value) pairs.
+    (map cdr (record->alist obj)))
 
   (define (all-field-accessors rtd)
-    (let ([names (vector->list (record-type-field-names rtd))])
-      (map (lambda (name)
-             (record-accessor rtd (field-index rtd name)))
-           names)))
+    (apply append
+           (map (lambda (r)
+                  (let ([n (vector-length (record-type-field-names r))])
+                    (let lp ([i 0] [acc '()])
+                      (if (fx= i n)
+                        (reverse acc)
+                        (lp (fx+ i 1)
+                            (cons (record-accessor r i) acc))))))
+                (rtd-chain rtd))))
 
   ;; ========== auto-equal ==========
 
@@ -90,7 +91,7 @@
 
   (define (auto-display rtd)
     (let ([accessors (all-field-accessors rtd)]
-          [names (vector->list (record-type-field-names rtd))]
+          [names (record-field-names-of rtd)]
           [type-name (record-type-name rtd)])
       (lambda (obj port)
         (display "#<" port)
@@ -142,7 +143,7 @@
 
   (define (auto-serialize rtd)
     (let ([accessors (all-field-accessors rtd)]
-          [names (vector->list (record-type-field-names rtd))]
+          [names (record-field-names-of rtd)]
           [type-name (record-type-name rtd)]
           [constructor (record-constructor
                          (make-record-constructor-descriptor rtd #f #f))])
@@ -163,7 +164,7 @@
 
   (define (auto-json rtd)
     (let ([accessors (all-field-accessors rtd)]
-          [names (vector->list (record-type-field-names rtd))]
+          [names (record-field-names-of rtd)]
           [constructor (record-constructor
                          (make-record-constructor-descriptor rtd #f #f))])
       (cons

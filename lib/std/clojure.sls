@@ -218,32 +218,12 @@
       [(keyword? k) (string->symbol (keyword->string k))]
       [else #f]))
 
-  ;; Collect (field-name . accessor) pairs for a record instance,
-  ;; walking the parent chain so inherited fields are included in
-  ;; declaration order (parent first, child fields appended).
-  ;; Returns a fresh list each call; cache in a caller if hot.
+  ;; Collect (field-name . value) pairs for a record instance, walking the
+  ;; parent chain so inherited fields are included in declaration order
+  ;; (parent first, child fields appended).  Backed by Chez core
+  ;; record->alist (Phase 72, Round 12 — landed 2026-04-26).
   (define (%record-fields-all rec)
-    (let ([rtd (record-rtd rec)])
-      ;; `walk` receives the tail-so-far and prepends this rtd's fields
-      ;; (in reverse index order) to it. By walking the chain leaf-to-
-      ;; root and feeding each result as the tail, we end up with
-      ;; root-to-leaf declaration order overall.
-      (define (walk-rtd r tail)
-        (let* ([names (record-type-field-names r)]
-               [n (vector-length names)])
-          (let lp ([i (- n 1)] [out tail])
-            (if (< i 0)
-                out
-                (lp (- i 1)
-                      (cons (cons (vector-ref names i)
-                                  (record-accessor r i))
-                            out))))))
-      (let walk ([r rtd] [tail '()])
-        (cond
-          [(not r) tail]
-          [else
-           (walk (record-type-parent r)
-                 (walk-rtd r tail))]))))
+    (record->alist rec))
 
   ;; Find a record's field-value by name (walking parent chain).
   ;; Returns default if not found.
@@ -287,8 +267,7 @@
 
   ;; Ordered list of a record's field values (parent first).
   (define (%record-vals rec)
-    (map (lambda (pair) ((cdr pair) rec))
-         (%record-fields-all rec)))
+    (map cdr (%record-fields-all rec)))
 
   ;; Escape a record to a persistent-map with its field bindings.
   ;; Called by assoc/dissoc when they need to produce an updated
@@ -301,7 +280,7 @@
           m
           (let ([pair (car fields)])
             (lp (cdr fields)
-                  (persistent-map-set m (car pair) ((cdr pair) rec)))))))
+                  (persistent-map-set m (car pair) (cdr pair)))))))
 
   ;; =========================================================================
   ;; Numerics
@@ -1282,7 +1261,7 @@
              acc
              (let ([pair (car fields)])
                (lp (cdr fields)
-                     (f acc (car pair) ((cdr pair) coll))))))]
+                     (f acc (car pair) (cdr pair))))))]
       [else (error 'reduce-kv "unsupported collection type" coll)]))
 
   ;; min-key — return the x in coll that minimizes (k x).

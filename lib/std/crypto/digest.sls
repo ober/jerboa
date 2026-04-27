@@ -1,8 +1,12 @@
 #!chezscheme
-;;; :std/crypto/digest -- Cryptographic hash functions via openssl CLI
+;;; :std/crypto/digest -- Cryptographic hash functions
 ;;;
-;;; HARDENED: Data piped via stdin — no temp files, no command injection.
-;;; Command string contains only hardcoded algorithm names.
+;;; SHA-1 and SHA-256 use Chez core sha1-bytevector / sha256-bytevector
+;;; (Phase 67, Round 12 — landed 2026-04-26 in ChezScheme).  No process
+;;; spawn, no shell, no openssl dependency for those two.
+;;;
+;;; MD5, SHA-224, SHA-384, SHA-512 still shell out to `openssl dgst`
+;;; with data piped via stdin (no temp files, no command injection).
 
 (library (std crypto digest)
   (export
@@ -11,38 +15,45 @@
 
   (import (chezscheme))
 
-  (define (compute-digest algo data)
-    ;; data can be string or bytevector
-    (let* ([input (if (bytevector? data) data (string->utf8 data))]
-           [algo-name (case algo
-                        [(md5) "md5"]
-                        [(sha1) "sha1"]
-                        [(sha224) "sha224"]
-                        [(sha256) "sha256"]
-                        [(sha384) "sha384"]
-                        [(sha512) "sha512"]
-                        [else (error 'compute-digest "unknown algorithm" algo)])])
-      ;; Pipe data via stdin — no temp files, no user input in command string
-      (let-values ([(to-stdin from-stdout from-stderr pid)
-                    (open-process-ports
-                      (string-append "openssl dgst -" algo-name " -hex")
-                      (buffer-mode block)
-                      #f)])  ;; #f = binary mode for stdin
-        (put-bytevector to-stdin input)
-        (close-port to-stdin)
-        (let* ([stdout-transcoded (transcoded-port from-stdout (native-transcoder))]
-               [output (get-string-all stdout-transcoded)])
-          (close-port stdout-transcoded)
-          (close-port from-stderr)
-          ;; openssl output: "(stdin)= hexstring\n"
-          (let ([eq-pos (let lp ([i 0])
-                          (cond
-                            [(>= i (string-length output)) #f]
-                            [(char=? (string-ref output i) #\=) i]
-                            [else (lp (+ i 1))]))])
-            (if eq-pos
-              (string-trim (substring output (+ eq-pos 1) (string-length output)))
-              (string-trim output)))))))
+  (define hex-chars "0123456789abcdef")
+
+  (define (bv->hex bv)
+    (let* ([n (bytevector-length bv)]
+           [out (make-string (fx* 2 n))])
+      (let loop ([i 0])
+        (when (fx< i n)
+          (let ([b (bytevector-u8-ref bv i)])
+            (string-set! out (fx* 2 i)
+              (string-ref hex-chars (fxarithmetic-shift-right b 4)))
+            (string-set! out (fx+ (fx* 2 i) 1)
+              (string-ref hex-chars (fxand b #xf))))
+          (loop (fx+ i 1))))
+      out))
+
+  (define (->bv data)
+    (if (bytevector? data) data (string->utf8 data)))
+
+  (define (compute-digest-openssl algo-name data)
+    ;; Stdin pipe — no temp files, no user input in command string.
+    (let-values ([(to-stdin from-stdout from-stderr pid)
+                  (open-process-ports
+                    (string-append "openssl dgst -" algo-name " -hex")
+                    (buffer-mode block)
+                    #f)])
+      (put-bytevector to-stdin (->bv data))
+      (close-port to-stdin)
+      (let* ([stdout-transcoded (transcoded-port from-stdout (native-transcoder))]
+             [output (get-string-all stdout-transcoded)])
+        (close-port stdout-transcoded)
+        (close-port from-stderr)
+        (let ([eq-pos (let lp ([i 0])
+                        (cond
+                          [(>= i (string-length output)) #f]
+                          [(char=? (string-ref output i) #\=) i]
+                          [else (lp (+ i 1))]))])
+          (if eq-pos
+            (string-trim (substring output (+ eq-pos 1) (string-length output)))
+            (string-trim output))))))
 
   (define (string-trim str)
     (let* ([len (string-length str)]
@@ -74,17 +85,16 @@
       [else 0]))
 
   ;; Public API: returns hex string
-  (define (md5 data) (compute-digest 'md5 data))
-  (define (sha1 data) (compute-digest 'sha1 data))
-  (define (sha224 data) (compute-digest 'sha224 data))
-  (define (sha256 data) (compute-digest 'sha256 data))
-  (define (sha384 data) (compute-digest 'sha384 data))
-  (define (sha512 data) (compute-digest 'sha512 data))
+  (define (sha1 data)   (bv->hex (sha1-bytevector   (->bv data))))
+  (define (sha256 data) (bv->hex (sha256-bytevector (->bv data))))
 
-  (define (digest->hex-string digest-result)
-    digest-result)  ;; already a hex string
+  (define (md5 data)    (compute-digest-openssl "md5"    data))
+  (define (sha224 data) (compute-digest-openssl "sha224" data))
+  (define (sha384 data) (compute-digest-openssl "sha384" data))
+  (define (sha512 data) (compute-digest-openssl "sha512" data))
 
+  (define (digest->hex-string digest-result) digest-result)
   (define (digest->u8vector digest-result)
     (hex-string->u8vector digest-result))
 
-  ) ;; end library
+  )

@@ -63,40 +63,30 @@
   (import (chezscheme))
 
   ;; ========== Content Hashing ==========
-  ;; Default: SHA-256 via Chez's built-in bytevector-hash + double-hashing.
-  ;; If (std crypto hash) is available, uses real SHA-256.
+  ;; SHA-256 via Chez core sha256-bytevector (Phase 67, Round 12).
   ;; *content-hasher* parameter allows plugging in a custom hasher.
 
   (define *content-hasher* (make-parameter #f)) ;; #f = use built-in
 
-  ;; Try to load real SHA-256 from (std crypto hash) at init time.
-  (define sha256-proc
-    (guard (e [#t #f])
-      (let ([env (environment '(std crypto hash))])
-        (eval 'sha256-bytevector env))))
+  (define hex-chars "0123456789abcdef")
+
+  (define (bv->hex bv)
+    (let* ([n (bytevector-length bv)]
+           [out (make-string (fx* 2 n))])
+      (let loop ([i 0])
+        (when (fx< i n)
+          (let ([b (bytevector-u8-ref bv i)])
+            (string-set! out (fx* 2 i)
+              (string-ref hex-chars (fxarithmetic-shift-right b 4)))
+            (string-set! out (fx+ (fx* 2 i) 1)
+              (string-ref hex-chars (fxand b #xf))))
+          (loop (fx+ i 1))))
+      out))
 
   (define (sha256-hash bv)
-    ;; Real SHA-256 producing hex string.
-    ;; Falls back to strong FNV-1a if crypto module not available.
-    (if sha256-proc
-      (sha256-proc bv)
-      (fnv1a-hash bv)))
-
-  (define (fnv1a-hash bv)
-    ;; FNV-1a 64-bit over a bytevector. Returns hex string.
-    ;; Used as fallback when SHA-256 is not available.
-    (let ([basis #xcbf29ce484222325]
-          [prime #x100000001b3]
-          [mask  #xffffffffffffffff])
-      (let loop ([i 0] [h basis])
-        (if (= i (bytevector-length bv))
-            (let ([hex (number->string h 16)])
-              ;; Zero-pad to 16 hex chars
-              (string-append (make-string (max 0 (- 16 (string-length hex))) #\0) hex))
-            (loop (+ i 1)
-                  (bitwise-and
-                    (* (bitwise-xor h (bytevector-u8-ref bv i)) prime)
-                    mask))))))
+    ;; Real SHA-256 producing hex string.  No more eval/environment dance —
+    ;; the prim is in (chezscheme) core.
+    (bv->hex (sha256-bytevector bv)))
 
   (define (str->bv str)
     ;; String to bytevector using char codes.

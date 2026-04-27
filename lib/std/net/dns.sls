@@ -136,12 +136,9 @@
                                   (subbytevector bv (+ pos 1) (+ pos 1 label-len)))])
                  (loop (+ pos 1 label-len) (cons label-str labels) jumped? end-pos hops)))])))))
 
-  ;; Helper: extract sub-bytevector
+  ;; Helper: extract sub-bytevector — Chez core bytevector-slice (Phase 67).
   (define (subbytevector bv start end)
-    (let* ([len (- end start)]
-           [out (make-bytevector len)])
-      (bytevector-copy! bv start out 0 len)
-      out))
+    (bytevector-slice bv start end))
 
   ;; Helper: join strings with separator
   (define (string-join strs sep)

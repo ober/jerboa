@@ -93,40 +93,23 @@
                (loop (ash m -1) (+ n 1)
                      (if (odd? m) (cons n acc) acc))))])))
 
-  ;; Inspect a condition
+  ;; Inspect a condition.
+  ;; Uses Chez core record->alist (Phase 72) so inherited fields surface
+  ;; parents-first without manual rtd walking.
   (define (inspect-condition c)
     (unless (condition? c)
       (error 'inspect-condition "not a condition" c))
-    (let ([components (simple-conditions c)])
-      (map (lambda (sc)
-             (let ([rtd (record-rtd sc)])
-               `(,(record-type-name rtd)
-                 ,@(let loop ([flds (csv7:record-type-field-names rtd)]
-                              [i 0]
-                              [acc '()])
-                     (if (null? flds)
-                         (reverse acc)
-                         (loop (cdr flds) (+ i 1)
-                               (cons (cons (car flds)
-                                           ((csv7:record-field-accessor rtd i) sc))
-                                     acc)))))))
-           components)))
+    (map (lambda (sc)
+           (cons (record-type-name (record-rtd sc))
+                 (record->alist sc)))
+         (simple-conditions c)))
 
   ;; Inspect a record
   (define (inspect-record rec)
     (unless (record? rec)
       (error 'inspect-record "not a record" rec))
-    (let ([rtd (record-rtd rec)])
-      `((type . ,(record-type-name rtd))
-        (fields . ,(let loop ([flds (csv7:record-type-field-names rtd)]
-                              [i 0]
-                              [acc '()])
-                     (if (null? flds)
-                         (reverse acc)
-                         (loop (cdr flds) (+ i 1)
-                               (cons (cons (car flds)
-                                           ((csv7:record-field-accessor rtd i) rec))
-                                     acc))))))))
+    `((type   . ,(record-type-name (record-rtd rec)))
+      (fields . ,(record->alist rec))))
 
   ;; Object size in bytes (approximate)
   (define (object-size obj)

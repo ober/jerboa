@@ -83,17 +83,19 @@
       [(char<=? #\A c #\F) (+ 10 (- (char->integer c) (char->integer #\A)))]
       [else 0]))
 
-  ;; ========== SHA-256 as bytevector ==========
+  ;; ========== SHA-256 ==========
+  ;;
+  ;; sha256-bytevector landed in Chez core (Phase 67, Round 12 — 2026-04-26),
+  ;; so we no longer round-trip through (std crypto digest) hex strings.
+
+  (define (->bv data)
+    (if (bytevector? data) data (string->utf8 data)))
 
   (define (sha256-bv data)
-    ;; Returns SHA-256 hash as a bytevector.
-    ;; (std crypto digest) sha256 returns a hex string.
-    (hex-string->bytevector (sha256 data)))
+    (sha256-bytevector (->bv data)))
 
   (define (sha256-hex data)
-    ;; Returns SHA-256 hash as a lowercase hex string.
-    (let ([h (sha256 data)])
-      (string-downcase h)))
+    (bytevector->hex (sha256-bv data)))
 
   ;; ========== HMAC-SHA256 ==========
 

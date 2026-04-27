@@ -11,38 +11,7 @@
 
   (import (chezscheme))
 
-  ;; ========== Base64 (self-contained for no external deps) ==========
-
-  (define *b64-chars*
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
-
-  (define (base64-encode bv)
-    ;; Encode a bytevector to a base64 string.
-    (let* ([len (bytevector-length bv)]
-           [out-len (* 4 (quotient (+ len 2) 3))]
-           [out (make-string out-len #\=)]
-           [b64 *b64-chars*])
-      (let loop ([i 0] [o 0])
-        (when (< i len)
-          (let* ([b0 (bytevector-u8-ref bv i)]
-                 [b1 (if (< (+ i 1) len) (bytevector-u8-ref bv (+ i 1)) 0)]
-                 [b2 (if (< (+ i 2) len) (bytevector-u8-ref bv (+ i 2)) 0)]
-                 [triple (bitwise-ior
-                           (bitwise-arithmetic-shift-left b0 16)
-                           (bitwise-arithmetic-shift-left b1 8)
-                           b2)])
-            (string-set! out o
-              (string-ref b64 (bitwise-and (bitwise-arithmetic-shift-right triple 18) #x3F)))
-            (string-set! out (+ o 1)
-              (string-ref b64 (bitwise-and (bitwise-arithmetic-shift-right triple 12) #x3F)))
-            (when (< (+ i 1) len)
-              (string-set! out (+ o 2)
-                (string-ref b64 (bitwise-and (bitwise-arithmetic-shift-right triple 6) #x3F))))
-            (when (< (+ i 2) len)
-              (string-set! out (+ o 3)
-                (string-ref b64 (bitwise-and triple #x3F))))
-            (loop (+ i 3) (+ o 4)))))
-      out))
+  ;; base64-encode comes from (chezscheme) core (Phase 66, Round 12).
 
   ;; ========== PLAIN mechanism (RFC 4616) ==========
 
