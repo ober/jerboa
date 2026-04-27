@@ -9,7 +9,7 @@
 #   - All common dependency repos cloned under /build/mine/
 #   - musl-gcc, build-essential, and all linking deps pre-installed
 #   - TUI deps: libvterm, libpcre2, pre-built Scintilla/Lexilla/Termbox archives
-#   - chez-scintilla, chez-pcre2, jerboa-shell repos
+#   - chez-scintilla, chez-pcre2 repos
 #
 # Downstream projects use this as their FROM image to skip the expensive
 # Chez double-build, Rust toolchain install, and repo cloning.
@@ -125,8 +125,7 @@ RUN git clone --depth 1 https://github.com/ober/gherkin.git && \
     git clone --depth 1 https://github.com/ober/jerboa-aws.git && \
     git clone --depth 1 https://github.com/ober/chez-fuse.git && \
     git clone --depth 1 https://github.com/ober/chez-scintilla.git && \
-    git clone --depth 1 https://github.com/ober/chez-pcre2.git && \
-    git clone --depth 1 https://github.com/ober/jerboa-shell.git
+    git clone --depth 1 https://github.com/ober/chez-pcre2.git
 
 # ── TUI dependencies: libvterm, libpcre2, ncurses (static) ─────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -169,7 +168,6 @@ ENV CHEZ_FUSE_DIR=/build/mine/chez-fuse/lib
 ENV CHEZ_SCINTILLA_DIR=/build/mine/chez-scintilla/src
 ENV CHEZ_PCRE2_DIR=/build/mine/chez-pcre2
 ENV SCI_VENDOR_DIR=/build/sci-vendor
-ENV JSH_DIR=/build/mine/jerboa-shell/src
 
 # ── Smoke test ───────────────────────────────────────────────────────────────
 RUN scheme --version && \
