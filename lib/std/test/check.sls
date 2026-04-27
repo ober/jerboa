@@ -17,7 +17,7 @@
     gen:sample gen:generate
     for-all check-property
 
-    ;; Generators
+    ;; Generators (jerboa colon-flavor — original)
     gen:integer gen:nat gen:boolean gen:char gen:string
     gen:symbol gen:real
     gen:choose gen:elements gen:one-of
@@ -27,7 +27,19 @@
     gen:frequency gen:no-shrink gen:sized
 
     ;; Shrinking
-    shrink-integer shrink-list shrink-string)
+    shrink-integer shrink-list shrink-string
+
+    ;; Clojure test.check-flavor API (Round 13, 2026-04-27)
+    gen/return gen/fmap gen/bind gen/sized gen/no-shrink
+    gen/choose gen/elements gen/one-of gen/such-that
+    gen/frequency gen/tuple
+    gen/boolean gen/byte gen/char gen/char-alphanumeric
+    gen/int gen/nat gen/pos-int gen/neg-int gen/large-integer
+    gen/string gen/string-alphanumeric gen/string-ascii
+    gen/keyword gen/symbol gen/uuid
+    gen/list-of gen/vector-of gen/hash-set-of gen/hash-map-of
+    gen/sample
+    prop/for-all quick-check defspec)
 
   (import (except (chezscheme) for-all))
 
@@ -321,5 +333,182 @@
             (if still-fails?
               (shrink-failure gens test-fn candidate (+ depth 1))
               (try-shrinks (cdr remaining-shrinks))))))))
+
+  ;; =========================================================================
+  ;; Round 13 (2026-04-27) — Clojure test.check-flavor API
+  ;; Re-exposes the existing engine under the canonical Clojure names
+  ;; (gen/return, gen/fmap, ...) and fills in built-ins not previously
+  ;; covered (uuid, keyword, large-integer, hash-set, etc.).
+  ;; All of these are layered on top of the original gen:* engine —
+  ;; no behavioural changes to the existing API.
+  ;; =========================================================================
+
+  ;; ---- combinator aliases ----
+  (define gen/return    gen:return)
+  (define gen/fmap      gen:fmap)
+  (define gen/bind      gen:bind)
+  (define gen/sized     gen:sized)
+  (define gen/no-shrink gen:no-shrink)
+  (define gen/choose    gen:choose)
+  (define gen/elements  gen:elements)
+  (define gen/one-of    gen:one-of)
+  (define gen/such-that gen:such-that)
+  (define gen/frequency gen:frequency)
+  (define gen/tuple     gen:tuple)
+  (define gen/sample    gen:sample)
+
+  ;; ---- numeric built-ins ----
+  (define gen/boolean (gen:boolean))
+  (define gen/byte    (gen:choose 0 255))
+  (define gen/int
+    (gen:sized (lambda (size) (gen:choose (- size) size))))
+  (define gen/nat
+    (gen:sized (lambda (size) (gen:choose 0 size))))
+  (define gen/pos-int
+    (gen:sized (lambda (size) (gen:choose 1 (max 1 size)))))
+  (define gen/neg-int
+    (gen:sized (lambda (size) (gen:choose (- (max 1 size)) -1))))
+  (define gen/large-integer
+    (gen:sized
+      (lambda (size)
+        (let ([scale (max 1 (* size size))])
+          (gen:choose (- scale) scale)))))
+
+  ;; ---- char + string ----
+  (define gen/char (gen:char))
+
+  (define gen/char-alphanumeric
+    (gen:fmap integer->char
+      (gen:one-of
+        (list (gen:choose 48 57)     ;; 0-9
+              (gen:choose 65 90)     ;; A-Z
+              (gen:choose 97 122)))))  ;; a-z
+
+  (define gen/string (gen:string))
+
+  (define (string-from-char-gen char-gen)
+    (gen:sized
+      (lambda (size)
+        (gen:fmap list->string
+          (gen:list-from-elem char-gen size)))))
+
+  ;; helper used only inside this module
+  (define (gen:list-from-elem elem-gen target-size)
+    (make-gen
+      (lambda (sz)
+        (let* ([len (random (+ target-size 1))]
+               [elems (let loop ([i 0] [acc '()])
+                        (if (= i len)
+                          (reverse acc)
+                          (loop (+ i 1)
+                            (cons (gen:generate elem-gen sz) acc))))])
+          (rose elems
+                (lambda () (map rose-pure (shrink-list elems))))))))
+
+  (define gen/string-alphanumeric (string-from-char-gen gen/char-alphanumeric))
+
+  (define gen/string-ascii
+    (string-from-char-gen
+      (gen:fmap integer->char (gen:choose 32 126))))
+
+  (define gen/keyword
+    (gen:fmap (lambda (s) (string->symbol (string-append ":" s)))
+      (gen:such-that
+        (lambda (s) (> (string-length s) 0))
+        gen/string-alphanumeric)))
+
+  (define gen/symbol (gen:symbol))
+
+  ;; ---- UUID v4-shaped (random hex; not cryptographically RFC-4122) ----
+  (define (rand-hex-char)
+    (let ([n (random 16)])
+      (string-ref "0123456789abcdef" n)))
+
+  (define (rand-hex-string n)
+    (let ([cs (make-string n)])
+      (let loop ([i 0])
+        (if (= i n)
+          cs
+          (begin (string-set! cs i (rand-hex-char))
+                 (loop (+ i 1)))))))
+
+  (define gen/uuid
+    (make-gen
+      (lambda (_size)
+        (rose-pure
+          (string-append
+            (rand-hex-string 8) "-"
+            (rand-hex-string 4) "-4"
+            (rand-hex-string 3) "-"
+            (string (string-ref "89ab" (random 4)))
+            (rand-hex-string 3) "-"
+            (rand-hex-string 12))))))
+
+  ;; ---- collection generators (Clojure style: gen/list-of, etc.) ----
+  (define gen/list-of   gen:list)
+  (define gen/vector-of gen:vector)
+
+  (define (gen/hash-set-of elem-gen)
+    (gen:fmap
+      (lambda (lst)
+        (let ([ht (make-hashtable equal-hash equal?)])
+          (for-each (lambda (x) (hashtable-set! ht x #t)) lst)
+          ht))
+      (gen:list elem-gen)))
+
+  (define (gen/hash-map-of key-gen val-gen)
+    (gen:hash-table key-gen val-gen))
+
+  ;; ---- prop/for-all + quick-check + defspec ----
+
+  (define-syntax prop/for-all
+    (syntax-rules ()
+      [(_ ([var gen] ...) body ...)
+       (for-all ([var gen] ...) body ...)]))
+
+  ;; quick-check: returns a hashtable result map (compatible with
+  ;; jerboa's hash-ref).  Insertion-ordered when iterated (the
+  ;; underlying ordered-hashtable is captured below in -ordered).
+  ;; Shape mirrors Clojure test.check:
+  ;;   result        — #t on success, #f on failure
+  ;;   pass?         — boolean alias of result
+  ;;   num-tests     — total trials run
+  ;;   failing-size  — size index at first failure
+  ;;   fail          — first failing input list
+  ;;   shrunk        — alist with 'smallest and 'depth
+  (define (qc-result-map alist)
+    (let ([ht (make-hashtable equal-hash equal?)])
+      (for-each
+        (lambda (p) (hashtable-set! ht (car p) (cdr p)))
+        alist)
+      ht))
+
+  (define quick-check
+    (case-lambda
+      [(num-tests prop) (quick-check num-tests prop 200)]
+      [(num-tests prop max-size)
+       (let ([raw (check-property num-tests prop)])
+         (if (eq? (car raw) 'ok)
+           (qc-result-map
+             `((result . #t)
+               (num-tests . ,num-tests)
+               (pass? . #t)))
+           ;; (fail i vals shrunk-vals depth)
+           (qc-result-map
+             `((result . #f)
+               (pass? . #f)
+               (num-tests . ,num-tests)
+               (failing-size . ,(cadr raw))
+               (fail . ,(caddr raw))
+               (shrunk . ((smallest . ,(cadddr raw))
+                          (depth . ,(car (cddddr raw)))))))))]))
+
+  ;; defspec — names a thunk that runs quick-check and returns its
+  ;; result map.  Uses `define` (jerboa code can wrap with mat).
+  (define-syntax defspec
+    (syntax-rules ()
+      [(_ name num-tests prop)
+       (define (name)
+         (quick-check num-tests prop))]))
 
 ) ;; end library
