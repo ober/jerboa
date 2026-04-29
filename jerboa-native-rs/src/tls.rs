@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -17,6 +18,15 @@ use crate::panic::{ffi_wrap, set_last_error};
 enum TlsConn {
     Client(StreamOwned<ClientConnection, TcpStream>),
     Server(StreamOwned<ServerConnection, TcpStream>),
+}
+
+/// Per-connection entry: the connection state guarded by its own mutex,
+/// plus a cached raw fd. The cached fd lets us close (via shutdown(2))
+/// without acquiring either the global map lock or the per-conn lock,
+/// which is essential to break a blocked read from a watchdog thread.
+struct ConnEntry {
+    inner: Arc<Mutex<TlsConn>>,
+    fd: RawFd,
 }
 
 /// Opaque handle for a TLS server config (reused across accepts).
@@ -38,8 +48,21 @@ macro_rules! lazy_static_handles {
 }
 
 lazy_static_handles! {
-    conns: HashMap<u64, TlsConn>,
+    conns: HashMap<u64, ConnEntry>,
     server_ctxs: HashMap<u64, TlsServerCtx>,
+}
+
+/// Look up a connection's Arc<Mutex<>> without holding the global lock
+/// across the per-connection critical section. The caller can then lock
+/// the per-conn mutex for its I/O without blocking other handles.
+fn get_conn_arc(handle: u64) -> Option<Arc<Mutex<TlsConn>>> {
+    conns().lock().unwrap().get(&handle).map(|e| e.inner.clone())
+}
+
+/// Look up the cached fd for a handle without locking the per-conn mutex.
+/// Used by close (shutdown) and get_fd so a stuck I/O thread cannot block them.
+fn get_conn_fd(handle: u64) -> Option<RawFd> {
+    conns().lock().unwrap().get(&handle).map(|e| e.fd)
 }
 
 static NEXT_HANDLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -110,8 +133,12 @@ pub extern "C" fn jerboa_tls_connect(
         };
 
         let stream = StreamOwned::new(conn, tcp);
+        let fd = stream.get_ref().as_raw_fd();
         let handle = next_handle();
-        conns().lock().unwrap().insert(handle, TlsConn::Client(stream));
+        conns().lock().unwrap().insert(handle, ConnEntry {
+            inner: Arc::new(Mutex::new(TlsConn::Client(stream))),
+            fd,
+        });
         handle
     }) {
         Ok(h) => h,
@@ -188,8 +215,12 @@ pub extern "C" fn jerboa_tls_connect_pinned(
         };
 
         let stream = StreamOwned::new(conn, tcp);
+        let fd = stream.get_ref().as_raw_fd();
         let handle = next_handle();
-        conns().lock().unwrap().insert(handle, TlsConn::Client(stream));
+        conns().lock().unwrap().insert(handle, ConnEntry {
+            inner: Arc::new(Mutex::new(TlsConn::Client(stream))),
+            fd,
+        });
         handle
     }) {
         Ok(h) => h,
@@ -498,8 +529,12 @@ pub extern "C" fn jerboa_tls_accept(
         let tcp = unsafe { TcpStream::from_raw_fd(fd) };
 
         let stream = StreamOwned::new(conn, tcp);
+        let fd = stream.get_ref().as_raw_fd();
         let handle = next_handle();
-        conns().lock().unwrap().insert(handle, TlsConn::Server(stream));
+        conns().lock().unwrap().insert(handle, ConnEntry {
+            inner: Arc::new(Mutex::new(TlsConn::Server(stream))),
+            fd,
+        });
         handle
     }) {
         Ok(h) => h,
@@ -843,8 +878,12 @@ pub extern "C" fn jerboa_tls_connect_mtls(
         };
 
         let stream = StreamOwned::new(conn, tcp);
+        let fd = stream.get_ref().as_raw_fd();
         let handle = next_handle();
-        conns().lock().unwrap().insert(handle, TlsConn::Client(stream));
+        conns().lock().unwrap().insert(handle, ConnEntry {
+            inner: Arc::new(Mutex::new(TlsConn::Client(stream))),
+            fd,
+        });
         handle
     }) {
         Ok(h) => h,
@@ -927,8 +966,12 @@ pub extern "C" fn jerboa_tls_connect_mtls_mem(
         };
 
         let stream = StreamOwned::new(conn, tcp);
+        let fd = stream.get_ref().as_raw_fd();
         let handle = next_handle();
-        conns().lock().unwrap().insert(handle, TlsConn::Client(stream));
+        conns().lock().unwrap().insert(handle, ConnEntry {
+            inner: Arc::new(Mutex::new(TlsConn::Client(stream))),
+            fd,
+        });
         handle
     }) {
         Ok(h) => h,
@@ -945,6 +988,11 @@ pub extern "C" fn jerboa_tls_connect_mtls_mem(
 
 /// Read up to max_len bytes from a TLS connection.
 /// Returns bytes read (>0), 0 on EOF, -1 on error.
+///
+/// Locking: looks up the per-conn Arc<Mutex<>>, then RELEASES the global
+/// map lock before locking the per-conn mutex for the blocking read. This
+/// lets close() (and any other handle's I/O) make progress even while
+/// this read is blocked waiting for bytes.
 #[no_mangle]
 pub extern "C" fn jerboa_tls_read(
     handle: u64,
@@ -954,15 +1002,15 @@ pub extern "C" fn jerboa_tls_read(
     ffi_wrap(|| {
         if buf.is_null() { return -1; }
         let out = unsafe { std::slice::from_raw_parts_mut(buf, max_len) };
-        let mut map = conns().lock().unwrap();
-        let conn = match map.get_mut(&handle) {
-            Some(c) => c,
+        let arc = match get_conn_arc(handle) {
+            Some(a) => a,
             None => {
                 set_last_error("invalid TLS handle".to_string());
                 return -1;
             }
         };
-        let n = match conn {
+        let mut conn = arc.lock().unwrap();
+        let n = match *conn {
             TlsConn::Client(ref mut s) => s.read(out),
             TlsConn::Server(ref mut s) => s.read(out),
         };
@@ -989,15 +1037,15 @@ pub extern "C" fn jerboa_tls_write(
     ffi_wrap(|| {
         if buf.is_null() { return -1; }
         let data = unsafe { std::slice::from_raw_parts(buf, len) };
-        let mut map = conns().lock().unwrap();
-        let conn = match map.get_mut(&handle) {
-            Some(c) => c,
+        let arc = match get_conn_arc(handle) {
+            Some(a) => a,
             None => {
                 set_last_error("invalid TLS handle".to_string());
                 return -1;
             }
         };
-        let n = match conn {
+        let mut conn = arc.lock().unwrap();
+        let n = match *conn {
             TlsConn::Client(ref mut s) => s.write(data),
             TlsConn::Server(ref mut s) => s.write(data),
         };
@@ -1016,12 +1064,12 @@ pub extern "C" fn jerboa_tls_write(
 #[no_mangle]
 pub extern "C" fn jerboa_tls_flush(handle: u64) -> i32 {
     ffi_wrap(|| {
-        let mut map = conns().lock().unwrap();
-        let conn = match map.get_mut(&handle) {
-            Some(c) => c,
+        let arc = match get_conn_arc(handle) {
+            Some(a) => a,
             None => return -1,
         };
-        let result = match conn {
+        let mut conn = arc.lock().unwrap();
+        let result = match *conn {
             TlsConn::Client(ref mut s) => s.flush(),
             TlsConn::Server(ref mut s) => s.flush(),
         };
@@ -1036,8 +1084,29 @@ pub extern "C" fn jerboa_tls_flush(handle: u64) -> i32 {
 }
 
 /// Close and free a TLS connection.
+///
+/// Two-step shutdown to avoid deadlock if another thread is currently
+/// blocked in a TLS read/write on this handle:
+///
+/// 1. Look up the cached fd (briefly takes the global map lock; the
+///    per-conn mutex may be held by the blocked thread, but we don't
+///    touch it).
+/// 2. Call shutdown(2) on the underlying socket. This breaks any pending
+///    blocking read/write with EPIPE/ECONNRESET on the I/O thread,
+///    causing it to release the per-conn mutex.
+/// 3. Remove the entry from the map. The Arc<Mutex<>> is dropped when
+///    the last holder (the I/O thread, if any) releases it.
 #[no_mangle]
 pub extern "C" fn jerboa_tls_close(handle: u64) {
+    let fd = get_conn_fd(handle);
+    if let Some(fd) = fd {
+        // SHUT_RDWR aborts any pending blocking I/O on this socket.
+        // Safe: fd is still owned by the StreamOwned inside the Arc,
+        // which we release immediately below by removing from the map.
+        // Even if the I/O thread is mid-read, shutdown is documented to
+        // be safe to call concurrently with read/write.
+        unsafe { libc::shutdown(fd, libc::SHUT_RDWR); }
+    }
     let _ = conns().lock().unwrap().remove(&handle);
 }
 
@@ -1052,12 +1121,12 @@ pub extern "C" fn jerboa_tls_server_free(handle: u64) {
 #[no_mangle]
 pub extern "C" fn jerboa_tls_set_nonblock(handle: u64, nonblock: i32) -> i32 {
     ffi_wrap(|| {
-        let mut map = conns().lock().unwrap();
-        let conn = match map.get_mut(&handle) {
-            Some(c) => c,
+        let arc = match get_conn_arc(handle) {
+            Some(a) => a,
             None => return -1,
         };
-        let tcp = match conn {
+        let conn = arc.lock().unwrap();
+        let tcp = match *conn {
             TlsConn::Client(ref s) => s.get_ref(),
             TlsConn::Server(ref s) => s.get_ref(),
         };
@@ -1073,13 +1142,14 @@ pub extern "C" fn jerboa_tls_set_nonblock(handle: u64, nonblock: i32) -> i32 {
 
 /// Get the raw fd from a TLS connection (for poll/select).
 /// Returns fd (>=0) or -1 on error.
+///
+/// Reads the cached fd without touching the per-conn mutex, so this
+/// works even if an I/O thread is currently holding the per-conn lock
+/// in a blocking read.
 #[no_mangle]
 pub extern "C" fn jerboa_tls_get_fd(handle: u64) -> i32 {
-    use std::os::unix::io::AsRawFd;
-    let map = conns().lock().unwrap();
-    match map.get(&handle) {
-        Some(TlsConn::Client(ref s)) => s.get_ref().as_raw_fd(),
-        Some(TlsConn::Server(ref s)) => s.get_ref().as_raw_fd(),
+    match get_conn_fd(handle) {
+        Some(fd) => fd,
         None => -1,
     }
 }
