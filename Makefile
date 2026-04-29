@@ -7,13 +7,14 @@ CHEZ_EXT_LIBDIRS = $(CHEZ_EXT_DIR)/chez-https/src:$(CHEZ_EXT_DIR)/chez-ssl/src:$
 # Shared object paths for legacy FFI-based chez-* libraries
 CHEZ_EXT_LDPATH = $(CHEZ_EXT_DIR)/chez-ssl:$(CHEZ_EXT_DIR)/chez-zlib:$(CHEZ_EXT_DIR)/chez-pcre2:$(CHEZ_EXT_DIR)/chez-leveldb:$(CHEZ_EXT_DIR)/chez-epoll:$(CHEZ_EXT_DIR)/chez-inotify:$(CHEZ_EXT_DIR)/chez-crypto:$(CHEZ_EXT_DIR)/chez-sqlite:$(CHEZ_EXT_DIR)/chez-postgresql
 
-.PHONY: help build test test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded test-features test-wrappers test-phase4a test-phase4b test-phase4c test-phase4d test-phase4e test-phase4f test-phase5 test-phase5e test-phase6 test-phase7 test-phase8 test-functional test-repl test-security test-native test-gaps native clean-native audit-native clean fuzz fuzz-smoke fuzz-deep fuzz-reader-fuzz fuzz-json-fuzz fuzz-http2-fuzz fuzz-websocket-fuzz fuzz-dns-fuzz fuzz-pregexp-fuzz fuzz-csv-fuzz fuzz-base64-fuzz fuzz-hex-fuzz fuzz-uri-fuzz fuzz-format-fuzz fuzz-router-fuzz fuzz-sandbox-fuzz test-rawstring test-regex test-rx test-peg test-regex-all check-docs check-docs-strict docker-build docker-push
+.PHONY: help build binary test test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded test-features test-wrappers test-phase4a test-phase4b test-phase4c test-phase4d test-phase4e test-phase4f test-phase5 test-phase5e test-phase6 test-phase7 test-phase8 test-functional test-repl test-security test-native test-gaps native clean-native audit-native clean fuzz fuzz-smoke fuzz-deep fuzz-reader-fuzz fuzz-json-fuzz fuzz-http2-fuzz fuzz-websocket-fuzz fuzz-dns-fuzz fuzz-pregexp-fuzz fuzz-csv-fuzz fuzz-base64-fuzz fuzz-hex-fuzz fuzz-uri-fuzz fuzz-format-fuzz fuzz-router-fuzz fuzz-sandbox-fuzz test-rawstring test-regex test-rx test-peg test-regex-all check-docs check-docs-strict docker-build docker-push
 
 help:
 	@echo "Usage: make <target>"
 	@echo ""
 	@echo "Build:"
 	@echo "  build            Compile all Jerboa libraries"
+	@echo "  binary           Build a self-contained jerboa-bin binary (FreeBSD/Linux/macOS)"
 	@echo "  native           Build Rust native library"
 	@echo "  clean            Remove compiled .so and .wpo artifacts"
 	@echo "  clean-native     Remove Rust build artifacts"
@@ -70,6 +71,14 @@ help:
 
 build:
 	$(SCHEME) --libdirs $(LIBDIRS) --script support/build.ss
+
+# Build a self-contained Jerboa binary that bundles petite.boot, scheme.boot,
+# and a WPO-compiled entry program. Output: ./jerboa-bin
+# Override entry script with BINARY_ENTRY=path/to/script.ss
+BINARY_ENTRY ?= support/binary-entry.ss
+BINARY_OUTPUT ?= jerboa-bin
+binary: build
+	SCHEME=$(SCHEME) support/build-binary.sh $(BINARY_ENTRY) $(BINARY_OUTPUT)
 
 test: test-reader test-core test-runtime test-stdlib test-ffi test-modules test-expanded test-regex-all
 

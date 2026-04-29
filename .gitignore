@@ -7,6 +7,11 @@
 \#*
 .#*
 
+# `make binary` outputs
+/jerboa-bin
+/jerboa-bin-main.c
+/jerboa-bin.wp.so
+
 # Rust build artifacts
 jerboa-native-rs/target/
 
