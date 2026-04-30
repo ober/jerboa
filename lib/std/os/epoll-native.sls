@@ -17,8 +17,8 @@
   (import (chezscheme))
 
   (define _native-loaded
-    ;; In static builds (JEMACS_STATIC=1), symbols are pre-registered via Sforeign_symbol.
-    (let ([static? (let ([v (getenv "JEMACS_STATIC")]) (and v (not (string=? v "")) (not (string=? v "0"))))])
+    ;; In static builds (JERBOA_STATIC=1), symbols are pre-registered via Sforeign_symbol.
+    (let ([static? (let ([v (getenv "JERBOA_STATIC")]) (and v (not (string=? v "")) (not (string=? v "0"))))])
       (if static?
           #t
           (or (guard (e [#t #f]) (load-shared-object "libjerboa_native.so") #t)

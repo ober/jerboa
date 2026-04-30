@@ -443,7 +443,7 @@ static const char *write_program_tmpfile(void) {
 
 int main(int argc, const char *argv[]) {
     /* Signal stdlib modules to skip (load-shared-object ...) calls */
-    putenv("JEMACS_STATIC=1");
+    putenv("JERBOA_STATIC=1");
     Sscheme_init(NULL);
     Sregister_boot_file_bytes("petite", (void *)petite_boot_data, petite_boot_size);
     Sregister_boot_file_bytes("scheme", (void *)scheme_boot_data, scheme_boot_size);

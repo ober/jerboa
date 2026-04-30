@@ -732,7 +732,7 @@ curl localhost:8080/api/stats
 - [x] 3.1 **Static musl binary** — `make edge-static` produces a fully static
     ELF via `docker run jerboa21/jerboa` (musl Chez + Rust toolchain + WPO).
     **Verified: 12MB, zero runtime dependencies.**  All native FFI symbols
-    registered via `Sforeign_symbol`; `JEMACS_STATIC=1` auto-set at startup
+    registered via `Sforeign_symbol`; `JERBOA_STATIC=1` auto-set at startup
     to bypass `load-shared-object` calls.  Deploy with `scp edge host:/usr/local/bin/`.
 
 - [x] 3.2 **TLS termination** — Optional `EDGE_TLS_CERT` / `EDGE_TLS_KEY`

@@ -1355,7 +1355,7 @@
 ;; ================================================================
 
 (def _libc-loaded
-  (let ((v (getenv "JEMACS_STATIC")))
+  (let ((v (getenv "JERBOA_STATIC")))
     (if (and v (not (string=? v "")) (not (string=? v "0")))
         #f
         (load-shared-object #f))))
