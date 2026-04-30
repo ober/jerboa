@@ -1,0 +1,18 @@
+# Compiled Chez Scheme artifacts — must be rebuilt from source inside the
+# image so they match the in-image Chez (10.4-pre-release) and not whatever
+# version happened to be on the host. Otherwise stale .so files baked from a
+# previous source revision can mask source changes (e.g. an env-var rename
+# that's already applied to .sls files but not yet recompiled into .so).
+*.so
+*.wpo
+
+# Build artifacts and caches that shouldn't be copied into the image
+target/
+.cargo/
+*.log
+*.tmp
+
+# VCS metadata (Dockerfile uses COPY of specific paths, not .git, but be
+# explicit so a future global COPY doesn't pull it in)
+.git/
+.gitignore
