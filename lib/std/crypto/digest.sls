@@ -1,19 +1,21 @@
 #!chezscheme
-;;; :std/crypto/digest -- Cryptographic hash functions
+;;; (std crypto digest) — hex digest helpers
 ;;;
-;;; SHA-1 and SHA-256 use Chez core sha1-bytevector / sha256-bytevector
-;;; (Phase 67, Round 12 — landed 2026-04-26 in ChezScheme).  No process
-;;; spawn, no shell, no openssl dependency for those two.
-;;;
-;;; MD5, SHA-224, SHA-384, SHA-512 still shell out to `openssl dgst`
-;;; with data piped via stdin (no temp files, no command injection).
+;;; Local override of upstream jerboa's (std crypto digest), which references
+;;; Chez core prims `sha1-bytevector` and `sha256-bytevector` introduced in
+;;; Round 12 Phase 67. Stock Chez Scheme 10.3 doesn't ship them, so this
+;;; copy delegates to (std crypto native-rust) — the Rust ring-backed
+;;; bindings already used elsewhere in jerboa-shell — for SHA-1/2 family
+;;; digests. MD5 and SHA-224 still shell out to `openssl dgst` (no Rust
+;;; binding for those).
 
 (library (std crypto digest)
   (export
     md5 sha1 sha224 sha256 sha384 sha512
     digest->hex-string digest->u8vector)
 
-  (import (chezscheme))
+  (import (chezscheme)
+          (std crypto native-rust))
 
   (define hex-chars "0123456789abcdef")
 
@@ -84,14 +86,15 @@
       [(char<=? #\A c #\F) (+ 10 (- (char->integer c) (char->integer #\A)))]
       [else 0]))
 
-  ;; Public API: returns hex string
-  (define (sha1 data)   (bv->hex (sha1-bytevector   (->bv data))))
-  (define (sha256 data) (bv->hex (sha256-bytevector (->bv data))))
+  ;; SHA family via Rust ring bindings (no Chez prim, no shell-out).
+  (define (sha1   data) (bv->hex (rust-sha1   (->bv data))))
+  (define (sha256 data) (bv->hex (rust-sha256 (->bv data))))
+  (define (sha384 data) (bv->hex (rust-sha384 (->bv data))))
+  (define (sha512 data) (bv->hex (rust-sha512 (->bv data))))
 
-  (define (md5 data)    (compute-digest-openssl "md5"    data))
+  ;; MD5 and SHA-224 still shell out (no Rust binding).
+  (define (md5    data) (compute-digest-openssl "md5"    data))
   (define (sha224 data) (compute-digest-openssl "sha224" data))
-  (define (sha384 data) (compute-digest-openssl "sha384" data))
-  (define (sha512 data) (compute-digest-openssl "sha512" data))
 
   (define (digest->hex-string digest-result) digest-result)
   (define (digest->u8vector digest-result)

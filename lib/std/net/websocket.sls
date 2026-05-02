@@ -27,9 +27,6 @@
           (std crypto native-rust)
           (std text base64))
 
-  ;; sha1-bytevector is now in (chezscheme) core (Phase 67, Round 12).
-  ;; Falls back to FFI rust-sha1 only when the prim isn't available.
-
   ;;; ========== Opcode constants ==========
   (define ws-opcode-continuation #x0)
   (define ws-opcode-text         #x1)
@@ -233,7 +230,7 @@
   ;; Per RFC 6455: SHA1(key + GUID) then base64-encode.
   (define (ws-handshake-accept key)
     (let* ([combined (string->utf8 (string-append key ws-guid))]
-           [hash-bv (sha1-bytevector combined)])
+           [hash-bv (rust-sha1 combined)])
       (u8vector->base64-string hash-bv)))
 
   ;; Generate a random 16-byte WebSocket key (base64-encoded).
