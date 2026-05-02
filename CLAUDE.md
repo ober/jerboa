@@ -1,6 +1,11 @@
 ## Pre-commit Requirements
 
-**ALWAYS** run `make docker-build` and ensure it succeeds **before** committing any code to this repository. The Docker image must build cleanly against the full musl-static release pipeline. Do not commit if `make docker-build` fails.
+**ALWAYS** run a clean build **before** committing any code to this repository. Pick the right target for the *current* platform:
+
+- **Linux**: run `make docker-build` — the Docker image must build cleanly against the full musl-static release pipeline.
+- **macOS / FreeBSD / other**: run `make binary` — the native local build must succeed. Do **not** run `make docker-build` here; Docker on non-Linux hosts is slow and not the canonical pipeline for those platforms.
+
+Do not commit if the build fails.
 
 ## Act First, Read Less
 
