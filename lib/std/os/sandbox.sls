@@ -116,34 +116,46 @@
          (guard (e [#t #f])
            (foreign-entry? "sandbox_init"))))
 
-  ;; Named profile map
-  (define (named-profile-string sym)
+  ;; Named profile map. Apple's legacy `kSBXProfile*` named profiles
+  ;; were deprecated in macOS 10.7 and no longer load on modern macOS,
+  ;; so we map symbols to equivalent SBPL strings.
+  (define (named-profile-sbpl sym)
     (case sym
-      [(pure-computation)          "kSBXProfilePureComputation"]
-      [(no-write)                  "kSBXProfileNoWrite"]
-      [(no-write-except-temporary) "kSBXProfileNoWriteExceptTemporary"]
-      [(no-internet)               "kSBXProfileNoInternet"]
-      [(no-network)                "kSBXProfileNoNetwork"]
+      [(pure-computation)
+       "(version 1)(deny default)(allow mach-lookup)(allow signal)(allow sysctl-read)"]
+      [(no-write)
+       "(version 1)(allow default)(deny file-write*)"]
+      [(no-write-except-temporary)
+       (string-append
+         "(version 1)(allow default)(deny file-write*)"
+         "(allow file-write* (subpath \"/tmp\") (subpath \"/private/tmp\")"
+         " (subpath \"/var/folders\") (subpath \"/private/var/folders\"))")]
+      [(no-internet)
+       "(version 1)(allow default)(deny network-outbound (remote ip))"]
+      [(no-network)
+       "(version 1)(allow default)(deny network*)"]
       [else #f]))
 
   (define (apply-seatbelt! profile-spec)
     ;; Apply a Seatbelt profile. profile-spec is a symbol or SBPL string.
+    ;; Always uses SBPL (flags = 0) since the legacy named-profile path
+    ;; is broken on modern macOS.
     (let ([errptr (foreign-alloc 8)])
       (foreign-set! 'void* errptr 0 0)
       (dynamic-wind
         (lambda () (void))
         (lambda ()
-          (let ([rc (if (string? profile-spec)
-                      ;; Raw SBPL string — flags = 0
-                      (c-sandbox-init profile-spec 0 errptr)
-                      ;; Named profile — flags = SANDBOX_NAMED
-                      (let ([name (named-profile-string profile-spec)])
-                        (if name
-                          (c-sandbox-init name SANDBOX_NAMED errptr)
-                          (begin
-                            (display "sandbox: unknown Seatbelt profile\n"
-                                     (current-error-port))
-                            -1))))])
+          (let ([rc (cond
+                      [(string? profile-spec)
+                       (c-sandbox-init profile-spec 0 errptr)]
+                      [else
+                       (let ([sbpl (named-profile-sbpl profile-spec)])
+                         (if sbpl
+                           (c-sandbox-init sbpl 0 errptr)
+                           (begin
+                             (display "sandbox: unknown Seatbelt profile\n"
+                                      (current-error-port))
+                             -1)))])])
             (when (< rc 0)
               (let ([errmsg (foreign-ref 'void* errptr 0)])
                 (unless (= errmsg 0)

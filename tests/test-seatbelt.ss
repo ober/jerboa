@@ -92,6 +92,77 @@
   (string? (seatbelt-no-write-profile))
   #t)
 
+;; ========== Cage profile builder ==========
+
+(printf "~%-- Cage profile builder --~%")
+
+(define (contains? haystack needle)
+  (let ([h-len (string-length haystack)]
+        [n-len (string-length needle)])
+    (let loop ([i 0])
+      (cond
+        [(> (+ i n-len) h-len) #f]
+        [(string=? (substring haystack i (+ i n-len)) needle) #t]
+        [else (loop (+ i 1))]))))
+
+(test "seatbelt-cage-profile returns string"
+  (string? (seatbelt-cage-profile 'read-write: '("/tmp")))
+  #t)
+
+(test "seatbelt-cage-profile starts with (version 1)"
+  (let ([p (seatbelt-cage-profile 'read-write: '("/tmp"))])
+    (and (string? p)
+         (>= (string-length p) 11)
+         (string=? (substring p 0 11) "(version 1)")))
+  #t)
+
+(test "seatbelt-cage-profile denies by default"
+  (contains? (seatbelt-cage-profile 'read-write: '("/tmp"))
+             "(deny default)")
+  #t)
+
+(test "seatbelt-cage-profile includes read-write path"
+  (contains? (seatbelt-cage-profile 'read-write: '("/tmp"))
+             "/tmp")
+  #t)
+
+(test "seatbelt-cage-profile read-write grants both read and write"
+  (let ([p (seatbelt-cage-profile 'read-write: '("/tmp"))])
+    (and (contains? p "file-read*")
+         (contains? p "file-write*")))
+  #t)
+
+(test "seatbelt-cage-profile network: #t allows network*"
+  (contains? (seatbelt-cage-profile 'read-only: '("/usr") 'network: #t)
+             "(allow network*)")
+  #t)
+
+(test "seatbelt-cage-profile network: #f omits network*"
+  (not (contains? (seatbelt-cage-profile 'read-only: '("/usr") 'network: #f)
+                  "(allow network*)"))
+  #t)
+
+(test "seatbelt-cage-profile execute: adds process-exec*"
+  (contains? (seatbelt-cage-profile
+               'read-only: '("/usr/lib")
+               'execute:   '("/usr/bin"))
+             "process-exec*")
+  #t)
+
+(test "seatbelt-cage-profile rejects unknown keyword"
+  (guard (exn [#t #t])
+    (seatbelt-cage-profile 'bogus: '("/tmp"))
+    #f)
+  #t)
+
+(test "seatbelt-macos-system-read-paths is a list"
+  (list? seatbelt-macos-system-read-paths)
+  #t)
+
+(test "seatbelt-macos-system-execute-paths is a list"
+  (list? seatbelt-macos-system-execute-paths)
+  #t)
+
 ;; ========== Error handling for non-macOS ==========
 
 (printf "~%-- Error handling --~%")

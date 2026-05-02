@@ -204,9 +204,9 @@
     (cond
       [(eq? spec #f) #f]
       [(seccomp-filter? spec) spec]
-      [(eq? spec 'compute-only) (compute-only-filter)]
-      [(eq? spec 'io-only) (io-only-filter)]
-      [(eq? spec 'network-server) (network-server-filter)]
+      [(eq? spec 'compute-only) compute-only-filter]
+      [(eq? spec 'io-only) io-only-filter]
+      [(eq? spec 'network-server) network-server-filter]
       [else (error 'run-safe
               "invalid seccomp spec; expected #f, 'compute-only, 'io-only, 'network-server, or seccomp-filter"
               spec)]))

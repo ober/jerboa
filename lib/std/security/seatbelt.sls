@@ -5,12 +5,13 @@
 ;;; Profiles restrict filesystem, network, and process operations.
 ;;; Once applied, restrictions are IRREVERSIBLE for the process lifetime.
 ;;;
-;;; macOS provides built-in named profiles:
-;;;   kSBXProfilePureComputation — no I/O at all
-;;;   kSBXProfileNoWrite — read-only filesystem
-;;;   kSBXProfileNoWriteExceptTemporary — writes only to $TMPDIR
-;;;   kSBXProfileNoInternet — no outbound network
-;;;   kSBXProfileNoNetwork — no network at all (including local)
+;;; Named profile symbols (mapped to equivalent SBPL since the
+;;; legacy kSBXProfile* names were removed in modern macOS):
+;;;   pure-computation — no I/O at all
+;;;   no-write — read-only filesystem
+;;;   no-write-except-temporary — writes only to $TMPDIR / /tmp
+;;;   no-internet — no outbound IP network
+;;;   no-network — no network at all (including local)
 ;;;
 ;;; Custom profiles use SBPL (Sandbox Profile Language), e.g.:
 ;;;   (version 1)(deny default)(allow file-read* (subpath "/usr/lib"))
@@ -40,6 +41,11 @@
     seatbelt-read-only-profile
     seatbelt-no-network-profile
     seatbelt-no-write-profile
+
+    ;; Path-based confinement profile (Landlock-equivalent)
+    seatbelt-cage-profile
+    seatbelt-macos-system-read-paths
+    seatbelt-macos-system-execute-paths
 
     ;; Named profile symbols
     ;; 'pure-computation, 'no-write, 'no-write-except-temporary,
@@ -98,14 +104,39 @@
              p))))
 
   ;; ========== Named Profile Map ==========
+  ;;
+  ;; Apple's `kSBXProfile*` named profiles were deprecated in macOS 10.7
+  ;; and no longer load on modern macOS (sandbox_init returns "profile
+  ;; not found"). We map the same symbols to equivalent SBPL strings
+  ;; so the API keeps working across versions.
 
-  (define (named-profile-string sym)
+  (define (named-profile-sbpl sym)
     (case sym
-      [(pure-computation)          "kSBXProfilePureComputation"]
-      [(no-write)                  "kSBXProfileNoWrite"]
-      [(no-write-except-temporary) "kSBXProfileNoWriteExceptTemporary"]
-      [(no-internet)               "kSBXProfileNoInternet"]
-      [(no-network)                "kSBXProfileNoNetwork"]
+      [(pure-computation)
+       ;; Deny everything except basic process operation
+       "(version 1)(deny default)(allow mach-lookup)(allow signal)(allow sysctl-read)"]
+      [(no-write)
+       "(version 1)(allow default)(deny file-write*)"]
+      [(no-write-except-temporary)
+       ;; Allow writes only under $TMPDIR / /tmp / /private/tmp / /private/var/folders
+       (string-append
+         "(version 1)"
+         "(allow default)"
+         "(deny file-write*)"
+         "(allow file-write* "
+         "(subpath \"/tmp\") "
+         "(subpath \"/private/tmp\") "
+         "(subpath \"/var/folders\") "
+         "(subpath \"/private/var/folders\")"
+         (let ([t (getenv "TMPDIR")])
+           (if (and (string? t) (positive? (string-length t)))
+             (format " (subpath ~s)" t)
+             ""))
+         ")")]
+      [(no-internet)
+       "(version 1)(allow default)(deny network-outbound (remote ip))"]
+      [(no-network)
+       "(version 1)(allow default)(deny network*)"]
       [else (error 'seatbelt-install!
               "unknown named profile; expected pure-computation, no-write, no-write-except-temporary, no-internet, or no-network"
               sym)]))
@@ -116,25 +147,12 @@
     ;; Install a named Seatbelt profile. IRREVERSIBLE.
     ;; profile-sym: one of 'pure-computation, 'no-write,
     ;;   'no-write-except-temporary, 'no-internet, 'no-network
+    ;;
+    ;; Since the kSBXProfile* names are removed in modern macOS, this
+    ;; expands the symbol to an equivalent SBPL string and applies that.
     (unless (macos?)
       (error 'seatbelt-install! "Seatbelt is only available on macOS"))
-    (let* ([profile-name (named-profile-string profile-sym)]
-           [errptr (foreign-alloc 8)])
-      (foreign-set! 'void* errptr 0 0)
-      (dynamic-wind
-        (lambda () (void))
-        (lambda ()
-          (let ([rc (c-sandbox-init profile-name SANDBOX_NAMED errptr)])
-            (when (< rc 0)
-              (let ([errmsg (foreign-ref 'void* errptr 0)])
-                (let ([msg (if (= errmsg 0)
-                             "sandbox_init failed (unknown error)"
-                             (let ([s (foreign-ref 'string errmsg 0)])
-                               (c-sandbox-free-error errmsg)
-                               (format "sandbox_init failed: ~a" s)))])
-                  (error 'seatbelt-install! msg))))))
-        (lambda ()
-          (foreign-free errptr)))))
+    (seatbelt-install-profile! (named-profile-sbpl profile-sym)))
 
   (define (seatbelt-install-profile! sbpl-string)
     ;; Install a custom SBPL profile string. IRREVERSIBLE.
@@ -206,5 +224,189 @@
           "(allow mach-lookup)"
           "(allow signal)"
           "(allow sysctl-read)"))))
+
+  ;; ========== macOS System Paths ==========
+  ;;
+  ;; Paths a Chez Scheme process needs to function on macOS:
+  ;; dyld, system frameworks, TLS roots, DNS, terminal, devices.
+  ;; macOS symlinks /etc, /tmp, /var to /private/etc, /private/tmp,
+  ;; /private/var — we list both forms so realpath resolution works
+  ;; either way.
+
+  (define seatbelt-macos-system-read-paths
+    '(;; System libraries and frameworks
+      "/usr/lib"
+      "/usr/local/lib"
+      "/usr/share"
+      "/System/Library"
+      "/Library/Frameworks"
+      "/Library/Apple"
+      ;; dyld shared cache
+      "/private/var/db/dyld"
+      ;; TLS certificate roots
+      "/etc/ssl"
+      "/private/etc/ssl"
+      "/private/var/db/mds"
+      ;; DNS resolution / hosts
+      "/etc/resolv.conf"
+      "/etc/hosts"
+      "/etc/services"
+      "/private/etc/resolv.conf"
+      "/private/etc/hosts"
+      "/private/etc/services"
+      ;; Terminal
+      "/usr/share/terminfo"
+      ;; Timezone / locale
+      "/etc/localtime"
+      "/private/etc/localtime"
+      "/usr/share/zoneinfo"
+      "/var/db/timezone"
+      "/private/var/db/timezone"
+      ;; Devices
+      "/dev/null"
+      "/dev/zero"
+      "/dev/random"
+      "/dev/urandom"
+      "/dev/tty"
+      "/dev/dtracehelper"))
+
+  (define seatbelt-macos-system-execute-paths
+    '("/usr/bin"
+      "/bin"
+      "/usr/local/bin"
+      "/usr/sbin"
+      "/sbin"
+      "/usr/libexec"
+      ;; Frameworks contain executable Mach-O binaries
+      "/System/Library"
+      "/Library/Frameworks"
+      "/usr/lib"))
+
+  ;; ========== Cage profile builder ==========
+  ;;
+  ;; Build an SBPL profile that mimics Landlock-style path confinement:
+  ;;   - Read+write access to a list of paths (e.g. project root, $TMPDIR)
+  ;;   - Read-only access to a list of paths (e.g. system libs, configs)
+  ;;   - Execute access to a list of paths (e.g. /usr/bin)
+  ;;   - Optional network access
+  ;;
+  ;; macOS Seatbelt always denies by default in this profile, then
+  ;; whitelists specific operations. The result is roughly equivalent
+  ;; to a Landlock ruleset on Linux.
+  ;;
+  ;; Operations needed for any usable Chez Scheme process are always
+  ;; allowed: mach-lookup, signal, sysctl-read, process-fork,
+  ;; ipc-posix-shm*, file-ioctl (terminal). These are not security-
+  ;; relevant on macOS — the relevant restrictions are filesystem and
+  ;; network.
+
+  (define (sbpl-quote-path p)
+    ;; Quote a path for inclusion in SBPL. format ~s gives "..." with
+    ;; escaped backslashes/quotes, which matches SBPL string syntax.
+    (format "~s" p))
+
+  (define (subpath-form p)
+    (string-append "(subpath " (sbpl-quote-path p) ")"))
+
+  (define (literal-form p)
+    (string-append "(literal " (sbpl-quote-path p) ")"))
+
+  (define (path-form p)
+    ;; A directory becomes (subpath ...), anything else (literal ...).
+    ;; subpath also matches the directory itself, so it's a strict
+    ;; superset for directory paths.
+    (if (guard (e [#t #f]) (file-directory? p))
+      (subpath-form p)
+      (literal-form p)))
+
+  (define (paths->sbpl-forms paths)
+    (apply string-append
+      (map (lambda (p) (string-append " " (path-form p))) paths)))
+
+  (define (seatbelt-cage-profile . opts)
+    ;; Build an SBPL profile from path lists.
+    ;;
+    ;; Keywords (any order):
+    ;;   read-write: '("/path" ...)   ;; full read+write+create+delete
+    ;;   read-only:  '("/path" ...)   ;; read access only
+    ;;   execute:    '("/path" ...)   ;; process-exec from these paths
+    ;;   network:    #t | #f          ;; allow outbound/inbound network
+    ;;
+    ;; Returns an SBPL string suitable for seatbelt-install-profile!.
+    (let loop ([rest opts]
+               [rw '()]
+               [ro '()]
+               [exec '()]
+               [network #t])
+      (cond
+        [(null? rest)
+         (build-cage-sbpl rw ro exec network)]
+        [(null? (cdr rest))
+         (error 'seatbelt-cage-profile "keyword missing value" (car rest))]
+        [else
+         (let ([key (cage-key->string (car rest))]
+               [val (cadr rest)]
+               [more (cddr rest)])
+           (cond
+             [(string=? key "read-write")
+              (loop more val ro exec network)]
+             [(string=? key "read-only")
+              (loop more rw val exec network)]
+             [(string=? key "execute")
+              (loop more rw ro val network)]
+             [(string=? key "network")
+              (loop more rw ro exec val)]
+             [else
+              (error 'seatbelt-cage-profile
+                "unknown keyword; expected read-write:, read-only:, execute:, or network:"
+                (car rest))]))])))
+
+  (define (cage-key->string sym)
+    (let ([s (symbol->string sym)])
+      (cond
+        [(and (>= (string-length s) 2)
+              (char=? (string-ref s 0) #\#)
+              (char=? (string-ref s 1) #\:))
+         (substring s 2 (string-length s))]
+        [(and (> (string-length s) 0)
+              (char=? (string-ref s (- (string-length s) 1)) #\:))
+         (substring s 0 (- (string-length s) 1))]
+        [else s])))
+
+  (define (build-cage-sbpl rw-paths ro-paths exec-paths network?)
+    ;; Read access covers: all read-only paths AND all read-write paths
+    ;; (write access without read access is rarely useful, and Chez
+    ;; needs to read its boot files anyway).
+    (let* ([all-readable (append ro-paths rw-paths)]
+           [read-forms  (paths->sbpl-forms all-readable)]
+           [write-forms (paths->sbpl-forms rw-paths)]
+           [exec-forms  (paths->sbpl-forms exec-paths)])
+      (string-append
+        "(version 1)"
+        "(deny default)"
+        ;; Always-allowed operations needed for basic process function.
+        "(allow process-fork)"
+        "(allow signal (target self))"
+        "(allow sysctl-read)"
+        "(allow mach-lookup)"
+        "(allow ipc-posix-shm*)"
+        "(allow file-ioctl)"
+        "(allow file-read-metadata)"
+        ;; Read access
+        (if (null? all-readable)
+          ""
+          (string-append "(allow file-read*" read-forms ")"))
+        ;; Write access (read-write paths only)
+        (if (null? rw-paths)
+          ""
+          (string-append "(allow file-write*" write-forms ")"))
+        ;; Execute access
+        (if (null? exec-paths)
+          ""
+          (string-append "(allow process-exec*" exec-forms ")"))
+        ;; Network
+        (if network?
+          "(allow network*)"
+          ""))))
 
   ) ;; end library

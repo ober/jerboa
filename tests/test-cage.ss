@@ -2,12 +2,15 @@
 (import (std security cage))
 (import (std security landlock))
 (import (std security capsicum))
+(import (std security seatbelt))
 
 ;; fork-process and waitpid for subprocess tests
 (guard (e [#t (void)])
   (load-shared-object "libc.so.7"))
 (guard (e [#t (void)])
   (load-shared-object "libc.so.6"))
+(guard (e [#t (void)])
+  (load-shared-object "libc.dylib"))
 (define fork-process
   (guard (e [#t (lambda () (error 'fork "not available"))])
     (foreign-procedure "fork" () int)))
@@ -231,6 +234,76 @@
 (unless (capsicum-available?)
   (displayln "  [skipped — Capsicum not available]"))
 
+;; ---- macOS Seatbelt cage test ----
+
+(displayln "--- macOS Seatbelt cage ---")
+
+(when (seatbelt-available?)
+  (let ([cage-dir "/tmp/jerboa-cage-test-macos"])
+    (when (file-exists? cage-dir)
+      (system (str "rm -rf " cage-dir)))
+    (mkdir cage-dir)
+    (write-file-string (str cage-dir "/hello.txt") "hello from seatbelt cage")
+
+    (let ([pid (fork-process)])
+      (cond
+        ((= pid 0)
+         (guard (exn
+                  (#t
+                   (display "CHILD ERROR: ")
+                   (display-condition exn)
+                   (newline)
+                   (exit 1)))
+
+           (cage! (make-cage-config
+                    'root: cage-dir
+                    'system-paths: 'auto
+                    'temp-dir: "/tmp"
+                    'network: #f))
+
+           (assert! (cage-active?))
+           (assert! (string? (cage-root)))
+
+           ;; Read inside cage works
+           (let ([content (read-file-string (str cage-dir "/hello.txt"))])
+             (assert! (string=? content "hello from seatbelt cage")))
+
+           ;; Write inside cage works
+           (write-file-string (str cage-dir "/new.txt") "wrote inside")
+           (assert! (string=? (read-file-string (str cage-dir "/new.txt"))
+                              "wrote inside"))
+
+           ;; Write outside cage is blocked. /Users is outside the cage
+           ;; (root is in /tmp, system paths are read-only).
+           (let ([blocked (not #t)])
+             (guard (exn (#t (set! blocked #t)))
+               (write-file-string "/Users/jerboa-cage-escape" "nope"))
+             (assert! blocked))
+
+           ;; Reading non-allowed paths is blocked
+           (let ([blocked (not #t)])
+             (guard (exn (#t (set! blocked #t)))
+               (read-file-string "/etc/master.passwd"))
+             (assert! blocked))
+
+           (displayln "  child seatbelt cage: ok")
+           (exit 0)))
+
+        (else
+         (let-values ([(wpid status) (waitpid pid)])
+           (let ([exit-code (bitwise-arithmetic-shift-right
+                              (bitwise-and status #xFF00) 8)])
+             (if (= exit-code 0)
+               (displayln "  seatbelt cage! fork test: ok")
+               (begin
+                 (displayln (str "  seatbelt cage! fork test: FAILED (exit " exit-code ")"))
+                 (exit 1))))))))
+
+    (system (str "rm -rf " cage-dir))))
+
+(unless (seatbelt-available?)
+  (displayln "  [skipped — Seatbelt not available]"))
+
 ;; ---- Double-cage prevention ----
 
 (displayln "--- double cage prevention ---")
@@ -302,5 +375,38 @@
 
 (unless (capsicum-available?)
   (displayln "  [skipped — Capsicum not available]"))
+
+;; macOS Seatbelt double-cage prevention
+(when (seatbelt-available?)
+  (let ([pid (fork-process)])
+    (cond
+      ((= pid 0)
+       (guard (exn
+                (#t (display "CHILD ERROR: ")
+                    (display-condition exn) (newline)
+                    (exit 1)))
+         (let ([cage-dir "/tmp/jerboa-cage-test2-macos"])
+           (when (file-exists? cage-dir) (system (str "rm -rf " cage-dir)))
+           (mkdir cage-dir)
+           (cage! (make-cage-config 'root: cage-dir 'temp-dir: "/tmp"))
+           (let ([got-error (not #t)])
+             (try
+               (cage! (make-cage-config 'root: cage-dir 'temp-dir: "/tmp"))
+               (catch (e) (set! got-error #t)))
+             (assert! got-error)
+             (displayln "  macOS double cage blocked: ok")
+             (exit 0)))))
+      (else
+       (let-values ([(wpid status) (waitpid pid)])
+         (let ([exit-code (bitwise-arithmetic-shift-right
+                            (bitwise-and status #xFF00) 8)])
+           (if (= exit-code 0)
+             (displayln "  macOS double cage test: ok")
+             (begin
+               (displayln (str "  macOS double cage test: FAILED (exit " exit-code ")"))
+               (exit 1)))))))))
+
+(unless (seatbelt-available?)
+  (displayln "  [skipped — Seatbelt not available]"))
 
 (displayln "=== all cage tests passed ===")

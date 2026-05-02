@@ -58,6 +58,7 @@
   (import (chezscheme)
           (std security landlock)
           (std security capsicum)
+          (std security seatbelt)
           (std error conditions))
 
   ;; ========== libc ==========
@@ -296,6 +297,7 @@
 
     (case *current-platform*
       [(linux)   (cage-linux! cfg)]
+      [(macos)   (cage-macos! cfg)]
       [(openbsd) (cage-openbsd! cfg)]
       [(freebsd) (cage-freebsd! cfg)]
       [else
@@ -365,6 +367,75 @@
                (append sys-ro extra-ro))
           (map (lambda (p) (cons 'execute p))
                (append sys-exec extra-exec))))
+
+      (void)))
+
+  ;; ========== macOS implementation (Seatbelt) ==========
+  ;;
+  ;; macOS has no Landlock, but `sandbox_init(3)` (Seatbelt) provides
+  ;; a similar capability via SBPL profiles. We synthesize a profile
+  ;; from the cage config, then apply it. Seatbelt is irreversible for
+  ;; the process lifetime, just like Landlock.
+  ;;
+  ;; SBPL is more permissive by default than Landlock (it operates at
+  ;; the syscall layer, not vfs). We use `(deny default)` and whitelist
+  ;; only the paths and operations the cage permits.
+
+  ;; macOS-specific system paths (different from Linux — see
+  ;; seatbelt-macos-system-read-paths / seatbelt-macos-system-execute-paths).
+
+  (define (cage-macos! cfg)
+    (unless (seatbelt-available?)
+      (raise (make-cage-error
+               "cage"
+               'platform
+               "Seatbelt (sandbox_init) not available on this system")))
+
+    (let* ([root (resolve-path 'cage! (cage-config-root cfg))]
+           [extra-ro (resolve-paths 'cage! (cage-config-read-only cfg))]
+           [extra-rw (resolve-paths 'cage! (cage-config-read-write cfg))]
+           [extra-exec (resolve-paths 'cage! (cage-config-execute cfg))]
+           [temp (and (cage-config-temp-dir cfg)
+                      (guard (exn [#t #f])
+                        (resolve-path 'cage! (cage-config-temp-dir cfg))))]
+           ;; Build system paths
+           [sys-ro (case (cage-config-system-paths cfg)
+                     [(auto) (existing-paths seatbelt-macos-system-read-paths)]
+                     [(#f)   '()]
+                     [else   (cage-config-system-paths cfg)])]
+           [sys-exec (case (cage-config-system-paths cfg)
+                       [(auto) (existing-paths seatbelt-macos-system-execute-paths)]
+                       [(#f)   '()]
+                       [else   '()])]
+           [rw-paths (append (list root)
+                             (if temp (list temp) '())
+                             extra-rw)]
+           [ro-paths (append sys-ro extra-ro)]
+           [exec-paths (append sys-exec extra-exec)]
+           [profile (seatbelt-cage-profile
+                      'read-write: rw-paths
+                      'read-only:  ro-paths
+                      'execute:    exec-paths
+                      'network:    (and (cage-config-network cfg) #t))])
+
+      ;; Install — IRREVERSIBLE for process lifetime
+      (guard (exn
+               [#t (raise (make-cage-error
+                            "cage"
+                            'platform
+                            (if (message-condition? exn)
+                              (condition-message exn)
+                              "seatbelt-install-profile! failed")))])
+        (seatbelt-install-profile! profile))
+
+      ;; Record state
+      (set! *cage-active* #t)
+      (set! *cage-root-path* root)
+      (set! *cage-all-paths*
+        (append
+          (map (lambda (p) (cons 'read-write p)) rw-paths)
+          (map (lambda (p) (cons 'read-only p)) ro-paths)
+          (map (lambda (p) (cons 'execute p)) exec-paths)))
 
       (void)))
 
